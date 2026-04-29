@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .market_registry import MarketMapping
+from .market_registry import DEFAULT_MARKETS, MarketMapping
 
 
 @dataclass(frozen=True)
@@ -58,67 +58,39 @@ class MarketPlugin:
         }
 
 
+def _plugin_from_market(market: MarketMapping, source_url: str, notes: str) -> MarketPlugin:
+    return MarketPlugin(
+        plugin_id=market.plugin_id or f"ig-{market.market_id.lower()}",
+        market_id=market.market_id,
+        name=market.name,
+        asset_class=market.asset_class,
+        fmp_symbol=market.fmp_symbol,
+        ig_name=market.ig_name,
+        ig_search_terms=tuple(term.strip() for term in market.ig_search_terms.split(",") if term.strip()),
+        backtest_profile=BacktestProfile(market.default_timeframe, market.spread_bps, market.slippage_bps, market.min_backtest_bars),
+        source_url=source_url,
+        notes=notes,
+    )
+
+
+_SOURCE_URLS = {
+    "NAS100": "https://www.ig.com/en/indices/markets-indices/us-tech-100",
+    "US500": "https://www.ig.com/en/indices/markets-indices/us-spx-500",
+    "FTSE100": "https://www.ig.com/uk/indices/markets-indices/ftse-100",
+    "DE40": "https://www.ig.com/uk/indices/markets-indices/germany-40",
+    "QQQ": "https://www.invesco.com/qqq-etf/en/home.html",
+    "SPY": "https://www.ssga.com/us/en/intermediary/etfs/spdr-sp-500-etf-trust-spy",
+    "XAUUSD": "https://www.ig.com/en/commodities/gold-trading",
+}
+
+
 BUILT_IN_MARKET_PLUGINS = [
-    MarketPlugin(
-        plugin_id="ig-us-tech-100",
-        market_id="NAS100",
-        name="Nasdaq 100",
-        asset_class="index",
-        fmp_symbol="^NDX",
-        ig_name="US Tech 100",
-        ig_search_terms=("US Tech 100", "Nasdaq", "NASDAQ 100"),
-        backtest_profile=BacktestProfile("5min", 2.0, 1.0, 750),
-        source_url="https://www.ig.com/en/indices/markets-indices/us-tech-100",
-        notes="IG publicly lists Nasdaq exposure as US Tech 100. If FMP intraday index data is not included in your plan, use the QQQ proxy plugin for research and re-test on IG prices later.",
-    ),
-    MarketPlugin(
-        plugin_id="fmp-qqq-nasdaq-proxy",
-        market_id="QQQ",
-        name="QQQ Nasdaq 100 ETF proxy",
-        asset_class="etf",
-        fmp_symbol="QQQ",
-        ig_name="US Tech 100",
-        ig_search_terms=("US Tech 100", "Nasdaq", "QQQ"),
-        backtest_profile=BacktestProfile("5min", 2.0, 1.0, 750),
-        source_url="https://www.invesco.com/qqq-etf/en/home.html",
-        notes="FMP stock/ETF plans commonly support QQQ intraday data. Use it as a Nasdaq research proxy only; it is not the same instrument as an IG spread-bet EPIC.",
-    ),
-    MarketPlugin(
-        plugin_id="ig-us-500",
-        market_id="US500",
-        name="S&P 500",
-        asset_class="index",
-        fmp_symbol="^GSPC",
-        ig_name="US 500",
-        ig_search_terms=("US 500", "S&P 500", "SPX"),
-        backtest_profile=BacktestProfile("5min", 2.0, 1.0, 750),
-        source_url="https://www.ig.com/en/indices/markets-indices/us-spx-500",
-        notes="IG publicly lists S&P 500 exposure as US 500. If FMP intraday index data is not included in your plan, use the SPY proxy plugin for research and re-test on IG prices later.",
-    ),
-    MarketPlugin(
-        plugin_id="fmp-spy-sp500-proxy",
-        market_id="SPY",
-        name="SPY S&P 500 ETF proxy",
-        asset_class="etf",
-        fmp_symbol="SPY",
-        ig_name="US 500",
-        ig_search_terms=("US 500", "S&P 500", "SPY"),
-        backtest_profile=BacktestProfile("5min", 2.0, 1.0, 750),
-        source_url="https://www.ssga.com/us/en/intermediary/etfs/spdr-sp-500-etf-trust-spy",
-        notes="FMP stock/ETF plans commonly support SPY intraday data. Use it as an S&P 500 research proxy only; it is not the same instrument as an IG spread-bet EPIC.",
-    ),
-    MarketPlugin(
-        plugin_id="ig-spot-gold",
-        market_id="XAUUSD",
-        name="Spot Gold",
-        asset_class="commodity",
-        fmp_symbol="XAUUSD",
-        ig_name="Spot Gold",
-        ig_search_terms=("Spot Gold", "Gold", "XAU/USD"),
-        backtest_profile=BacktestProfile("5min", 3.0, 1.5, 750),
-        source_url="https://www.ig.com/en/commodities/gold-trading",
-        notes="IG publicly offers spot gold and gold futures. Use IG market search to bind the exact spot-gold EPIC available to the account.",
-    ),
+    _plugin_from_market(
+        market,
+        _SOURCE_URLS.get(market.market_id, "https://www.ig.com/uk/markets"),
+        "Core liquid research market. Bind the account-specific IG EPIC, then sync costs before trusting promotion evidence.",
+    )
+    for market in DEFAULT_MARKETS
 ]
 
 
