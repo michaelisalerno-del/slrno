@@ -6,8 +6,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .adaptive_research import AdaptiveSearchConfig, available_research_engines, run_adaptive_search
 from .backtesting import BacktestConfig
 from .config import allowed_origins
+from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile
 from .market_plugins import get_market_plugin, list_market_plugins
 from .market_registry import MarketMapping, MarketRegistry
 from .providers.fmp import FMPProvider
@@ -61,11 +63,19 @@ class MarketPayload(BaseModel):
 
 
 class ResearchRunPayload(BaseModel):
-    market_id: str
+    market_id: str = "NAS100"
+    market_ids: list[str] = Field(default_factory=list)
     start: str
     end: str
     interval: str | None = None
-    engine: str = "probability_stack_v1"
+    engine: str = "adaptive_ig_v1"
+    search_preset: str = "balanced"
+    trading_style: str = "find_anything_robust"
+    objective: str = "balanced"
+    search_budget: int | None = None
+    risk_profile: str = "balanced"
+    strategy_families: list[str] = Field(default_factory=list)
+    product_mode: str = "spread_bet"
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -74,6 +84,10 @@ class ResearchSchedulePayload(BaseModel):
     enabled: bool = True
     market_ids: list[str] = Field(default_factory=list)
     interval: str = "5min"
+
+
+class IGCostSyncPayload(BaseModel):
+    market_ids: list[str] = Field(default_factory=list)
 
 
 @app.get("/health")
@@ -163,46 +177,115 @@ def upsert_market(payload: MarketPayload) -> dict[str, str]:
     return {"status": "saved"}
 
 
-@app.post("/research/runs")
-async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
-    market = markets.get(payload.market_id)
+@app.get("/research/engines")
+def research_engines() -> list[dict[str, object]]:
+    return available_research_engines()
+
+
+@app.post("/ig/markets/sync-costs")
+async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
+    selected = _selected_markets(payload.market_ids)
+    provider = _ig_provider_from_settings()
+    account_currency = "GBP"
+    if provider is not None:
+        try:
+            account_currency = (await provider.account_status()).currency or "GBP"
+        except Exception:
+            provider = None
+    profiles: list[dict[str, object]] = []
+    for market in selected:
+        profile = public_ig_cost_profile(market, account_currency)
+        if provider is not None and market.ig_epic:
+            try:
+                profile = profile_from_ig_market(market, await provider.market_details(market.ig_epic), account_currency)
+            except Exception as exc:
+                fallback = profile.as_dict()
+                fallback["notes"] = list(fallback.get("notes", [])) + [f"IG sync failed: {_public_error(exc)}"]
+                profile = IGCostProfile(**{key: value for key, value in fallback.items() if key in IGCostProfile.__dataclass_fields__})
+        research_store.save_cost_profile(profile)
+        profiles.append(profile.as_dict())
+    return {"status": "synced", "profile_count": len(profiles), "profiles": profiles}
+
+
+@app.get("/ig/markets/{market_id}/cost-profile")
+def get_ig_cost_profile(market_id: str) -> dict[str, object]:
+    market = markets.get(market_id)
     if market is None:
         raise HTTPException(status_code=404, detail="Market not found")
-    if not market.enabled:
-        raise HTTPException(status_code=400, detail="Market is disabled")
-    if payload.engine != "probability_stack_v1":
+    stored = research_store.get_cost_profile(market_id)
+    if stored is not None:
+        return stored
+    profile = public_ig_cost_profile(market)
+    research_store.save_cost_profile(profile)
+    return profile.as_dict()
+
+
+@app.post("/research/runs")
+async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
+    engine_ids = {engine["id"] for engine in available_research_engines()}
+    if payload.engine not in engine_ids:
         raise HTTPException(status_code=400, detail="Unknown research engine")
     api_key = settings.get_secret("fmp", "api_key")
     if api_key is None:
         raise HTTPException(status_code=400, detail="FMP API key is required before launching research")
 
-    interval = payload.interval or market.default_timeframe
+    selected_markets = _selected_markets(payload.market_ids or [payload.market_id])
+    run_market_id = selected_markets[0].market_id if len(selected_markets) == 1 else "MULTI"
     run_id = research_store.create_run(
-        market_id=market.market_id,
-        data_source="fmp",
+        market_id=run_market_id,
+        data_source="fmp_with_ig_cost_model",
         status="running",
         config={
             "start": payload.start,
             "end": payload.end,
-            "interval": interval,
+            "interval": payload.interval,
             "engine": payload.engine,
-            "fmp_symbol": market.fmp_symbol,
+            "market_ids": [market.market_id for market in selected_markets],
+            "search_preset": payload.search_preset,
+            "trading_style": payload.trading_style,
+            "objective": payload.objective,
+            "search_budget": payload.search_budget,
+            "risk_profile": payload.risk_profile,
+            "strategy_families": payload.strategy_families,
+            "product_mode": payload.product_mode,
             "research_only": True,
             "ig_validation_required": True,
         },
     )
+    evaluations = []
     try:
         provider = FMPProvider(api_key)
-        bars = await provider.historical_bars(market.fmp_symbol, interval, payload.start, payload.end)
-        if len(bars) < market.min_backtest_bars:
-            raise ValueError(f"Need at least {market.min_backtest_bars} bars; received {len(bars)}")
-        evaluations = ResearchStack.default().evaluate(
-            bars,
-            BacktestConfig(spread_bps=market.spread_bps, slippage_bps=market.slippage_bps),
-        )
-        for evaluation in evaluations:
-            research_store.save_trial(run_id, evaluation)
-            research_store.save_candidate(run_id, market.market_id, evaluation)
+        for market in selected_markets:
+            if not market.enabled:
+                raise ValueError(f"Market {market.market_id} is disabled")
+            interval = payload.interval or market.default_timeframe
+            bars = await provider.historical_bars(market.fmp_symbol, interval, payload.start, payload.end)
+            if len(bars) < market.min_backtest_bars:
+                raise ValueError(f"{market.market_id}: need at least {market.min_backtest_bars} bars; received {len(bars)}")
+            if payload.engine == "adaptive_ig_v1":
+                cost_profile = _cost_profile_for_market(market)
+                result = run_adaptive_search(
+                    bars,
+                    market.market_id,
+                    interval,
+                    cost_profile,
+                    AdaptiveSearchConfig(
+                        preset=payload.search_preset,
+                        trading_style=payload.trading_style,
+                        objective=payload.objective,
+                        search_budget=payload.search_budget,
+                        risk_profile=payload.risk_profile,
+                        strategy_families=tuple(payload.strategy_families),
+                    ),
+                )
+                market_evaluations = list(result.evaluations)
+            else:
+                cost_profile = _cost_profile_for_market(market)
+                market_evaluations = ResearchStack.default().evaluate(bars, backtest_config_from_profile(cost_profile))
+            for evaluation in market_evaluations:
+                evaluations.append(evaluation)
+                research_store.save_trial(run_id, evaluation)
+                research_store.save_candidate(run_id, market.market_id, evaluation)
         research_store.update_run_status(run_id, "finished")
     except Exception as exc:
         research_store.update_run_status(run_id, "error")
@@ -212,16 +295,44 @@ async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
     return {
         "run_id": run_id,
         "status": "finished",
-        "market_id": market.market_id,
+        "market_id": run_market_id,
         "trial_count": len(evaluations),
         "candidate_count": len(passed),
         "best_score": max((evaluation.robustness_score for evaluation in evaluations), default=0),
+        "pareto": research_store.list_pareto(run_id),
     }
 
 
 @app.get("/research/runs")
 def list_research_runs() -> list[dict[str, object]]:
     return research_store.list_runs()
+
+
+@app.get("/research/runs/{run_id}")
+def get_research_run(run_id: int) -> dict[str, object]:
+    run = research_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return {
+        **run,
+        "trials": research_store.list_trials(run_id)[:25],
+        "candidates": research_store.list_candidates(run_id),
+        "pareto": research_store.list_pareto(run_id),
+    }
+
+
+@app.get("/research/runs/{run_id}/trials")
+def list_research_trials(run_id: int) -> list[dict[str, object]]:
+    if research_store.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return research_store.list_trials(run_id)
+
+
+@app.get("/research/runs/{run_id}/pareto")
+def get_research_pareto(run_id: int) -> list[dict[str, object]]:
+    if research_store.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return research_store.list_pareto(run_id)
 
 
 @app.get("/research/critique")
@@ -255,6 +366,14 @@ def list_research_candidates() -> list[dict[str, object]]:
     return research_store.list_candidates()
 
 
+@app.get("/research/candidates/{candidate_id}")
+def get_research_candidate(candidate_id: int) -> dict[str, object]:
+    candidate = research_store.get_candidate(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Research candidate not found")
+    return candidate
+
+
 @app.post("/research/schedules")
 def save_research_schedule(payload: ResearchSchedulePayload) -> dict[str, object]:
     schedule_id = research_store.save_schedule(
@@ -264,6 +383,37 @@ def save_research_schedule(payload: ResearchSchedulePayload) -> dict[str, object
         {"market_ids": payload.market_ids, "interval": payload.interval, "data_source": "fmp"},
     )
     return {"status": "saved", "schedule_id": schedule_id}
+
+
+def _selected_markets(market_ids: list[str]) -> list[MarketMapping]:
+    selected: list[MarketMapping] = []
+    ids = market_ids or [market.market_id for market in markets.list(enabled_only=True)]
+    for market_id in ids:
+        market = markets.get(market_id)
+        if market is None:
+            raise HTTPException(status_code=404, detail=f"Market {market_id} not found")
+        selected.append(market)
+    return selected
+
+
+def _cost_profile_for_market(market: MarketMapping) -> IGCostProfile:
+    stored = research_store.get_cost_profile(market.market_id)
+    if stored is not None:
+        stored.pop("updated_at", None)
+        return IGCostProfile(**{key: value for key, value in stored.items() if key in IGCostProfile.__dataclass_fields__})
+    profile = public_ig_cost_profile(market)
+    research_store.save_cost_profile(profile)
+    return profile
+
+
+def _ig_provider_from_settings() -> IGDemoProvider | None:
+    api_key = settings.get_secret("ig", "api_key")
+    username = settings.get_secret("ig", "username")
+    password = settings.get_secret("ig", "password")
+    account_id = settings.get_secret("ig", "account_id") or ""
+    if not api_key or not username or not password:
+        return None
+    return IGDemoProvider(api_key, username, password, account_id)
 
 
 def _public_error(exc: Exception) -> str:
