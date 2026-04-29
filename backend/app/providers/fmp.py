@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
+from ..fmp_cache import FMPCache
 from .base import OHLCBar, Quote
 
 
@@ -18,24 +20,29 @@ class FMPProvider:
         "30min": 45,
         "1hour": 90,
     }
+    QUOTE_TTL_SECONDS = 60
+    SEARCH_TTL_SECONDS = 7 * 24 * 60 * 60
+    CLOSED_HISTORY_TTL_SECONDS = 180 * 24 * 60 * 60
+    LIVE_HISTORY_TTL_SECONDS = 15 * 60
 
-    def __init__(self, api_key: str, base_url: str | None = None) -> None:
+    def __init__(self, api_key: str, base_url: str | None = None, cache: FMPCache | None = None, cache_enabled: bool = True) -> None:
         self.api_key = api_key
         self.base_url = (base_url or self.BASE_URL).rstrip("/")
+        self.cache = cache if cache is not None else FMPCache()
+        self.cache_enabled = cache_enabled
 
-    async def quote(self, symbol: str) -> Quote:
-        import httpx
-
-        url = f"{self.base_url}/quote"
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-                response = await client.get(url, params={"symbol": symbol, "apikey": self.api_key})
-                response.raise_for_status()
-                payload = response.json()
-        except httpx.TimeoutException as exc:
-            raise TimeoutError("FMP validation timed out after 10 seconds") from exc
-        except httpx.HTTPStatusError as exc:
-            _raise_status_error(exc, "quote lookup", symbol)
+    async def quote(self, symbol: str, use_cache: bool = True) -> Quote:
+        payload = await self._get_json(
+            "quote",
+            "/quote",
+            {"symbol": symbol},
+            ttl_seconds=self.QUOTE_TTL_SECONDS,
+            use_cache=use_cache,
+            timeout_seconds=10.0,
+            timeout_message="FMP validation timed out after 10 seconds",
+            operation="quote lookup",
+            symbol_for_error=symbol,
+        )
         if not payload:
             raise FMPProviderError(f"FMP returned no quote rows for {symbol}")
         item = payload[0]
@@ -48,8 +55,6 @@ class FMPProvider:
         )
 
     async def historical_bars(self, symbol: str, interval: str, start: str, end: str) -> list[OHLCBar]:
-        import httpx
-
         start_date = _parse_date(start, "start")
         end_date = _parse_date(end, "end")
         if end_date < start_date:
@@ -58,49 +63,39 @@ class FMPProvider:
         chunk_days = self.INTRADAY_CHUNK_DAYS.get(interval)
         ranges = [(start_date, end_date)] if chunk_days is None else _date_chunks(start_date, end_date, chunk_days)
         bars_by_timestamp: dict[datetime, OHLCBar] = {}
-        url = f"{self.base_url}/historical-chart/{interval}"
 
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
-                for chunk_start, chunk_end in ranges:
-                    response = await client.get(
-                        url,
-                        params={
-                            "symbol": symbol,
-                            "from": chunk_start.isoformat(),
-                            "to": chunk_end.isoformat(),
-                            "apikey": self.api_key,
-                        },
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                    if not isinstance(payload, list):
-                        raise FMPProviderError(f"FMP returned an unexpected historical data shape for {symbol}")
-                    for row in payload:
-                        bar = _bar_from_row(symbol, row)
-                        bars_by_timestamp[bar.timestamp] = bar
-        except httpx.TimeoutException as exc:
-            raise TimeoutError("FMP historical data request timed out after 30 seconds") from exc
-        except httpx.HTTPStatusError as exc:
-            _raise_status_error(exc, "historical bars", symbol)
+        for chunk_start, chunk_end in ranges:
+            payload = await self._get_json(
+                "historical_bars",
+                f"/historical-chart/{interval}",
+                {"symbol": symbol, "from": chunk_start.isoformat(), "to": chunk_end.isoformat()},
+                ttl_seconds=_historical_ttl_seconds(chunk_end),
+                use_cache=True,
+                timeout_seconds=30.0,
+                timeout_message="FMP historical data request timed out after 30 seconds",
+                operation="historical bars",
+                symbol_for_error=symbol,
+            )
+            if not isinstance(payload, list):
+                raise FMPProviderError(f"FMP returned an unexpected historical data shape for {symbol}")
+            for row in payload:
+                bar = _bar_from_row(symbol, row)
+                bars_by_timestamp[bar.timestamp] = bar
 
         return sorted(bars_by_timestamp.values(), key=lambda bar: bar.timestamp)
 
     async def search(self, query: str) -> list[dict[str, str]]:
-        import httpx
-
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-                response = await client.get(
-                    f"{self.base_url}/search-symbol",
-                    params={"query": query, "apikey": self.api_key},
-                )
-                response.raise_for_status()
-                payload = response.json()
-        except httpx.TimeoutException as exc:
-            raise TimeoutError("FMP symbol search timed out after 10 seconds") from exc
-        except httpx.HTTPStatusError as exc:
-            _raise_status_error(exc, "symbol search", query)
+        payload = await self._get_json(
+            "symbol_search",
+            "/search-symbol",
+            {"query": query},
+            ttl_seconds=self.SEARCH_TTL_SECONDS,
+            use_cache=True,
+            timeout_seconds=10.0,
+            timeout_message="FMP symbol search timed out after 10 seconds",
+            operation="symbol search",
+            symbol_for_error=query,
+        )
         return [
             {
                 "symbol": str(item.get("symbol", "")),
@@ -111,8 +106,50 @@ class FMPProvider:
         ]
 
     async def validate(self) -> bool:
-        await self.quote("AAPL")
+        await self.quote("AAPL", use_cache=False)
         return True
+
+    async def _get_json(
+        self,
+        namespace: str,
+        endpoint: str,
+        params: dict[str, object],
+        ttl_seconds: int,
+        use_cache: bool,
+        timeout_seconds: float,
+        timeout_message: str,
+        operation: str,
+        symbol_for_error: str,
+    ) -> Any:
+        import httpx
+
+        if self.cache_enabled and use_cache:
+            cached = self.cache.get_json(namespace, self.base_url + endpoint, params)
+            if cached is not None:
+                return cached
+
+        request_params = {**params, "apikey": self.api_key}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=5.0)) as client:
+                response = await client.get(f"{self.base_url}{endpoint}", params=request_params)
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.TimeoutException as exc:
+            if self.cache_enabled and use_cache:
+                stale = self.cache.get_json(namespace, self.base_url + endpoint, params, allow_stale=True)
+                if stale is not None:
+                    return stale
+            raise TimeoutError(timeout_message) from exc
+        except httpx.HTTPStatusError as exc:
+            if self.cache_enabled and use_cache:
+                stale = self.cache.get_json(namespace, self.base_url + endpoint, params, allow_stale=True)
+                if stale is not None:
+                    return stale
+            _raise_status_error(exc, operation, symbol_for_error)
+
+        if self.cache_enabled and use_cache:
+            self.cache.set_json(namespace, self.base_url + endpoint, params, payload, ttl_seconds)
+        return payload
 
 
 def _bar_from_row(symbol: str, row: dict[str, object]) -> OHLCBar:
@@ -142,6 +179,13 @@ def _parse_date(value: str, label: str) -> date:
         return date.fromisoformat(value[:10])
     except ValueError as exc:
         raise FMPProviderError(f"Invalid {label} date {value!r}; expected YYYY-MM-DD") from exc
+
+
+def _historical_ttl_seconds(chunk_end: date) -> int:
+    today = datetime.now(UTC).date()
+    if chunk_end < today:
+        return FMPProvider.CLOSED_HISTORY_TTL_SECONDS
+    return FMPProvider.LIVE_HISTORY_TTL_SECONDS
 
 
 def _raise_status_error(exc: object, operation: str, symbol: str) -> None:
