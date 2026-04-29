@@ -6,10 +6,18 @@ from .base import AccountStatus, PaperOrder, Position
 class IGDemoProvider:
     DEMO_URL = "https://demo-api.ig.com/gateway/deal"
 
-    def __init__(self, api_key: str, username: str, password: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        username: str,
+        password: str,
+        account_id: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         self.api_key = api_key
         self.username = username
         self.password = password
+        self.account_id = (account_id or "").strip()
         self.base_url = (base_url or self.DEMO_URL).rstrip("/")
         self._headers: dict[str, str] | None = None
 
@@ -18,37 +26,66 @@ class IGDemoProvider:
 
         headers = {
             "X-IG-API-KEY": self.api_key,
-            "Version": "2",
+            "Version": "3",
             "Content-Type": "application/json",
             "Accept": "application/json; charset=UTF-8",
         }
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"{self.base_url}/session",
-                headers=headers,
-                json={"identifier": self.username, "password": self.password},
-            )
-            response.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.post(
+                    f"{self.base_url}/session",
+                    headers=headers,
+                    json={"identifier": self.username, "password": self.password},
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("IG demo validation timed out after 10 seconds") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(_ig_error_message(exc.response, "IG login failed")) from exc
+
+        payload = response.json()
+        oauth = payload.get("oauthToken") or {}
+        access_token = str(oauth.get("access_token") or "")
+        active_account_id = str(payload.get("accountId") or "")
+        selected_account_id = self.account_id or active_account_id
+        if not access_token:
+            raise ValueError("IG login succeeded but no OAuth access token was returned")
+        if not selected_account_id:
+            raise ValueError("IG login succeeded but no account id was returned; enter your IG account code manually")
+
+        self.account_id = selected_account_id
         self._headers = {
-            **headers,
-            "CST": response.headers.get("CST", ""),
-            "X-SECURITY-TOKEN": response.headers.get("X-SECURITY-TOKEN", ""),
+            "X-IG-API-KEY": self.api_key,
+            "Authorization": f"Bearer {access_token}",
+            "IG-ACCOUNT-ID": selected_account_id,
+            "Content-Type": "application/json",
+            "Accept": "application/json; charset=UTF-8",
         }
 
     async def account_status(self) -> AccountStatus:
         import httpx
 
         headers = await self._authenticated_headers()
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(f"{self.base_url}/accounts", headers=headers)
-            response.raise_for_status()
-            payload = response.json()
-        account = (payload.get("accounts") or [{}])[0]
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.get(f"{self.base_url}/accounts", headers={**headers, "Version": "1"})
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("IG accounts validation timed out after 10 seconds") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(_ig_error_message(exc.response, "IG account validation failed")) from exc
+
+        accounts = payload.get("accounts") or []
+        account = _select_account(accounts, self.account_id)
+        if account is None:
+            available = ", ".join(str(item.get("accountId", "")) for item in accounts if item.get("accountId"))
+            raise ValueError(f"IG account code '{self.account_id}' was not found. Available accounts: {available or 'none returned'}")
         balance = account.get("balance") or {}
         return AccountStatus(
             provider="ig",
-            account_id=str(account.get("accountId", "")),
-            currency=str(account.get("currency", "")),
+            account_id=str(account.get("accountId", self.account_id)),
+            currency=str(account.get("currency") or account.get("currencyIsoCode") or ""),
             available=_optional_float(balance.get("available")),
             mode="demo",
         )
@@ -57,8 +94,8 @@ class IGDemoProvider:
         import httpx
 
         headers = await self._authenticated_headers()
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(f"{self.base_url}/markets", headers=headers, params={"searchTerm": query})
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            response = await client.get(f"{self.base_url}/markets", headers={**headers, "Version": "1"}, params={"searchTerm": query})
             response.raise_for_status()
             payload = response.json()
         return [
@@ -74,8 +111,8 @@ class IGDemoProvider:
         import httpx
 
         headers = await self._authenticated_headers()
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(f"{self.base_url}/positions", headers=headers)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            response = await client.get(f"{self.base_url}/positions", headers={**headers, "Version": "2"})
             response.raise_for_status()
             payload = response.json()
         positions: list[Position] = []
@@ -127,6 +164,28 @@ class PaperBrokerProvider:
         )
         self._positions.append(position)
         return position
+
+
+def _select_account(accounts: list[dict[str, object]], account_id: str) -> dict[str, object] | None:
+    if not accounts:
+        return None
+    if account_id:
+        for account in accounts:
+            if str(account.get("accountId", "")) == account_id:
+                return account
+        return None
+    return accounts[0]
+
+
+def _ig_error_message(response: object, fallback: str) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    error = payload.get("errorCode") or payload.get("error") or payload.get("message")
+    if error:
+        return f"{fallback}: {error}"
+    return f"{fallback}: HTTP {getattr(response, 'status_code', 'unknown')}"
 
 
 def _optional_float(value: object) -> float | None:

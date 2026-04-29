@@ -38,6 +38,7 @@ class IGSettings(BaseModel):
     api_key: str = Field(min_length=1)
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
+    account_id: str = ""
     environment: str = "demo"
 
 
@@ -102,14 +103,18 @@ async def save_ig(payload: IGSettings) -> dict[str, str]:
     settings.set_secret("ig", "api_key", payload.api_key)
     settings.set_secret("ig", "username", payload.username)
     settings.set_secret("ig", "password", payload.password)
-    provider = IGDemoProvider(payload.api_key, payload.username, payload.password)
+    if payload.account_id.strip():
+        settings.set_secret("ig", "account_id", payload.account_id.strip())
+    provider = IGDemoProvider(payload.api_key, payload.username, payload.password, payload.account_id)
     try:
-        await provider.account_status()
+        account = await provider.account_status()
     except Exception as exc:
         settings.set_status("ig", "error", str(exc))
         raise HTTPException(status_code=400, detail=f"IG validation failed: {exc}") from exc
+    if account.account_id:
+        settings.set_secret("ig", "account_id", account.account_id)
     settings.set_status("ig", "connected")
-    return {"status": "connected", "environment": "demo"}
+    return {"status": "connected", "environment": "demo", "account_id": account.account_id}
 
 
 @app.get("/markets")

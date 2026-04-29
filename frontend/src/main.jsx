@@ -26,7 +26,7 @@ function App() {
   const [critique, setCritique] = React.useState(null);
   const [message, setMessage] = React.useState("");
   const [fmpKey, setFmpKey] = React.useState("");
-  const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "" });
+  const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "", accountId: "" });
   const [market, setMarket] = React.useState({
     market_id: "GBPUSD",
     name: "GBP/USD",
@@ -72,19 +72,27 @@ function App() {
   async function submitFmp(event) {
     event.preventDefault();
     setMessage("Validating FMP...");
-    await saveFmp(fmpKey);
-    setFmpKey("");
-    setMessage("FMP connected.");
-    await refresh();
+    try {
+      await saveFmp(fmpKey);
+      setFmpKey("");
+      setMessage("FMP connected.");
+      await refresh();
+    } catch (error) {
+      setMessage(error.message);
+    }
   }
 
   async function submitIg(event) {
     event.preventDefault();
     setMessage("Validating IG demo...");
-    await saveIg(ig);
-    setIg({ apiKey: "", username: "", password: "" });
-    setMessage("IG demo connected.");
-    await refresh();
+    try {
+      const result = await saveIg(ig);
+      setIg({ apiKey: "", username: "", password: "", accountId: "" });
+      setMessage(`IG demo connected${result.account_id ? `: ${result.account_id}` : "."}`);
+      await refresh();
+    } catch (error) {
+      setMessage(error.message);
+    }
   }
 
   async function submitMarket(event) {
@@ -149,6 +157,8 @@ function App() {
             <input value={ig.username} onChange={(event) => setIg({ ...ig, username: event.target.value })} required />
             <label>IG password</label>
             <input value={ig.password} onChange={(event) => setIg({ ...ig, password: event.target.value })} type="password" required />
+            <label>IG account code</label>
+            <input value={ig.accountId} onChange={(event) => setIg({ ...ig, accountId: event.target.value })} placeholder="Optional, e.g. ABC12" />
             <button>Validate IG demo</button>
           </form>
         </Panel>

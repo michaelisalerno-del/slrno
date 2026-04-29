@@ -17,10 +17,13 @@ class FMPProvider:
         import httpx
 
         url = f"{self.base_url}/quote"
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(url, params={"symbol": symbol, "apikey": self.api_key})
-            response.raise_for_status()
-            payload = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.get(url, params={"symbol": symbol, "apikey": self.api_key})
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("FMP validation timed out after 10 seconds") from exc
         if not payload:
             raise ValueError(f"No quote returned for {symbol}")
         item = payload[0]
@@ -37,7 +40,7 @@ class FMPProvider:
 
         encoded = quote_plus(symbol)
         url = f"{self.base_url}/historical-chart/{interval}/{encoded}"
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
             response = await client.get(
                 url,
                 params={"from": start, "to": end, "apikey": self.api_key},
@@ -61,7 +64,7 @@ class FMPProvider:
     async def search(self, query: str) -> list[dict[str, str]]:
         import httpx
 
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
             response = await client.get(
                 f"{self.base_url}/search-symbol",
                 params={"query": query, "apikey": self.api_key},

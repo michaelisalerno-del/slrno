@@ -36,6 +36,7 @@ export function saveIg(values) {
       api_key: values.apiKey,
       username: values.username,
       password: values.password,
+      account_id: values.accountId,
       environment: "demo",
     }),
   });
