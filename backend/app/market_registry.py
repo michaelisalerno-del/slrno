@@ -76,8 +76,41 @@ class MarketRegistry:
             conn.execute(f"ALTER TABLE markets ADD COLUMN {name} {definition}")
 
     def seed_defaults(self) -> None:
-        for market in DEFAULT_MARKETS:
-            self.upsert(market)
+        with self._connect() as conn:
+            for market in DEFAULT_MARKETS:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO markets(
+                      market_id, name, asset_class, fmp_symbol, ig_epic, enabled,
+                      plugin_id, ig_name, ig_search_terms, default_timeframe,
+                      spread_bps, slippage_bps, min_backtest_bars
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        market.market_id,
+                        market.name,
+                        market.asset_class,
+                        market.fmp_symbol,
+                        market.ig_epic,
+                        int(market.enabled),
+                        market.plugin_id,
+                        market.ig_name,
+                        market.ig_search_terms,
+                        market.default_timeframe,
+                        market.spread_bps,
+                        market.slippage_bps,
+                        market.min_backtest_bars,
+                    ),
+                )
+            conn.execute(
+                """
+                UPDATE markets
+                SET default_timeframe = '5min'
+                WHERE market_id IN ('NAS100', 'US500', 'XAUUSD')
+                  AND default_timeframe = '1h'
+                """
+            )
 
     def upsert(self, market: MarketMapping) -> None:
         with self._connect() as conn:
