@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import app_home
+from .ig_costs import IGCostProfile
 from .research_lab import CandidateEvaluation
 
 
@@ -51,6 +52,13 @@ class ResearchStore:
                 )
                 """
             )
+            self._add_column(conn, "strategy_trials", "strategy_family", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "strategy_trials", "style", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "strategy_trials", "parameters_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._add_column(conn, "strategy_trials", "backtest_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._add_column(conn, "strategy_trials", "folds_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._add_column(conn, "strategy_trials", "costs_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._add_column(conn, "strategy_trials", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS candidates (
@@ -68,6 +76,15 @@ class ResearchStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ig_cost_profiles (
+                  market_id TEXT PRIMARY KEY,
+                  updated_at TEXT NOT NULL,
+                  profile_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS research_schedules (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   name TEXT NOT NULL,
@@ -77,6 +94,11 @@ class ResearchStore:
                 )
                 """
             )
+
+    def _add_column(self, conn: sqlite3.Connection, table: str, name: str, definition: str) -> None:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if name not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def create_run(self, market_id: str, config: dict[str, object], data_source: str = "fmp", status: str = "created") -> int:
         with self._connect() as conn:
@@ -94,11 +116,29 @@ class ResearchStore:
             conn.execute("UPDATE research_runs SET status = ? WHERE id = ?", (status, run_id))
 
     def save_trial(self, run_id: int, evaluation: CandidateEvaluation) -> None:
+        parameters = dict(evaluation.candidate.parameters)
+        backtest = _compact_backtest(asdict(evaluation.backtest))
+        folds = [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results]
+        costs = {
+            "cost_confidence": evaluation.backtest.cost_confidence,
+            "gross_profit": evaluation.backtest.gross_profit,
+            "spread_cost": evaluation.backtest.spread_cost,
+            "slippage_cost": evaluation.backtest.slippage_cost,
+            "funding_cost": evaluation.backtest.funding_cost,
+            "fx_cost": evaluation.backtest.fx_cost,
+            "guaranteed_stop_cost": evaluation.backtest.guaranteed_stop_cost,
+            "total_cost": evaluation.backtest.total_cost,
+            "stress_net_profit": parameters.get("stress_net_profit"),
+            "stress_sharpe": parameters.get("stress_sharpe"),
+        }
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO strategy_trials(run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO strategy_trials(
+                  run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
+                  strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -107,6 +147,13 @@ class ResearchStore:
                     evaluation.robustness_score,
                     json.dumps(asdict(evaluation.metrics), sort_keys=True),
                     json.dumps(list(evaluation.warnings), sort_keys=True),
+                    str(parameters.get("family", "")),
+                    str(parameters.get("style", "")),
+                    json.dumps(parameters, sort_keys=True),
+                    json.dumps(backtest, sort_keys=True),
+                    json.dumps(folds, sort_keys=True),
+                    json.dumps(costs, sort_keys=True),
+                    json.dumps(list(evaluation.candidate.module_stack), sort_keys=True),
                 ),
             )
 
@@ -130,13 +177,40 @@ class ResearchStore:
                 ),
             )
 
+    def save_cost_profile(self, profile: IGCostProfile | dict[str, object]) -> None:
+        payload = profile.as_dict() if isinstance(profile, IGCostProfile) else dict(profile)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ig_cost_profiles(market_id, updated_at, profile_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(market_id) DO UPDATE SET
+                  updated_at = excluded.updated_at,
+                  profile_json = excluded.profile_json
+                """,
+                (str(payload["market_id"]), _now(), json.dumps(payload, sort_keys=True)),
+            )
+
+    def get_cost_profile(self, market_id: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT profile_json, updated_at FROM ig_cost_profiles WHERE market_id = ?",
+                (market_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row[0])
+        payload["updated_at"] = row[1]
+        return payload
+
     def list_runs(self) -> list[dict[str, object]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT run.id, run.created_at, run.status, run.market_id, run.data_source,
                        COUNT(trial.id) AS trial_count,
-                       COALESCE(SUM(trial.passed), 0) AS passed_count
+                       COALESCE(SUM(trial.passed), 0) AS passed_count,
+                       MAX(trial.robustness_score) AS best_score
                 FROM research_runs run
                 LEFT JOIN strategy_trials trial ON trial.run_id = run.id
                 GROUP BY run.id
@@ -152,6 +226,7 @@ class ResearchStore:
                 "data_source": row[4],
                 "trial_count": row[5],
                 "passed_count": row[6],
+                "best_score": row[7] or 0,
             }
             for row in rows
         ]
@@ -163,7 +238,8 @@ class ResearchStore:
                 SELECT run.id, run.created_at, run.status, run.market_id, run.data_source,
                        run.config_json,
                        COUNT(trial.id) AS trial_count,
-                       COALESCE(SUM(trial.passed), 0) AS passed_count
+                       COALESCE(SUM(trial.passed), 0) AS passed_count,
+                       MAX(trial.robustness_score) AS best_score
                 FROM research_runs run
                 LEFT JOIN strategy_trials trial ON trial.run_id = run.id
                 WHERE run.id = ?
@@ -182,18 +258,20 @@ class ResearchStore:
             "config": json.loads(row[5]),
             "trial_count": row[6],
             "passed_count": row[7],
+            "best_score": row[8] or 0,
         }
 
     def list_trials(self, run_id: int | None = None) -> list[dict[str, object]]:
         query = """
-            SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json
+            SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
+                   strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json
             FROM strategy_trials
         """
         params: tuple[object, ...] = ()
         if run_id is not None:
             query += " WHERE run_id = ?"
             params = (run_id,)
-        query += " ORDER BY id"
+        query += " ORDER BY robustness_score DESC, id"
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [
@@ -205,9 +283,52 @@ class ResearchStore:
                 "robustness_score": row[4],
                 "metrics": json.loads(row[5]),
                 "warnings": json.loads(row[6]),
+                "strategy_family": row[7],
+                "style": row[8],
+                "parameters": json.loads(row[9]),
+                "backtest": json.loads(row[10]),
+                "folds": json.loads(row[11]),
+                "costs": json.loads(row[12]),
+                "tags": json.loads(row[13]),
             }
             for row in rows
         ]
+
+    def list_pareto(self, run_id: int) -> list[dict[str, object]]:
+        trials = self.list_trials(run_id)
+        if not trials:
+            return []
+        choices = [
+            ("best_balanced", max(trials, key=lambda item: float(item["robustness_score"]))),
+            ("highest_sharpe", max(trials, key=lambda item: float(item["backtest"].get("sharpe") or 0))),
+            ("highest_profit", max(trials, key=lambda item: float(item["backtest"].get("net_profit") or 0))),
+        ]
+        seen: set[int] = set()
+        output: list[dict[str, object]] = []
+        for kind, trial in choices:
+            if int(trial["id"]) in seen:
+                continue
+            seen.add(int(trial["id"]))
+            backtest = trial["backtest"]
+            output.append(
+                {
+                    "kind": kind,
+                    "trial_id": trial["id"],
+                    "strategy_name": trial["strategy_name"],
+                    "strategy_family": trial["strategy_family"],
+                    "style": trial["style"],
+                    "robustness_score": trial["robustness_score"],
+                    "sharpe": backtest.get("sharpe", 0),
+                    "net_profit": backtest.get("net_profit", 0),
+                    "gross_profit": backtest.get("gross_profit", 0),
+                    "total_cost": backtest.get("total_cost", 0),
+                    "max_drawdown": backtest.get("max_drawdown", 0),
+                    "trade_count": backtest.get("trade_count", 0),
+                    "warnings": trial["warnings"],
+                    "settings": trial["parameters"],
+                }
+            )
+        return output
 
     def list_candidates(self, run_id: int | None = None) -> list[dict[str, object]]:
         params: tuple[object, ...] = ()
@@ -237,6 +358,28 @@ class ResearchStore:
             for row in rows
         ]
 
+    def get_candidate(self, candidate_id: int) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at
+                FROM candidates WHERE id = ?
+                """,
+                (candidate_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "run_id": row[1],
+            "strategy_name": row[2],
+            "market_id": row[3],
+            "robustness_score": row[4],
+            "research_only": bool(row[5]),
+            "audit": json.loads(row[6]),
+            "created_at": row[7],
+        }
+
     def save_schedule(self, name: str, cadence: str, enabled: bool, config: dict[str, object]) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -253,11 +396,20 @@ def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
     return {
         "candidate": asdict(evaluation.candidate),
         "metrics": asdict(evaluation.metrics),
-        "backtest": asdict(evaluation.backtest),
-        "fold_results": [asdict(fold) for fold in evaluation.fold_results],
+        "backtest": _compact_backtest(asdict(evaluation.backtest)),
+        "fold_results": [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results],
         "warnings": list(evaluation.warnings),
         "research_only": evaluation.research_only,
     }
+
+
+def _compact_backtest(backtest: dict[str, object]) -> dict[str, object]:
+    for key in ("equity_curve", "drawdown_curve"):
+        values = list(backtest.get(key) or [])
+        if len(values) > 120:
+            step = max(1, len(values) // 120)
+            backtest[key] = values[::step][:120]
+    return backtest
 
 
 def _now() -> str:
