@@ -1,12 +1,25 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, BarChart3, Database, KeyRound, Plug, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import {
+  Activity,
+  BarChart3,
+  Database,
+  KeyRound,
+  Plug,
+  RefreshCw,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
+} from "lucide-react";
 import {
   createResearchRun,
+  getIgCostProfile,
   getMarketPlugins,
   getMarkets,
   getResearchCandidates,
   getResearchCritique,
+  getResearchEngines,
+  getResearchRun,
   getResearchRuns,
   getStatus,
   installMarketPlugin,
@@ -14,10 +27,16 @@ import {
   saveIg,
   saveMarket,
   saveResearchSchedule,
+  syncIgCosts,
 } from "./api";
 import "./styles.css";
 
-const RESEARCH_ENGINES = [
+const FALLBACK_ENGINES = [
+  {
+    id: "adaptive_ig_v1",
+    label: "Adaptive IG-aware search",
+    description: "Searches trading styles and risk settings after IG-style costs.",
+  },
   {
     id: "probability_stack_v1",
     label: "Probability stack v1",
@@ -32,13 +51,36 @@ const CANDLE_INTERVALS = [
   { value: "1hour", label: "1 hour" },
 ];
 
+const SEARCH_PRESETS = [
+  { id: "quick", label: "Quick", budget: 18 },
+  { id: "balanced", label: "Balanced", budget: 54 },
+  { id: "deep", label: "Deep", budget: 120 },
+];
+
+const STYLE_OPTIONS = [
+  { id: "find_anything_robust", label: "Find anything robust" },
+  { id: "intraday_only", label: "Intraday only" },
+  { id: "swing_trades", label: "Swing trades" },
+  { id: "lower_drawdown", label: "Lower drawdown" },
+  { id: "higher_profit", label: "Higher profit" },
+];
+
+const OBJECTIVES = [
+  { id: "balanced", label: "Balanced" },
+  { id: "sharpe_first", label: "Sharpe first" },
+  { id: "profit_first", label: "Profit first" },
+];
+
 function App() {
   const [status, setStatus] = React.useState([]);
   const [markets, setMarkets] = React.useState([]);
   const [plugins, setPlugins] = React.useState([]);
+  const [engines, setEngines] = React.useState(FALLBACK_ENGINES);
   const [researchRuns, setResearchRuns] = React.useState([]);
   const [candidates, setCandidates] = React.useState([]);
   const [critique, setCritique] = React.useState(null);
+  const [runDetail, setRunDetail] = React.useState(null);
+  const [costProfiles, setCostProfiles] = React.useState({});
   const [message, setMessage] = React.useState("");
   const [fmpKey, setFmpKey] = React.useState("");
   const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "", accountId: "" });
@@ -48,33 +90,43 @@ function App() {
     asset_class: "forex",
     fmp_symbol: "GBPUSD",
     ig_epic: "",
-    ig_name: "US Tech 100",
-    ig_search_terms: "US Tech 100,Nasdaq,NASDAQ 100",
+    ig_name: "GBP/USD",
+    ig_search_terms: "GBP/USD,GBPUSD",
     default_timeframe: "5min",
-    spread_bps: 2,
-    slippage_bps: 1,
+    spread_bps: 1.4,
+    slippage_bps: 0.9,
     min_backtest_bars: 750,
     enabled: true,
   });
+  const [activeTab, setActiveTab] = React.useState("builder");
+  const [activeMarketIds, setActiveMarketIds] = React.useState(["NAS100"]);
   const [researchRun, setResearchRun] = React.useState({
     market_id: "NAS100",
-    engine: "probability_stack_v1",
-    start: "2024-01-01",
-    end: "2026-01-01",
+    engine: "adaptive_ig_v1",
+    start: "2025-01-01",
+    end: "2026-04-01",
     interval: "5min",
+    search_preset: "balanced",
+    trading_style: "find_anything_robust",
+    objective: "balanced",
+    search_budget: "",
+    risk_profile: "balanced",
   });
-  const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready to run." });
+  const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
 
   const fmpStatus = providerStatus(status, "fmp");
   const igStatus = providerStatus(status, "ig");
-  const selectedResearchMarket = markets.find((item) => item.market_id === researchRun.market_id);
-  const selectedEngine = RESEARCH_ENGINES.find((engine) => engine.id === researchRun.engine) ?? RESEARCH_ENGINES[0];
+  const enabledMarkets = markets.filter((item) => item.enabled);
+  const selectedMarkets = enabledMarkets.filter((item) => activeMarketIds.includes(item.market_id));
+  const selectedEngine = engines.find((engine) => engine.id === researchRun.engine) ?? engines[0] ?? FALLBACK_ENGINES[0];
+  const selectedPreset = SEARCH_PRESETS.find((preset) => preset.id === researchRun.search_preset) ?? SEARCH_PRESETS[1];
 
   const refresh = React.useCallback(async () => {
-    const [nextStatus, nextMarkets, nextPlugins, nextRuns, nextCandidates, nextCritique] = await Promise.all([
+    const [nextStatus, nextMarkets, nextPlugins, nextEngines, nextRuns, nextCandidates, nextCritique] = await Promise.all([
       getStatus(),
       getMarkets(),
       getMarketPlugins(),
+      getResearchEngines().catch(() => FALLBACK_ENGINES),
       getResearchRuns(),
       getResearchCandidates(),
       getResearchCritique(),
@@ -82,6 +134,7 @@ function App() {
     setStatus(nextStatus);
     setMarkets(nextMarkets);
     setPlugins(nextPlugins);
+    setEngines(nextEngines.length ? nextEngines : FALLBACK_ENGINES);
     setResearchRuns(nextRuns);
     setCandidates(nextCandidates);
     setCritique(nextCritique);
@@ -92,15 +145,16 @@ function App() {
   }, [refresh]);
 
   React.useEffect(() => {
-    if (!selectedResearchMarket && markets.length > 0) {
-      const firstEnabled = markets.find((item) => item.enabled) ?? markets[0];
-      setResearchRun((current) => ({
-        ...current,
-        market_id: firstEnabled.market_id,
-        interval: normalizeInterval(firstEnabled.default_timeframe),
-      }));
+    if (enabledMarkets.length > 0 && activeMarketIds.length === 0) {
+      setActiveMarketIds([enabledMarkets[0].market_id]);
     }
-  }, [markets, selectedResearchMarket]);
+  }, [enabledMarkets, activeMarketIds.length]);
+
+  React.useEffect(() => {
+    if (activeMarketIds.length > 0) {
+      setResearchRun((current) => ({ ...current, market_id: activeMarketIds[0] }));
+    }
+  }, [activeMarketIds]);
 
   async function submitFmp(event) {
     event.preventDefault();
@@ -143,20 +197,48 @@ function App() {
     await refresh();
   }
 
+  async function syncCosts() {
+    const market_ids = activeMarketIds.length ? activeMarketIds : enabledMarkets.map((item) => item.market_id);
+    setMessage("Syncing IG cost profiles...");
+    const result = await syncIgCosts({ market_ids });
+    const next = { ...costProfiles };
+    for (const profile of result.profiles) {
+      next[profile.market_id] = profile;
+    }
+    setCostProfiles(next);
+    setMessage(`Synced ${result.profile_count} IG cost profiles.`);
+  }
+
+  async function loadCostProfile(marketId) {
+    const profile = await getIgCostProfile(marketId);
+    setCostProfiles((current) => ({ ...current, [marketId]: profile }));
+  }
+
   async function submitResearchRun(event) {
     event.preventDefault();
-    setMessage("Launching FMP-first research run...");
+    const market_ids = activeMarketIds.length ? activeMarketIds : [researchRun.market_id];
+    const budget = researchRun.search_budget === "" ? selectedPreset.budget : Number(researchRun.search_budget);
+    setMessage("Launching adaptive IG-aware search...");
     setResearchState({
       status: "running",
-      detail: `${selectedEngine.label} on ${researchRun.market_id} ${timeframeLabel(researchRun.interval)} candles.`,
+      detail: `${selectedEngine.label} across ${market_ids.length} market${market_ids.length === 1 ? "" : "s"}.`,
     });
     try {
-      const result = await createResearchRun(researchRun);
+      const result = await createResearchRun({
+        ...researchRun,
+        market_id: market_ids[0],
+        market_ids,
+        search_budget: budget,
+        product_mode: "spread_bet",
+      });
+      const detail = await getResearchRun(result.run_id);
+      setRunDetail(detail);
+      setActiveTab("results");
       setResearchState({
         status: "finished",
-        detail: `Run ${result.run_id}: ${result.trial_count} trials, ${result.candidate_count} candidates, best score ${result.best_score}.`,
+        detail: `Run ${result.run_id}: ${result.trial_count} trials, ${result.candidate_count} research candidates, best score ${round(result.best_score)}.`,
       });
-      setMessage(`Research run ${result.run_id} finished: ${result.trial_count} trials, ${result.candidate_count} candidates.`);
+      setMessage(`Run ${result.run_id} finished after IG-style costs.`);
       await refresh();
     } catch (error) {
       setResearchState({ status: "error", detail: error.message });
@@ -166,15 +248,25 @@ function App() {
   }
 
   async function scheduleResearch() {
-    const enabledMarkets = markets.filter((item) => item.enabled).map((item) => item.market_id);
+    const enabledIds = enabledMarkets.map((item) => item.market_id);
     const result = await saveResearchSchedule({
-      name: "Nightly FMP research",
+      name: "Nightly adaptive IG research",
       cadence: "nightly",
       enabled: true,
-      market_ids: enabledMarkets,
+      market_ids: enabledIds,
       interval: researchRun.interval,
     });
     setMessage(`Research schedule ${result.schedule_id} saved.`);
+  }
+
+  function toggleMarket(marketId) {
+    setActiveMarketIds((current) => {
+      if (current.includes(marketId)) {
+        return current.filter((item) => item !== marketId);
+      }
+      return [...current, marketId];
+    });
+    loadCostProfile(marketId).catch(() => undefined);
   }
 
   return (
@@ -182,88 +274,165 @@ function App() {
       <header className="topbar">
         <div>
           <h1>slrno</h1>
-          <p>FMP data, IG demo connectivity, paper execution, and backtesting research.</p>
+          <p>Adaptive research, IG-aware costs, and paper-only validation.</p>
         </div>
         <div className="mode"><ShieldCheck size={18} /> Demo / paper only</div>
       </header>
 
       {message && <div className="notice">{message}</div>}
 
-      <section className="grid two">
-        <Panel icon={<KeyRound />} title="Provider Settings">
-          <form onSubmit={submitFmp}>
-            <div className="label-row">
-              <label>FMP API key</label>
-              <SecretBadge status={fmpStatus} />
-            </div>
-            <div className="row">
-              <input
-                value={fmpKey}
-                onChange={(event) => setFmpKey(event.target.value)}
-                type="password"
-                placeholder={fmpStatus?.configured ? "Saved on server - paste a new key to replace" : ""}
-                required
-              />
-              <button>{fmpStatus?.configured ? "Replace" : "Validate"}</button>
-            </div>
-          </form>
-
-          <form onSubmit={submitIg}>
-            <div className="label-row">
-              <label>IG demo credentials</label>
-              <SecretBadge status={igStatus} />
-            </div>
-            <label>IG demo API key</label>
-            <input
-              value={ig.apiKey}
-              onChange={(event) => setIg({ ...ig, apiKey: event.target.value })}
-              type="password"
-              placeholder={igStatus?.configured ? "Saved on server - paste a new key to replace" : ""}
-              required
-            />
-            <label>IG username</label>
-            <input
-              value={ig.username}
-              onChange={(event) => setIg({ ...ig, username: event.target.value })}
-              placeholder={igStatus?.configured ? "Saved on server - enter again to replace" : ""}
-              required
-            />
-            <label>IG password</label>
-            <input
-              value={ig.password}
-              onChange={(event) => setIg({ ...ig, password: event.target.value })}
-              type="password"
-              placeholder={igStatus?.configured ? "Saved on server - paste a new password to replace" : ""}
-              required
-            />
-            <label>IG account code</label>
-            <input
-              value={ig.accountId}
-              onChange={(event) => setIg({ ...ig, accountId: event.target.value })}
-              placeholder={igStatus?.configured ? "Saved if provided - enter again to replace" : "Optional, e.g. ABC12"}
-            />
-            <button>{igStatus?.configured ? "Replace IG demo" : "Validate IG demo"}</button>
-          </form>
-        </Panel>
-
-        <Panel icon={<Activity />} title="Connection Status">
-          <div className="status-list">
-            {status.length === 0 && <span className="muted">No providers configured yet.</span>}
-            {status.map((item) => (
-              <div className="status" key={item.provider}>
-                <strong>{item.provider.toUpperCase()}</strong>
-                <span>{item.configured ? "saved on server" : "not saved"} · {item.last_status}</span>
-                {item.last_error && <small>{item.last_error}</small>}
-              </div>
-            ))}
+      <section className="lab-shell">
+        <div className="lab-header">
+          <div>
+            <h2><Sparkles size={20} /> Backtesting Lab</h2>
+            <p>Optimizes strategy and risk settings, then ranks results after spread, slippage, funding, and FX assumptions.</p>
           </div>
-        </Panel>
+          <div className={`run-state ${researchState.status}`}>
+            <strong>{researchState.status.toUpperCase()}</strong>
+            <span>{researchState.detail}</span>
+          </div>
+        </div>
+        <div className="tabs">
+          {[
+            ["builder", "New Test"],
+            ["results", "Results"],
+            ["candidates", "Candidates"],
+            ["settings", "Settings"],
+          ].map(([id, label]) => (
+            <button className={activeTab === id ? "tab active" : "tab"} key={id} type="button" onClick={() => setActiveTab(id)}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "builder" && (
+          <form onSubmit={submitResearchRun} className="lab-grid">
+            <section className="lab-section span-2">
+              <h3>Search Mode</h3>
+              <div className="segmented">
+                {SEARCH_PRESETS.map((preset) => (
+                  <button
+                    type="button"
+                    className={researchRun.search_preset === preset.id ? "segment active" : "segment"}
+                    key={preset.id}
+                    onClick={() => setResearchRun({ ...researchRun, search_preset: preset.id, search_budget: "" })}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              <div className="segmented wrap">
+                {STYLE_OPTIONS.map((style) => (
+                  <button
+                    type="button"
+                    className={researchRun.trading_style === style.id ? "segment active" : "segment"}
+                    key={style.id}
+                    onClick={() => setResearchRun({ ...researchRun, trading_style: style.id })}
+                  >
+                    {style.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="lab-section span-2">
+              <h3>Markets</h3>
+              <div className="market-picker">
+                {enabledMarkets.map((item) => (
+                  <button
+                    type="button"
+                    className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"}
+                    key={item.market_id}
+                    onClick={() => toggleMarket(item.market_id)}
+                  >
+                    <strong>{item.market_id}</strong>
+                    <span>{item.name}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="lab-section">
+              <h3>Inputs</h3>
+              <label>Engine</label>
+              <select value={researchRun.engine} onChange={(event) => setResearchRun({ ...researchRun, engine: event.target.value })}>
+                {engines.map((engine) => <option value={engine.id} key={engine.id}>{engine.label}</option>)}
+              </select>
+              <label>Candle timeframe</label>
+              <select value={researchRun.interval} onChange={(event) => setResearchRun({ ...researchRun, interval: event.target.value })}>
+                {CANDLE_INTERVALS.map((interval) => <option value={interval.value} key={interval.value}>{interval.label}</option>)}
+              </select>
+              <label>Objective</label>
+              <select value={researchRun.objective} onChange={(event) => setResearchRun({ ...researchRun, objective: event.target.value })}>
+                {OBJECTIVES.map((objective) => <option value={objective.id} key={objective.id}>{objective.label}</option>)}
+              </select>
+              <label>Risk profile</label>
+              <select value={researchRun.risk_profile} onChange={(event) => setResearchRun({ ...researchRun, risk_profile: event.target.value })}>
+                <option value="conservative">Conservative</option>
+                <option value="balanced">Balanced</option>
+                <option value="aggressive">Aggressive</option>
+              </select>
+            </section>
+
+            <section className="lab-section">
+              <h3>Window</h3>
+              <label>Start</label>
+              <input value={researchRun.start} onChange={(event) => setResearchRun({ ...researchRun, start: event.target.value })} required />
+              <label>End</label>
+              <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} required />
+              <label>Trial budget</label>
+              <input
+                value={researchRun.search_budget}
+                onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })}
+                placeholder={`${selectedPreset.budget}`}
+                type="number"
+                min="6"
+                max="500"
+              />
+              <div className="button-row">
+                <button type="button" className="secondary" onClick={syncCosts}><RefreshCw size={16} /> Sync costs</button>
+                <button disabled={researchState.status === "running" || activeMarketIds.length === 0}>{researchState.status === "running" ? "Running..." : "Run search"}</button>
+              </div>
+              <button type="button" className="ghost" onClick={scheduleResearch}>Save nightly schedule</button>
+            </section>
+
+            <section className="lab-section span-2">
+              <h3>Cost Profiles</h3>
+              <div className="cost-grid">
+                {selectedMarkets.map((item) => (
+                  <CostProfile key={item.market_id} market={item} profile={costProfiles[item.market_id]} onLoad={() => loadCostProfile(item.market_id)} />
+                ))}
+                {selectedMarkets.length === 0 && <span className="muted">Choose at least one market.</span>}
+              </div>
+            </section>
+          </form>
+        )}
+
+        {activeTab === "results" && (
+          <ResultsView runDetail={runDetail} researchRuns={researchRuns} loadRun={async (id) => setRunDetail(await getResearchRun(id))} />
+        )}
+
+        {activeTab === "candidates" && <CandidateView candidates={candidates} critique={critique} />}
+
+        {activeTab === "settings" && (
+          <SettingsView
+            status={status}
+            fmpKey={fmpKey}
+            setFmpKey={setFmpKey}
+            ig={ig}
+            setIg={setIg}
+            submitFmp={submitFmp}
+            submitIg={submitIg}
+            fmpStatus={fmpStatus}
+            igStatus={igStatus}
+          />
+        )}
       </section>
 
-      <section className="grid two">
+      <section className="grid two lower-grid">
         <Panel icon={<Plug />} title="Market Plugins">
           <div className="plugin-list">
-            {plugins.map((plugin) => (
+            {plugins.slice(0, 8).map((plugin) => (
               <div className="plugin" key={plugin.plugin_id}>
                 <div>
                   <strong>{plugin.name}</strong>
@@ -296,105 +465,13 @@ function App() {
             <button>Save market</button>
           </form>
         </Panel>
-
-        <Panel icon={<SlidersHorizontal />} title="Backtest Readiness">
-          <div className="metrics">
-            <Metric label="Timeframes" value="5m-1h" />
-            <Metric label="Execution" value="Paper" />
-            <Metric label="Risk" value="Strict caps" />
-            <Metric label="Markets" value={markets.filter((item) => item.enabled).length} />
-          </div>
-        </Panel>
-      </section>
-
-      <section className="grid two">
-        <Panel icon={<BarChart3 />} title="Research Lab">
-          <div className={`run-state ${researchState.status}`}>
-            <strong>{researchState.status.toUpperCase()}</strong>
-            <span>{researchState.detail}</span>
-          </div>
-          <form onSubmit={submitResearchRun} className="compact">
-            <label>Market</label>
-            <label>Engine</label>
-            <select value={researchRun.market_id} onChange={(event) => setResearchRun({ ...researchRun, market_id: event.target.value })} required>
-              {markets.filter((item) => item.enabled).map((item) => (
-                <option value={item.market_id} key={item.market_id}>{item.market_id} · {item.name} · FMP {item.fmp_symbol}</option>
-              ))}
-            </select>
-            <select value={researchRun.engine} onChange={(event) => setResearchRun({ ...researchRun, engine: event.target.value })} required>
-              {RESEARCH_ENGINES.map((engine) => (
-                <option value={engine.id} key={engine.id}>{engine.label}</option>
-              ))}
-            </select>
-            <label>Candle timeframe</label>
-            <label>Data window</label>
-            <select value={researchRun.interval} onChange={(event) => setResearchRun({ ...researchRun, interval: event.target.value })} required>
-              {CANDLE_INTERVALS.map((interval) => (
-                <option value={interval.value} key={interval.value}>{interval.label}</option>
-              ))}
-            </select>
-            <div className="date-pair">
-              <input value={researchRun.start} onChange={(event) => setResearchRun({ ...researchRun, start: event.target.value })} placeholder="Start YYYY-MM-DD" required />
-              <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} placeholder="End YYYY-MM-DD" required />
-            </div>
-            <div className="research-note">
-              <strong>{selectedResearchMarket?.fmp_symbol || "FMP symbol"}</strong>
-              <span>{selectedResearchMarket?.market_id === "NAS100" ? "If FMP rejects ^NDX on your plan, switch to QQQ as the Nasdaq proxy." : selectedEngine.description}</span>
-            </div>
-            <button disabled={researchState.status === "running"}>{researchState.status === "running" ? "Running..." : "Run FMP research"}</button>
-            <button type="button" className="secondary" onClick={scheduleResearch}>Save nightly schedule</button>
-          </form>
-          <div className="status-list">
-            {researchRuns.slice(0, 4).map((run) => (
-              <div className="status" key={run.id}>
-                <strong>Run {run.id} · {run.market_id}</strong>
-                <span>{run.status} · {run.trial_count} trials · {run.passed_count} passed</span>
-              </div>
-            ))}
-          </div>
-        </Panel>
-
-        <Panel icon={<ShieldCheck />} title="Candidate Watchlist">
-          <div className="status-list">
-            {candidates.length === 0 && <span className="muted">No research-only candidates promoted yet.</span>}
-            {candidates.slice(0, 5).map((candidate) => (
-              <div className="status" key={candidate.id}>
-                <strong>{candidate.strategy_name} · {candidate.market_id}</strong>
-                <span>Score {candidate.robustness_score} · research only</span>
-              </div>
-            ))}
-          </div>
-        </Panel>
-      </section>
-
-      <section className="grid two">
-        <Panel icon={<ShieldCheck />} title="Research Critic">
-          {critique ? (
-            <>
-              <div className="metrics">
-                <Metric label="Decision" value={critique.decision} />
-                <Metric label="Confidence" value={critique.confidence_score} />
-              </div>
-              <div className="status-list">
-                {critique.findings.slice(0, 5).map((finding) => (
-                  <div className="status" key={`${finding.code}-${finding.message}`}>
-                    <strong>{finding.severity.toUpperCase()} · {finding.code}</strong>
-                    <span>{finding.message}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : (
-            <span className="muted">No critique available yet.</span>
-          )}
-        </Panel>
       </section>
 
       <section className="market-table">
-        <h2>Markets</h2>
+        <h2><SlidersHorizontal size={20} /> Markets</h2>
         <table>
           <thead>
-            <tr><th>ID</th><th>Name</th><th>Class</th><th>FMP</th><th>IG market</th><th>EPIC</th><th>Backtest</th><th>Enabled</th></tr>
+            <tr><th>ID</th><th>Name</th><th>Class</th><th>FMP</th><th>IG market</th><th>EPIC</th><th>Costs</th><th>Enabled</th></tr>
           </thead>
           <tbody>
             {markets.map((item) => (
@@ -413,6 +490,186 @@ function App() {
         </table>
       </section>
     </main>
+  );
+}
+
+function ResultsView({ runDetail, researchRuns, loadRun }) {
+  const pareto = runDetail?.pareto ?? [];
+  const trials = runDetail?.trials ?? [];
+  return (
+    <div className="lab-grid">
+      <section className="lab-section span-2">
+        <h3>Recent Runs</h3>
+        <div className="run-list">
+          {researchRuns.slice(0, 6).map((run) => (
+            <button className="run-pill" type="button" key={run.id} onClick={() => loadRun(run.id)}>
+              <strong>Run {run.id}</strong>
+              <span>{run.market_id} · {run.trial_count} trials · best {round(run.best_score)}</span>
+            </button>
+          ))}
+          {researchRuns.length === 0 && <span className="muted">No runs yet.</span>}
+        </div>
+      </section>
+      <section className="lab-section span-2">
+        <h3>Pareto Picks</h3>
+        <div className="pareto-grid">
+          {pareto.map((item) => <ParetoCard key={`${item.kind}-${item.strategy_name}`} item={item} />)}
+          {pareto.length === 0 && <span className="muted">Run an adaptive search to see balanced, Sharpe, and profit alternatives.</span>}
+        </div>
+      </section>
+      <section className="lab-section span-2">
+        <h3>Top Trials</h3>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Strategy</th><th>Style</th><th>Score</th><th>Sharpe</th><th>Net</th><th>Cost</th><th>Trades</th><th>Warnings</th></tr>
+            </thead>
+            <tbody>
+              {trials.slice(0, 12).map((trial) => (
+                <tr key={trial.id}>
+                  <td>{trial.strategy_name}</td>
+                  <td>{trial.strategy_family || trial.style}</td>
+                  <td>{round(trial.robustness_score)}</td>
+                  <td>{round(trial.backtest?.sharpe)}</td>
+                  <td>{formatMoney(trial.backtest?.net_profit)}</td>
+                  <td>{formatMoney(trial.backtest?.total_cost)}</td>
+                  <td>{trial.backtest?.trade_count ?? 0}</td>
+                  <td>{humanWarnings(trial.warnings).join(", ") || "Clear"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ParetoCard({ item }) {
+  return (
+    <div className="pareto-card">
+      <span className="eyebrow">{labelForKind(item.kind)}</span>
+      <strong>{item.strategy_name}</strong>
+      <div className="mini-metrics">
+        <Metric label="Score" value={round(item.robustness_score)} />
+        <Metric label="Sharpe" value={round(item.sharpe)} />
+        <Metric label="Net" value={formatMoney(item.net_profit)} />
+        <Metric label="Cost" value={formatMoney(item.total_cost)} />
+      </div>
+      <small>{humanWarnings(item.warnings).join(" · ") || "Ready for research review"}</small>
+    </div>
+  );
+}
+
+function CandidateView({ candidates, critique }) {
+  return (
+    <div className="lab-grid">
+      <section className="lab-section span-2">
+        <h3>Research Candidates</h3>
+        <div className="candidate-grid">
+          {candidates.slice(0, 8).map((candidate) => (
+            <div className="candidate-card" key={candidate.id}>
+              <span className="badge muted-badge">Research only</span>
+              <strong>{candidate.strategy_name}</strong>
+              <span>{candidate.market_id} · score {round(candidate.robustness_score)}</span>
+              <small>{humanWarnings(candidate.audit?.warnings).join(" · ") || "Passed current research gates"}</small>
+              <div className="mini-metrics">
+                <Metric label="Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
+                <Metric label="Net" value={formatMoney(candidate.audit?.backtest?.net_profit)} />
+                <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
+                <Metric label="Trades" value={candidate.audit?.backtest?.trade_count ?? 0} />
+              </div>
+            </div>
+          ))}
+          {candidates.length === 0 && <span className="muted">No research-only candidates promoted yet.</span>}
+        </div>
+      </section>
+      <section className="lab-section span-2">
+        <h3>Research Critic</h3>
+        {critique ? (
+          <>
+            <div className="metrics four">
+              <Metric label="Decision" value={critique.decision} />
+              <Metric label="Confidence" value={critique.confidence_score} />
+              <Metric label="Trials" value={critique.trial_count} />
+              <Metric label="Candidates" value={critique.candidate_count} />
+            </div>
+            <div className="status-list">
+              {critique.findings.slice(0, 5).map((finding) => (
+                <div className="status" key={`${finding.code}-${finding.message}`}>
+                  <strong>{finding.severity.toUpperCase()} · {finding.code}</strong>
+                  <span>{finding.message}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : <span className="muted">No critique available yet.</span>}
+      </section>
+    </div>
+  );
+}
+
+function SettingsView({ fmpKey, setFmpKey, ig, setIg, submitFmp, submitIg, fmpStatus, igStatus }) {
+  return (
+    <div className="grid two">
+      <Panel icon={<KeyRound />} title="Provider Settings">
+        <form onSubmit={submitFmp}>
+          <div className="label-row">
+            <label>FMP API key</label>
+            <SecretBadge status={fmpStatus} />
+          </div>
+          <div className="row">
+            <input value={fmpKey} onChange={(event) => setFmpKey(event.target.value)} type="password" required />
+            <button>{fmpStatus?.configured ? "Replace" : "Validate"}</button>
+          </div>
+        </form>
+        <form onSubmit={submitIg}>
+          <div className="label-row">
+            <label>IG demo credentials</label>
+            <SecretBadge status={igStatus} />
+          </div>
+          <label>IG demo API key</label>
+          <input value={ig.apiKey} onChange={(event) => setIg({ ...ig, apiKey: event.target.value })} type="password" required />
+          <label>IG username</label>
+          <input value={ig.username} onChange={(event) => setIg({ ...ig, username: event.target.value })} required />
+          <label>IG password</label>
+          <input value={ig.password} onChange={(event) => setIg({ ...ig, password: event.target.value })} type="password" required />
+          <label>IG account code</label>
+          <input value={ig.accountId} onChange={(event) => setIg({ ...ig, accountId: event.target.value })} />
+          <button>{igStatus?.configured ? "Replace IG demo" : "Validate IG demo"}</button>
+        </form>
+      </Panel>
+      <Panel icon={<Activity />} title="Connection Status">
+        <div className="status-list">
+          {[fmpStatus, igStatus].filter(Boolean).map((item) => (
+            <div className="status" key={item.provider}>
+              <strong>{item.provider.toUpperCase()}</strong>
+              <span>{item.configured ? "saved on server" : "not saved"} · {item.last_status}</span>
+              {item.last_error && <small>{item.last_error}</small>}
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function CostProfile({ market, profile, onLoad }) {
+  const badge = costBadge(profile, market);
+  return (
+    <div className="cost-card">
+      <div>
+        <strong>{market.market_id}</strong>
+        <span className={`badge ${badge.className}`}>{badge.label}</span>
+      </div>
+      <div className="mini-metrics">
+        <Metric label="Spread" value={`${round(profile?.spread_bps ?? market.spread_bps)} bps`} />
+        <Metric label="Slippage" value={`${round(profile?.slippage_bps ?? market.slippage_bps)} bps`} />
+        <Metric label="Funding" value={`${round((profile?.overnight_admin_fee_annual ?? 0.03) * 100)}%`} />
+        <Metric label="FX" value={`${round(profile?.fx_conversion_bps ?? 80)} bps`} />
+      </div>
+      <button type="button" className="ghost" onClick={onLoad}>Load profile</button>
+    </div>
   );
 }
 
@@ -452,8 +709,50 @@ function normalizeInterval(value) {
   return value || "5min";
 }
 
-function timeframeLabel(value) {
-  return CANDLE_INTERVALS.find((interval) => interval.value === value)?.label ?? value;
+function costBadge(profile, market) {
+  const confidence = profile?.confidence ?? (market.plugin_id?.startsWith("fmp-") ? "fmp_proxy_ig_cost_envelope" : "ig_public_spread_baseline");
+  if (confidence === "ig_live_epic_cost_profile") {
+    return { label: "IG live EPIC cost profile", className: "good" };
+  }
+  if (confidence === "fmp_proxy_ig_cost_envelope") {
+    return { label: "FMP proxy with IG cost envelope", className: "warn" };
+  }
+  if (confidence === "ig_public_spread_baseline") {
+    return { label: "IG public spread baseline", className: "base" };
+  }
+  return { label: "Needs IG price validation", className: "warn" };
+}
+
+function humanWarnings(warnings = []) {
+  const labels = {
+    too_few_trades: "Too few trades",
+    negative_after_costs: "Negative after costs",
+    weak_sharpe: "Weak Sharpe",
+    drawdown_too_high: "Drawdown too high",
+    fails_higher_slippage: "Fails higher slippage",
+    profits_not_consistent_across_folds: "Fragile folds",
+    funding_eats_swing_edge: "Funding eats swing edge",
+    needs_ig_price_validation: "Needs IG price validation",
+  };
+  return (warnings ?? []).map((warning) => labels[warning] ?? warning);
+}
+
+function labelForKind(kind) {
+  return {
+    best_balanced: "Best balanced",
+    highest_sharpe: "Highest Sharpe",
+    highest_profit: "Highest profit",
+  }[kind] ?? kind;
+}
+
+function formatMoney(value) {
+  const number = Number(value ?? 0);
+  return `£${number.toFixed(0)}`;
+}
+
+function round(value) {
+  const number = Number(value ?? 0);
+  return Number.isInteger(number) ? number : number.toFixed(2);
 }
 
 createRoot(document.getElementById("root")).render(<App />);
