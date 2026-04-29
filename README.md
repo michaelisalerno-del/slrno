@@ -30,6 +30,7 @@ The first research layer is modular and FMP-first. It records every strategy tri
 - Stackable probability modules: momentum continuation, mean-reversion stretch, and breakout continuation.
 - Validation: rolling walk-forward folds with a final untouched holdout area.
 - Gates: AUC quality, PR-AUC lift, top-bucket precision lift, Sharpe, profit, drawdown, fold stability, and trade count.
+- Critic: a modular research critic scores each run for audit quality, FMP-only evidence, overfitting smells, one-fold dependency, weak AUC/PR-AUC lift, low trade count, and fragile economics.
 
 Passing candidates are not execution-ready until a later IG-price validation step confirms the same edge on the tradable IG EPIC.
 

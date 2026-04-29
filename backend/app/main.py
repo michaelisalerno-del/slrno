@@ -10,6 +10,7 @@ from .market_plugins import get_market_plugin, list_market_plugins
 from .market_registry import MarketMapping, MarketRegistry
 from .providers.fmp import FMPProvider
 from .providers.ig import IGDemoProvider
+from .research_critic import ResearchCritic
 from .research_lab import ResearchStack
 from .research_store import ResearchStore
 from .settings_store import SettingsStore
@@ -26,6 +27,7 @@ settings = SettingsStore()
 markets = MarketRegistry()
 markets.seed_defaults()
 research_store = ResearchStore()
+research_critic = ResearchCritic.default()
 
 
 class FMPSettings(BaseModel):
@@ -206,6 +208,32 @@ async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
 @app.get("/research/runs")
 def list_research_runs() -> list[dict[str, object]]:
     return research_store.list_runs()
+
+
+@app.get("/research/critique")
+def critique_latest_research() -> dict[str, object]:
+    runs = research_store.list_runs()
+    if not runs:
+        return research_critic.critique(None, [], []).as_dict()
+    latest = research_store.get_run(int(runs[0]["id"]))
+    run_id = int(runs[0]["id"])
+    return research_critic.critique(
+        latest,
+        research_store.list_trials(run_id),
+        research_store.list_candidates(run_id),
+    ).as_dict()
+
+
+@app.get("/research/runs/{run_id}/critique")
+def critique_research_run(run_id: int) -> dict[str, object]:
+    run = research_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return research_critic.critique(
+        run,
+        research_store.list_trials(run_id),
+        research_store.list_candidates(run_id),
+    ).as_dict()
 
 
 @app.get("/research/candidates")

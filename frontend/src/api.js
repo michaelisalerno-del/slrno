@@ -71,6 +71,10 @@ export function getResearchCandidates() {
   return request("/research/candidates");
 }
 
+export function getResearchCritique() {
+  return request("/research/critique");
+}
+
 export function saveResearchSchedule(payload) {
   return request("/research/schedules", {
     method: "POST",

@@ -6,6 +6,7 @@ import {
   getMarketPlugins,
   getMarkets,
   getResearchCandidates,
+  getResearchCritique,
   getResearchRuns,
   getStatus,
   installMarketPlugin,
@@ -22,6 +23,7 @@ function App() {
   const [plugins, setPlugins] = React.useState([]);
   const [researchRuns, setResearchRuns] = React.useState([]);
   const [candidates, setCandidates] = React.useState([]);
+  const [critique, setCritique] = React.useState(null);
   const [message, setMessage] = React.useState("");
   const [fmpKey, setFmpKey] = React.useState("");
   const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "" });
@@ -47,18 +49,20 @@ function App() {
   });
 
   const refresh = React.useCallback(async () => {
-    const [nextStatus, nextMarkets, nextPlugins, nextRuns, nextCandidates] = await Promise.all([
+    const [nextStatus, nextMarkets, nextPlugins, nextRuns, nextCandidates, nextCritique] = await Promise.all([
       getStatus(),
       getMarkets(),
       getMarketPlugins(),
       getResearchRuns(),
       getResearchCandidates(),
+      getResearchCritique(),
     ]);
     setStatus(nextStatus);
     setMarkets(nextMarkets);
     setPlugins(nextPlugins);
     setResearchRuns(nextRuns);
     setCandidates(nextCandidates);
+    setCritique(nextCritique);
   }, []);
 
   React.useEffect(() => {
@@ -240,6 +244,29 @@ function App() {
               </div>
             ))}
           </div>
+        </Panel>
+      </section>
+
+      <section className="grid two">
+        <Panel icon={<ShieldCheck />} title="Research Critic">
+          {critique ? (
+            <>
+              <div className="metrics">
+                <Metric label="Decision" value={critique.decision} />
+                <Metric label="Confidence" value={critique.confidence_score} />
+              </div>
+              <div className="status-list">
+                {critique.findings.slice(0, 5).map((finding) => (
+                  <div className="status" key={`${finding.code}-${finding.message}`}>
+                    <strong>{finding.severity.toUpperCase()} · {finding.code}</strong>
+                    <span>{finding.message}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <span className="muted">No critique available yet.</span>
+          )}
         </Panel>
       </section>
 

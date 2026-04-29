@@ -156,13 +156,72 @@ class ResearchStore:
             for row in rows
         ]
 
-    def list_candidates(self) -> list[dict[str, object]]:
+    def get_run(self, run_id: int) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run.id, run.created_at, run.status, run.market_id, run.data_source,
+                       run.config_json,
+                       COUNT(trial.id) AS trial_count,
+                       COALESCE(SUM(trial.passed), 0) AS passed_count
+                FROM research_runs run
+                LEFT JOIN strategy_trials trial ON trial.run_id = run.id
+                WHERE run.id = ?
+                GROUP BY run.id
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "created_at": row[1],
+            "status": row[2],
+            "market_id": row[3],
+            "data_source": row[4],
+            "config": json.loads(row[5]),
+            "trial_count": row[6],
+            "passed_count": row[7],
+        }
+
+    def list_trials(self, run_id: int | None = None) -> list[dict[str, object]]:
+        query = """
+            SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json
+            FROM strategy_trials
+        """
+        params: tuple[object, ...] = ()
+        if run_id is not None:
+            query += " WHERE run_id = ?"
+            params = (run_id,)
+        query += " ORDER BY id"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "id": row[0],
+                "run_id": row[1],
+                "strategy_name": row[2],
+                "passed": bool(row[3]),
+                "robustness_score": row[4],
+                "metrics": json.loads(row[5]),
+                "warnings": json.loads(row[6]),
+            }
+            for row in rows
+        ]
+
+    def list_candidates(self, run_id: int | None = None) -> list[dict[str, object]]:
+        params: tuple[object, ...] = ()
+        where = ""
+        if run_id is not None:
+            where = "WHERE run_id = ?"
+            params = (run_id,)
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at
-                FROM candidates ORDER BY robustness_score DESC, id DESC
-                """
+                FROM candidates {where} ORDER BY robustness_score DESC, id DESC
+                """,
+                params,
             ).fetchall()
         return [
             {

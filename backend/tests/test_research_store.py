@@ -20,9 +20,11 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     store.update_run_status(run_id, "finished")
 
     [run] = store.list_runs()
+    trials = store.list_trials(run_id)
     [candidate] = store.list_candidates()
     assert run["trial_count"] == 2
     assert run["passed_count"] == 1
+    assert [trial["strategy_name"] for trial in trials] == ["rejected", "accepted"]
     assert candidate["strategy_name"] == "accepted"
     assert candidate["research_only"] is True
 
