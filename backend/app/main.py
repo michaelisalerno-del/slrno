@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -91,8 +93,9 @@ async def save_fmp(payload: FMPSettings) -> dict[str, str]:
     try:
         await provider.validate()
     except Exception as exc:
-        settings.set_status("fmp", "error", str(exc))
-        raise HTTPException(status_code=400, detail=f"FMP validation failed: {exc}") from exc
+        detail = _public_error(exc)
+        settings.set_status("fmp", "error", detail)
+        raise HTTPException(status_code=400, detail=f"FMP validation failed: {detail}") from exc
     settings.set_status("fmp", "connected")
     return {"status": "connected"}
 
@@ -110,8 +113,9 @@ async def save_ig(payload: IGSettings) -> dict[str, str]:
     try:
         account = await provider.account_status()
     except Exception as exc:
-        settings.set_status("ig", "error", str(exc))
-        raise HTTPException(status_code=400, detail=f"IG validation failed: {exc}") from exc
+        detail = _public_error(exc)
+        settings.set_status("ig", "error", detail)
+        raise HTTPException(status_code=400, detail=f"IG validation failed: {detail}") from exc
     if account.account_id:
         settings.set_secret("ig", "account_id", account.account_id)
     settings.set_status("ig", "connected")
@@ -202,7 +206,7 @@ async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
         research_store.update_run_status(run_id, "finished")
     except Exception as exc:
         research_store.update_run_status(run_id, "error")
-        raise HTTPException(status_code=400, detail=f"Research run failed: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Research run failed: {_public_error(exc)}") from exc
 
     passed = [evaluation for evaluation in evaluations if evaluation.passed]
     return {
@@ -260,3 +264,10 @@ def save_research_schedule(payload: ResearchSchedulePayload) -> dict[str, object
         {"market_ids": payload.market_ids, "interval": payload.interval, "data_source": "fmp"},
     )
     return {"status": "saved", "schedule_id": schedule_id}
+
+
+def _public_error(exc: Exception) -> str:
+    text = str(exc)
+    text = re.sub(r"apikey=[^&'\"\s]+", "apikey=***", text, flags=re.IGNORECASE)
+    text = re.sub(r"api[-_ ]?key[^,;\n]*", "API key hidden", text, flags=re.IGNORECASE)
+    return text
