@@ -14,20 +14,21 @@ body {
 }
 
 main {
-  width: min(1180px, calc(100vw - 32px));
+  width: min(1240px, calc(100vw - 32px));
   margin: 0 auto;
   padding: 28px 0 48px;
 }
 
-.topbar {
+.topbar,
+.lab-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
-h1, h2, p {
+h1, h2, h3, p {
   margin: 0;
 }
 
@@ -36,12 +37,21 @@ h1 {
   line-height: 1.1;
 }
 
-h2 {
+h2,
+h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 17px;
+}
+
+h2 {
+  font-size: 18px;
   margin-bottom: 16px;
+}
+
+h3 {
+  font-size: 15px;
+  margin-bottom: 12px;
 }
 
 p {
@@ -49,7 +59,8 @@ p {
   margin-top: 6px;
 }
 
-.mode, .notice {
+.mode,
+.notice {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -67,21 +78,86 @@ p {
   background: #effaf5;
 }
 
-.grid {
+.grid,
+.lab-grid {
   display: grid;
   gap: 16px;
-  margin-bottom: 16px;
 }
 
-.grid.two {
+.grid.two,
+.lab-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.panel, .market-table {
+.lower-grid,
+.market-table {
+  margin-top: 16px;
+}
+
+.panel,
+.market-table,
+.lab-shell {
   background: #ffffff;
   border: 1px solid #dde3ea;
   border-radius: 8px;
   padding: 18px;
+}
+
+.lab-section {
+  border-top: 1px solid #e5eaf0;
+  padding-top: 16px;
+}
+
+.span-2 {
+  grid-column: span 2;
+}
+
+.tabs,
+.segmented,
+.market-picker,
+.button-row,
+.run-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tabs {
+  margin-bottom: 18px;
+}
+
+.tab,
+.segment,
+.market-chip,
+.run-pill,
+.ghost,
+.secondary {
+  color: #27313d;
+  background: #f6f8fa;
+  border: 1px solid #d8e0e8;
+}
+
+.tab.active,
+.segment.active,
+.market-chip.active {
+  color: #ffffff;
+  background: #1f6feb;
+  border-color: #1f6feb;
+}
+
+.market-chip,
+.run-pill {
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+  text-align: left;
+}
+
+.market-chip span,
+.run-pill span {
+  font-size: 12px;
+  color: inherit;
+  opacity: 0.82;
 }
 
 form {
@@ -107,7 +183,8 @@ label {
   gap: 10px;
 }
 
-.secret-badge {
+.secret-badge,
+.badge {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
@@ -118,7 +195,8 @@ label {
   white-space: nowrap;
 }
 
-.secret-badge.saved {
+.secret-badge.saved,
+.badge.good {
   color: #135f44;
   background: #e7f7ef;
   border: 1px solid #bfe7d2;
@@ -130,13 +208,22 @@ label {
   border: 1px solid #99d6b5;
 }
 
-.secret-badge.empty {
+.secret-badge.empty,
+.badge.base,
+.muted-badge {
   color: #626c78;
   background: #f1f4f7;
   border: 1px solid #d8e0e8;
 }
 
-input, select {
+.badge.warn {
+  color: #7a4b00;
+  background: #fff7e6;
+  border: 1px solid #f0d28a;
+}
+
+input,
+select {
   width: 100%;
   min-height: 40px;
   border: 1px solid #cbd3dc;
@@ -165,6 +252,13 @@ button:disabled {
 
 button.secondary {
   background: #334155;
+  color: #ffffff;
+  border-color: #334155;
+}
+
+button.ghost {
+  background: #ffffff;
+  color: #27313d;
 }
 
 .row {
@@ -177,7 +271,8 @@ button.secondary {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.compact button, .compact .check {
+.compact button,
+.compact .check {
   grid-column: span 2;
 }
 
@@ -195,10 +290,10 @@ button.secondary {
 .run-state {
   display: grid;
   gap: 4px;
+  min-width: min(360px, 100%);
   border: 1px solid #d8e0e8;
   border-radius: 8px;
   padding: 12px;
-  margin-bottom: 14px;
   background: #f6f8fa;
 }
 
@@ -227,47 +322,32 @@ button.secondary {
   background: #fff2f2;
 }
 
-.date-pair {
+.cost-grid,
+.pareto-grid,
+.candidate-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cost-card,
+.pareto-card,
+.candidate-card,
+.status,
+.plugin {
+  display: grid;
   gap: 8px;
-}
-
-.research-note {
-  grid-column: span 2;
-  display: grid;
-  gap: 3px;
-  padding: 10px 12px;
-  border: 1px solid #e0e6ed;
-  border-radius: 8px;
-  background: #f6f8fa;
-}
-
-.research-note strong {
-  color: #20242a;
-}
-
-.research-note span {
-  color: #5f6875;
-  font-size: 13px;
-}
-
-.status-list, .plugin-list {
-  display: grid;
-  gap: 10px;
-}
-
-.status, .plugin {
-  display: grid;
-  gap: 2px;
   padding: 12px;
   border: 1px solid #e0e6ed;
   border-radius: 8px;
+  background: #ffffff;
 }
 
+.cost-card > div:first-child,
 .plugin {
-  grid-template-columns: 1fr auto;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
@@ -276,41 +356,66 @@ button.secondary {
   gap: 3px;
 }
 
-.plugin span {
+.plugin span,
+.status span,
+.candidate-card span,
+.pareto-card small {
   color: #3f4854;
   font-size: 13px;
 }
 
-.plugin small {
+.plugin small,
+.status small,
+.muted,
+.candidate-card small {
   color: #6b7480;
 }
 
-.status span {
-  color: #135f44;
-  font-weight: 650;
+.status-list,
+.plugin-list {
+  display: grid;
+  gap: 10px;
 }
 
-.status small, .muted {
-  color: #6b7480;
-}
-
-.metrics {
+.metrics,
+.mini-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
+}
+
+.metrics.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 12px;
 }
 
 .metric {
   display: grid;
   gap: 4px;
-  padding: 14px;
+  padding: 10px;
   background: #f6f8fa;
   border-radius: 8px;
+  min-width: 0;
 }
 
 .metric span {
   color: #68717d;
-  font-size: 13px;
+  font-size: 12px;
+}
+
+.metric strong {
+  overflow-wrap: anywhere;
+}
+
+.eyebrow {
+  color: #586270;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.table-scroll {
+  overflow-x: auto;
 }
 
 table {
@@ -318,11 +423,13 @@ table {
   border-collapse: collapse;
 }
 
-th, td {
+th,
+td {
   text-align: left;
   border-bottom: 1px solid #e5eaf0;
   padding: 11px 8px;
   font-size: 14px;
+  vertical-align: top;
 }
 
 th {
@@ -331,17 +438,31 @@ th {
   text-transform: uppercase;
 }
 
-@media (max-width: 780px) {
-  .topbar, .grid.two {
+@media (max-width: 920px) {
+  .topbar,
+  .lab-header,
+  .grid.two,
+  .lab-grid,
+  .cost-grid,
+  .pareto-grid,
+  .candidate-grid,
+  .metrics.four {
     grid-template-columns: 1fr;
     display: grid;
   }
 
-  .row, .compact, .date-pair {
+  .span-2,
+  .compact button,
+  .compact .check {
+    grid-column: auto;
+  }
+
+  .row,
+  .compact {
     grid-template-columns: 1fr;
   }
 
-  .compact button, .compact .check, .research-note {
-    grid-column: auto;
+  .run-state {
+    min-width: 0;
   }
 }
