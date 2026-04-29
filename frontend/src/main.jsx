@@ -48,6 +48,9 @@ function App() {
     interval: "1h",
   });
 
+  const fmpStatus = providerStatus(status, "fmp");
+  const igStatus = providerStatus(status, "ig");
+
   const refresh = React.useCallback(async () => {
     const [nextStatus, nextMarkets, nextPlugins, nextRuns, nextCandidates, nextCritique] = await Promise.all([
       getStatus(),
@@ -79,6 +82,7 @@ function App() {
       await refresh();
     } catch (error) {
       setMessage(error.message);
+      await refresh().catch(() => undefined);
     }
   }
 
@@ -92,6 +96,7 @@ function App() {
       await refresh();
     } catch (error) {
       setMessage(error.message);
+      await refresh().catch(() => undefined);
     }
   }
 
@@ -143,23 +148,57 @@ function App() {
       <section className="grid two">
         <Panel icon={<KeyRound />} title="Provider Settings">
           <form onSubmit={submitFmp}>
-            <label>FMP API key</label>
+            <div className="label-row">
+              <label>FMP API key</label>
+              <SecretBadge status={fmpStatus} />
+            </div>
             <div className="row">
-              <input value={fmpKey} onChange={(event) => setFmpKey(event.target.value)} type="password" required />
-              <button>Validate</button>
+              <input
+                value={fmpKey}
+                onChange={(event) => setFmpKey(event.target.value)}
+                type="password"
+                placeholder={fmpStatus?.configured ? "Saved on server - paste a new key to replace" : ""}
+                required
+              />
+              <button>{fmpStatus?.configured ? "Replace" : "Validate"}</button>
             </div>
           </form>
 
           <form onSubmit={submitIg}>
+            <div className="label-row">
+              <label>IG demo credentials</label>
+              <SecretBadge status={igStatus} />
+            </div>
             <label>IG demo API key</label>
-            <input value={ig.apiKey} onChange={(event) => setIg({ ...ig, apiKey: event.target.value })} type="password" required />
+            <input
+              value={ig.apiKey}
+              onChange={(event) => setIg({ ...ig, apiKey: event.target.value })}
+              type="password"
+              placeholder={igStatus?.configured ? "Saved on server - paste a new key to replace" : ""}
+              required
+            />
             <label>IG username</label>
-            <input value={ig.username} onChange={(event) => setIg({ ...ig, username: event.target.value })} required />
+            <input
+              value={ig.username}
+              onChange={(event) => setIg({ ...ig, username: event.target.value })}
+              placeholder={igStatus?.configured ? "Saved on server - enter again to replace" : ""}
+              required
+            />
             <label>IG password</label>
-            <input value={ig.password} onChange={(event) => setIg({ ...ig, password: event.target.value })} type="password" required />
+            <input
+              value={ig.password}
+              onChange={(event) => setIg({ ...ig, password: event.target.value })}
+              type="password"
+              placeholder={igStatus?.configured ? "Saved on server - paste a new password to replace" : ""}
+              required
+            />
             <label>IG account code</label>
-            <input value={ig.accountId} onChange={(event) => setIg({ ...ig, accountId: event.target.value })} placeholder="Optional, e.g. ABC12" />
-            <button>Validate IG demo</button>
+            <input
+              value={ig.accountId}
+              onChange={(event) => setIg({ ...ig, accountId: event.target.value })}
+              placeholder={igStatus?.configured ? "Saved if provided - enter again to replace" : "Optional, e.g. ABC12"}
+            />
+            <button>{igStatus?.configured ? "Replace IG demo" : "Validate IG demo"}</button>
           </form>
         </Panel>
 
@@ -169,7 +208,7 @@ function App() {
             {status.map((item) => (
               <div className="status" key={item.provider}>
                 <strong>{item.provider.toUpperCase()}</strong>
-                <span>{item.last_status}</span>
+                <span>{item.configured ? "saved on server" : "not saved"} · {item.last_status}</span>
                 {item.last_error && <small>{item.last_error}</small>}
               </div>
             ))}
@@ -322,6 +361,17 @@ function Metric({ label, value }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function SecretBadge({ status }) {
+  if (!status?.configured) {
+    return <span className="secret-badge empty">Not saved</span>;
+  }
+  return <span className={`secret-badge ${status.last_status === "connected" ? "connected" : "saved"}`}>Saved on server</span>;
+}
+
+function providerStatus(statuses, provider) {
+  return statuses.find((item) => item.provider === provider);
 }
 
 createRoot(document.getElementById("root")).render(<App />);
