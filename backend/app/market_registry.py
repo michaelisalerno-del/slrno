@@ -25,11 +25,20 @@ class MarketMapping:
 
 
 DEFAULT_MARKETS = [
-    MarketMapping("US500", "S&P 500", "index", "^GSPC", "", True, "", "US 500", "US 500,S&P 500,SPX", "5min"),
-    MarketMapping("NAS100", "Nasdaq 100", "index", "^NDX", "", True, "", "US Tech 100", "US Tech 100,Nasdaq,NASDAQ 100", "5min"),
-    MarketMapping("QQQ", "QQQ Nasdaq 100 ETF proxy", "etf", "QQQ", "", True, "fmp-qqq-nasdaq-proxy", "US Tech 100", "US Tech 100,Nasdaq,QQQ", "5min"),
-    MarketMapping("SPY", "SPY S&P 500 ETF proxy", "etf", "SPY", "", True, "fmp-spy-sp500-proxy", "US 500", "US 500,S&P 500,SPY", "5min"),
+    MarketMapping("US500", "S&P 500", "index", "^GSPC", "", True, "", "US 500", "US 500,S&P 500,SPX", "5min", 2.0, 1.0),
+    MarketMapping("NAS100", "Nasdaq 100", "index", "^NDX", "", True, "", "US Tech 100", "US Tech 100,Nasdaq,NASDAQ 100", "5min", 2.0, 1.0),
+    MarketMapping("FTSE100", "FTSE 100", "index", "^FTSE", "", True, "ig-ftse-100", "FTSE 100", "FTSE 100,UK 100", "5min", 2.0, 1.0),
+    MarketMapping("DE40", "Germany 40", "index", "^GDAXI", "", True, "ig-germany-40", "Germany 40", "Germany 40,DAX", "5min", 2.0, 1.0),
+    MarketMapping("QQQ", "QQQ Nasdaq 100 ETF proxy", "etf", "QQQ", "", True, "fmp-qqq-nasdaq-proxy", "US Tech 100", "US Tech 100,Nasdaq,QQQ", "5min", 2.0, 1.0),
+    MarketMapping("SPY", "SPY S&P 500 ETF proxy", "etf", "SPY", "", True, "fmp-spy-sp500-proxy", "US 500", "US 500,S&P 500,SPY", "5min", 2.0, 1.0),
+    MarketMapping("EURUSD", "EUR/USD", "forex", "EURUSD", "", True, "ig-eur-usd", "EUR/USD", "EUR/USD,EURUSD,Euro Dollar", "5min", 1.2, 0.8),
+    MarketMapping("GBPUSD", "GBP/USD", "forex", "GBPUSD", "", True, "ig-gbp-usd", "GBP/USD", "GBP/USD,GBPUSD,Cable", "5min", 1.4, 0.9),
+    MarketMapping("EURGBP", "EUR/GBP", "forex", "EURGBP", "", True, "ig-eur-gbp", "EUR/GBP", "EUR/GBP,EURGBP", "5min", 1.5, 0.9),
+    MarketMapping("USDJPY", "USD/JPY", "forex", "USDJPY", "", True, "ig-usd-jpy", "USD/JPY", "USD/JPY,USDJPY,Dollar Yen", "5min", 1.3, 0.9),
     MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD", "", True, "", "Spot Gold", "Spot Gold,Gold,XAU/USD", "5min", 3.0, 1.5),
+    MarketMapping("XAGUSD", "Spot Silver", "commodity", "XAGUSD", "", True, "ig-spot-silver", "Spot Silver", "Spot Silver,Silver,XAG/USD", "5min", 4.0, 2.0),
+    MarketMapping("BRENT", "Brent Crude", "commodity", "BZ=F", "", True, "ig-brent-crude", "Brent Crude", "Brent Crude,Brent Oil", "5min", 3.5, 2.0),
+    MarketMapping("NATGAS", "Natural Gas", "commodity", "NG=F", "", True, "ig-natural-gas", "Natural Gas", "Natural Gas,US Natural Gas", "5min", 5.0, 2.5),
 ]
 
 
