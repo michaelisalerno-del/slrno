@@ -5,9 +5,15 @@ async function request(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers ?? {}) },
     ...options,
   });
-  const payload = await response.json().catch(() => ({}));
+  const contentType = response.headers.get("content-type") ?? "";
+  const payload = contentType.includes("application/json")
+    ? await response.json().catch(() => ({}))
+    : {};
   if (!response.ok) {
     throw new Error(payload.detail ?? "Request failed");
+  }
+  if (!contentType.includes("application/json")) {
+    throw new Error(`API returned non-JSON for ${path}`);
   }
   return payload;
 }
