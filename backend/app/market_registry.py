@@ -18,16 +18,17 @@ class MarketMapping:
     plugin_id: str = ""
     ig_name: str = ""
     ig_search_terms: str = ""
-    default_timeframe: str = "1h"
+    default_timeframe: str = "5min"
     spread_bps: float = 2.0
     slippage_bps: float = 1.0
     min_backtest_bars: int = 750
 
 
 DEFAULT_MARKETS = [
-    MarketMapping("US500", "S&P 500", "index", "^GSPC", "", True, "", "US 500", "US 500,S&P 500,SPX"),
-    MarketMapping("NAS100", "Nasdaq 100", "index", "^NDX", "", True, "", "US Tech 100", "US Tech 100,Nasdaq,NASDAQ 100"),
-    MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD", "", True, "", "Spot Gold", "Spot Gold,Gold,XAU/USD", "1h", 3.0, 1.5),
+    MarketMapping("US500", "S&P 500", "index", "^GSPC", "", True, "", "US 500", "US 500,S&P 500,SPX", "5min"),
+    MarketMapping("NAS100", "Nasdaq 100", "index", "^NDX", "", True, "", "US Tech 100", "US Tech 100,Nasdaq,NASDAQ 100", "5min"),
+    MarketMapping("QQQ", "QQQ Nasdaq 100 ETF proxy", "etf", "QQQ", "", True, "fmp-qqq-nasdaq-proxy", "US Tech 100", "US Tech 100,Nasdaq,QQQ", "5min"),
+    MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD", "", True, "", "Spot Gold", "Spot Gold,Gold,XAU/USD", "5min", 3.0, 1.5),
 ]
 
 
@@ -54,7 +55,7 @@ class MarketRegistry:
                   plugin_id TEXT NOT NULL DEFAULT '',
                   ig_name TEXT NOT NULL DEFAULT '',
                   ig_search_terms TEXT NOT NULL DEFAULT '',
-                  default_timeframe TEXT NOT NULL DEFAULT '1h',
+                  default_timeframe TEXT NOT NULL DEFAULT '5min',
                   spread_bps REAL NOT NULL DEFAULT 2.0,
                   slippage_bps REAL NOT NULL DEFAULT 1.0,
                   min_backtest_bars INTEGER NOT NULL DEFAULT 750
@@ -64,7 +65,7 @@ class MarketRegistry:
             self._add_column(conn, "plugin_id", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "ig_name", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "ig_search_terms", "TEXT NOT NULL DEFAULT ''")
-            self._add_column(conn, "default_timeframe", "TEXT NOT NULL DEFAULT '1h'")
+            self._add_column(conn, "default_timeframe", "TEXT NOT NULL DEFAULT '5min'")
             self._add_column(conn, "spread_bps", "REAL NOT NULL DEFAULT 2.0")
             self._add_column(conn, "slippage_bps", "REAL NOT NULL DEFAULT 1.0")
             self._add_column(conn, "min_backtest_bars", "INTEGER NOT NULL DEFAULT 750")

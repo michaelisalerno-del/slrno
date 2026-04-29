@@ -17,6 +17,21 @@ import {
 } from "./api";
 import "./styles.css";
 
+const RESEARCH_ENGINES = [
+  {
+    id: "probability_stack_v1",
+    label: "Probability stack v1",
+    description: "Triple-barrier labels with momentum, pullback, and breakout probability modules.",
+  },
+];
+
+const CANDLE_INTERVALS = [
+  { value: "5min", label: "5 minute" },
+  { value: "15min", label: "15 minute" },
+  { value: "30min", label: "30 minute" },
+  { value: "1hour", label: "1 hour" },
+];
+
 function App() {
   const [status, setStatus] = React.useState([]);
   const [markets, setMarkets] = React.useState([]);
@@ -35,7 +50,7 @@ function App() {
     ig_epic: "",
     ig_name: "US Tech 100",
     ig_search_terms: "US Tech 100,Nasdaq,NASDAQ 100",
-    default_timeframe: "1h",
+    default_timeframe: "5min",
     spread_bps: 2,
     slippage_bps: 1,
     min_backtest_bars: 750,
@@ -43,13 +58,17 @@ function App() {
   });
   const [researchRun, setResearchRun] = React.useState({
     market_id: "NAS100",
+    engine: "probability_stack_v1",
     start: "2024-01-01",
     end: "2026-01-01",
-    interval: "1h",
+    interval: "5min",
   });
+  const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready to run." });
 
   const fmpStatus = providerStatus(status, "fmp");
   const igStatus = providerStatus(status, "ig");
+  const selectedResearchMarket = markets.find((item) => item.market_id === researchRun.market_id);
+  const selectedEngine = RESEARCH_ENGINES.find((engine) => engine.id === researchRun.engine) ?? RESEARCH_ENGINES[0];
 
   const refresh = React.useCallback(async () => {
     const [nextStatus, nextMarkets, nextPlugins, nextRuns, nextCandidates, nextCritique] = await Promise.all([
@@ -71,6 +90,17 @@ function App() {
   React.useEffect(() => {
     refresh().catch((error) => setMessage(error.message));
   }, [refresh]);
+
+  React.useEffect(() => {
+    if (!selectedResearchMarket && markets.length > 0) {
+      const firstEnabled = markets.find((item) => item.enabled) ?? markets[0];
+      setResearchRun((current) => ({
+        ...current,
+        market_id: firstEnabled.market_id,
+        interval: normalizeInterval(firstEnabled.default_timeframe),
+      }));
+    }
+  }, [markets, selectedResearchMarket]);
 
   async function submitFmp(event) {
     event.preventDefault();
@@ -116,9 +146,23 @@ function App() {
   async function submitResearchRun(event) {
     event.preventDefault();
     setMessage("Launching FMP-first research run...");
-    const result = await createResearchRun(researchRun);
-    setMessage(`Research run ${result.run_id} finished: ${result.trial_count} trials, ${result.candidate_count} candidates.`);
-    await refresh();
+    setResearchState({
+      status: "running",
+      detail: `${selectedEngine.label} on ${researchRun.market_id} ${timeframeLabel(researchRun.interval)} candles.`,
+    });
+    try {
+      const result = await createResearchRun(researchRun);
+      setResearchState({
+        status: "finished",
+        detail: `Run ${result.run_id}: ${result.trial_count} trials, ${result.candidate_count} candidates, best score ${result.best_score}.`,
+      });
+      setMessage(`Research run ${result.run_id} finished: ${result.trial_count} trials, ${result.candidate_count} candidates.`);
+      await refresh();
+    } catch (error) {
+      setResearchState({ status: "error", detail: error.message });
+      setMessage(error.message);
+      await refresh().catch(() => undefined);
+    }
   }
 
   async function scheduleResearch() {
@@ -128,7 +172,7 @@ function App() {
       cadence: "nightly",
       enabled: true,
       market_ids: enabledMarkets,
-      interval: "1h",
+      interval: researchRun.interval,
     });
     setMessage(`Research schedule ${result.schedule_id} saved.`);
   }
@@ -255,7 +299,7 @@ function App() {
 
         <Panel icon={<SlidersHorizontal />} title="Backtest Readiness">
           <div className="metrics">
-            <Metric label="Timeframes" value="15m-1h" />
+            <Metric label="Timeframes" value="5m-1h" />
             <Metric label="Execution" value="Paper" />
             <Metric label="Risk" value="Strict caps" />
             <Metric label="Markets" value={markets.filter((item) => item.enabled).length} />
@@ -265,12 +309,39 @@ function App() {
 
       <section className="grid two">
         <Panel icon={<BarChart3 />} title="Research Lab">
+          <div className={`run-state ${researchState.status}`}>
+            <strong>{researchState.status.toUpperCase()}</strong>
+            <span>{researchState.detail}</span>
+          </div>
           <form onSubmit={submitResearchRun} className="compact">
-            <input value={researchRun.market_id} onChange={(event) => setResearchRun({ ...researchRun, market_id: event.target.value })} placeholder="Market ID" required />
-            <input value={researchRun.interval} onChange={(event) => setResearchRun({ ...researchRun, interval: event.target.value })} placeholder="Interval" required />
-            <input value={researchRun.start} onChange={(event) => setResearchRun({ ...researchRun, start: event.target.value })} placeholder="Start YYYY-MM-DD" required />
-            <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} placeholder="End YYYY-MM-DD" required />
-            <button>Run FMP research</button>
+            <label>Market</label>
+            <label>Engine</label>
+            <select value={researchRun.market_id} onChange={(event) => setResearchRun({ ...researchRun, market_id: event.target.value })} required>
+              {markets.filter((item) => item.enabled).map((item) => (
+                <option value={item.market_id} key={item.market_id}>{item.market_id} · {item.name} · FMP {item.fmp_symbol}</option>
+              ))}
+            </select>
+            <select value={researchRun.engine} onChange={(event) => setResearchRun({ ...researchRun, engine: event.target.value })} required>
+              {RESEARCH_ENGINES.map((engine) => (
+                <option value={engine.id} key={engine.id}>{engine.label}</option>
+              ))}
+            </select>
+            <label>Candle timeframe</label>
+            <label>Data window</label>
+            <select value={researchRun.interval} onChange={(event) => setResearchRun({ ...researchRun, interval: event.target.value })} required>
+              {CANDLE_INTERVALS.map((interval) => (
+                <option value={interval.value} key={interval.value}>{interval.label}</option>
+              ))}
+            </select>
+            <div className="date-pair">
+              <input value={researchRun.start} onChange={(event) => setResearchRun({ ...researchRun, start: event.target.value })} placeholder="Start YYYY-MM-DD" required />
+              <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} placeholder="End YYYY-MM-DD" required />
+            </div>
+            <div className="research-note">
+              <strong>{selectedResearchMarket?.fmp_symbol || "FMP symbol"}</strong>
+              <span>{selectedResearchMarket?.market_id === "NAS100" ? "If FMP rejects ^NDX on your plan, switch to QQQ as the Nasdaq proxy." : selectedEngine.description}</span>
+            </div>
+            <button disabled={researchState.status === "running"}>{researchState.status === "running" ? "Running..." : "Run FMP research"}</button>
             <button type="button" className="secondary" onClick={scheduleResearch}>Save nightly schedule</button>
           </form>
           <div className="status-list">
@@ -334,7 +405,7 @@ function App() {
                 <td>{item.fmp_symbol}</td>
                 <td>{item.ig_name || "search required"}</td>
                 <td>{item.ig_epic || "manual"}</td>
-                <td>{item.default_timeframe} · {item.spread_bps}/{item.slippage_bps} bps</td>
+                <td>{normalizeInterval(item.default_timeframe)} · {item.spread_bps}/{item.slippage_bps} bps</td>
                 <td>{item.enabled ? "Yes" : "No"}</td>
               </tr>
             ))}
@@ -372,6 +443,17 @@ function SecretBadge({ status }) {
 
 function providerStatus(statuses, provider) {
   return statuses.find((item) => item.provider === provider);
+}
+
+function normalizeInterval(value) {
+  if (value === "1h") {
+    return "1hour";
+  }
+  return value || "5min";
+}
+
+function timeframeLabel(value) {
+  return CANDLE_INTERVALS.find((interval) => interval.value === value)?.label ?? value;
 }
 
 createRoot(document.getElementById("root")).render(<App />);

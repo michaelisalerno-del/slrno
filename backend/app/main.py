@@ -52,7 +52,7 @@ class MarketPayload(BaseModel):
     plugin_id: str = ""
     ig_name: str = ""
     ig_search_terms: str = ""
-    default_timeframe: str = "1h"
+    default_timeframe: str = "5min"
     spread_bps: float = 2.0
     slippage_bps: float = 1.0
     min_backtest_bars: int = 750
@@ -63,6 +63,7 @@ class ResearchRunPayload(BaseModel):
     start: str
     end: str
     interval: str | None = None
+    engine: str = "probability_stack_v1"
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -70,7 +71,7 @@ class ResearchSchedulePayload(BaseModel):
     cadence: str
     enabled: bool = True
     market_ids: list[str] = Field(default_factory=list)
-    interval: str = "1h"
+    interval: str = "5min"
 
 
 @app.get("/health")
@@ -165,6 +166,8 @@ async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="Market not found")
     if not market.enabled:
         raise HTTPException(status_code=400, detail="Market is disabled")
+    if payload.engine != "probability_stack_v1":
+        raise HTTPException(status_code=400, detail="Unknown research engine")
     api_key = settings.get_secret("fmp", "api_key")
     if api_key is None:
         raise HTTPException(status_code=400, detail="FMP API key is required before launching research")
@@ -178,6 +181,8 @@ async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
             "start": payload.start,
             "end": payload.end,
             "interval": interval,
+            "engine": payload.engine,
+            "fmp_symbol": market.fmp_symbol,
             "research_only": True,
             "ig_validation_required": True,
         },

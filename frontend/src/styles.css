@@ -136,13 +136,14 @@ label {
   border: 1px solid #d8e0e8;
 }
 
-input {
+input, select {
   width: 100%;
   min-height: 40px;
   border: 1px solid #cbd3dc;
   border-radius: 7px;
   padding: 9px 10px;
   font: inherit;
+  background: #ffffff;
 }
 
 button {
@@ -155,6 +156,11 @@ button {
   color: #ffffff;
   background: #1f6feb;
   cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.65;
+  cursor: progress;
 }
 
 button.secondary {
@@ -184,6 +190,66 @@ button.secondary {
 .check input {
   width: auto;
   min-height: auto;
+}
+
+.run-state {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 14px;
+  background: #f6f8fa;
+}
+
+.run-state strong {
+  color: #586270;
+  font-size: 12px;
+}
+
+.run-state span {
+  color: #3f4854;
+  font-size: 14px;
+}
+
+.run-state.running {
+  border-color: #b7cef6;
+  background: #edf4ff;
+}
+
+.run-state.finished {
+  border-color: #bfe7d2;
+  background: #effaf5;
+}
+
+.run-state.error {
+  border-color: #f3c4c4;
+  background: #fff2f2;
+}
+
+.date-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.research-note {
+  grid-column: span 2;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+  background: #f6f8fa;
+}
+
+.research-note strong {
+  color: #20242a;
+}
+
+.research-note span {
+  color: #5f6875;
+  font-size: 13px;
 }
 
 .status-list, .plugin-list {
@@ -271,11 +337,11 @@ th {
     display: grid;
   }
 
-  .row, .compact {
+  .row, .compact, .date-pair {
     grid-template-columns: 1fr;
   }
 
-  .compact button, .compact .check {
+  .compact button, .compact .check, .research-note {
     grid-column: auto;
   }
 }
