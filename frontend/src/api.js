@@ -63,6 +63,21 @@ export function saveMarket(market) {
   });
 }
 
+export function getResearchEngines() {
+  return request("/research/engines");
+}
+
+export function syncIgCosts(payload = {}) {
+  return request("/ig/markets/sync-costs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getIgCostProfile(marketId) {
+  return request(`/ig/markets/${marketId}/cost-profile`);
+}
+
 export function createResearchRun(payload) {
   return request("/research/runs", {
     method: "POST",
@@ -74,8 +89,24 @@ export function getResearchRuns() {
   return request("/research/runs");
 }
 
+export function getResearchRun(runId) {
+  return request(`/research/runs/${runId}`);
+}
+
+export function getResearchTrials(runId) {
+  return request(`/research/runs/${runId}/trials`);
+}
+
+export function getResearchPareto(runId) {
+  return request(`/research/runs/${runId}/pareto`);
+}
+
 export function getResearchCandidates() {
   return request("/research/candidates");
+}
+
+export function getResearchCandidate(candidateId) {
+  return request(`/research/candidates/${candidateId}`);
 }
 
 export function getResearchCritique() {
