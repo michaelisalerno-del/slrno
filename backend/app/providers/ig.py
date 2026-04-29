@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from .base import AccountStatus, PaperOrder, Position
+from datetime import datetime
+
+from .base import AccountStatus, OHLCBar, PaperOrder, Position
 
 
 class IGDemoProvider:
@@ -107,6 +109,34 @@ class IGDemoProvider:
             for item in payload.get("markets", [])
         ]
 
+    async def market_details(self, epic: str) -> dict[str, object]:
+        import httpx
+
+        headers = await self._authenticated_headers()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.get(f"{self.base_url}/markets/{epic}", headers={**headers, "Version": "4"})
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(_ig_error_message(exc.response, f"IG market detail lookup failed for {epic}")) from exc
+
+    async def historical_prices(self, epic: str, resolution: str, start: str, end: str) -> list[OHLCBar]:
+        import httpx
+
+        headers = await self._authenticated_headers()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+                response = await client.get(
+                    f"{self.base_url}/prices/{epic}/{resolution}/{start}/{end}",
+                    headers={**headers, "Version": "3"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(_ig_error_message(exc.response, f"IG price lookup failed for {epic}")) from exc
+        return [_ig_price_bar(epic, row) for row in payload.get("prices", [])]
+
     async def positions(self) -> list[Position]:
         import httpx
 
@@ -192,3 +222,28 @@ def _optional_float(value: object) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _ig_price_bar(epic: str, row: dict[str, object]) -> OHLCBar:
+    close = row.get("closePrice") or {}
+    open_price = row.get("openPrice") or close
+    high = row.get("highPrice") or close
+    low = row.get("lowPrice") or close
+    timestamp = str(row.get("snapshotTimeUTC") or row.get("snapshotTime") or "").replace("/", "-")
+    return OHLCBar(
+        symbol=epic,
+        timestamp=datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
+        open=_mid(open_price),
+        high=_mid(high),
+        low=_mid(low),
+        close=_mid(close),
+        volume=float(row.get("lastTradedVolume") or 0),
+    )
+
+
+def _mid(value: dict[str, object]) -> float:
+    bid = _optional_float(value.get("bid"))
+    ask = _optional_float(value.get("ask") or value.get("offer"))
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2
+    return float(value.get("lastTraded") or value.get("bid") or value.get("ask") or value.get("offer") or 0)
