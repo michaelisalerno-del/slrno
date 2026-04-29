@@ -60,7 +60,7 @@ class MarketPlugin:
 
 def _plugin_from_market(market: MarketMapping, source_url: str, notes: str) -> MarketPlugin:
     return MarketPlugin(
-        plugin_id=market.plugin_id or f"ig-{market.market_id.lower()}",
+        plugin_id=_plugin_id(market),
         market_id=market.market_id,
         name=market.name,
         asset_class=market.asset_class,
@@ -71,6 +71,14 @@ def _plugin_from_market(market: MarketMapping, source_url: str, notes: str) -> M
         source_url=source_url,
         notes=notes,
     )
+
+
+def _plugin_id(market: MarketMapping) -> str:
+    if market.plugin_id:
+        return market.plugin_id
+    if market.market_id == "XAUUSD":
+        return "ig-spot-gold"
+    return f"ig-{market.market_id.lower()}"
 
 
 _SOURCE_URLS = {
