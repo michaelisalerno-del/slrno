@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from urllib.parse import quote_plus
 
 from .base import OHLCBar, Quote
+
+
+class FMPProviderError(RuntimeError):
+    pass
 
 
 class FMPProvider:
@@ -24,8 +27,10 @@ class FMPProvider:
                 payload = response.json()
         except httpx.TimeoutException as exc:
             raise TimeoutError("FMP validation timed out after 10 seconds") from exc
+        except httpx.HTTPStatusError as exc:
+            _raise_status_error(exc, "quote lookup", symbol)
         if not payload:
-            raise ValueError(f"No quote returned for {symbol}")
+            raise FMPProviderError(f"FMP returned no quote rows for {symbol}")
         item = payload[0]
         price = float(item.get("price") or item.get("previousClose") or 0)
         return Quote(
@@ -38,15 +43,21 @@ class FMPProvider:
     async def historical_bars(self, symbol: str, interval: str, start: str, end: str) -> list[OHLCBar]:
         import httpx
 
-        encoded = quote_plus(symbol)
-        url = f"{self.base_url}/historical-chart/{interval}/{encoded}"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
-            response = await client.get(
-                url,
-                params={"from": start, "to": end, "apikey": self.api_key},
-            )
-            response.raise_for_status()
-            payload = response.json()
+        url = f"{self.base_url}/historical-chart/{interval}"
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+                response = await client.get(
+                    url,
+                    params={"symbol": symbol, "from": start, "to": end, "apikey": self.api_key},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("FMP historical data request timed out after 30 seconds") from exc
+        except httpx.HTTPStatusError as exc:
+            _raise_status_error(exc, "historical bars", symbol)
+        if not isinstance(payload, list):
+            raise FMPProviderError(f"FMP returned an unexpected historical data shape for {symbol}")
         bars = [
             OHLCBar(
                 symbol=symbol,
@@ -64,13 +75,18 @@ class FMPProvider:
     async def search(self, query: str) -> list[dict[str, str]]:
         import httpx
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-            response = await client.get(
-                f"{self.base_url}/search-symbol",
-                params={"query": query, "apikey": self.api_key},
-            )
-            response.raise_for_status()
-            payload = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.get(
+                    f"{self.base_url}/search-symbol",
+                    params={"query": query, "apikey": self.api_key},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("FMP symbol search timed out after 10 seconds") from exc
+        except httpx.HTTPStatusError as exc:
+            _raise_status_error(exc, "symbol search", query)
         return [
             {
                 "symbol": str(item.get("symbol", "")),
@@ -83,6 +99,16 @@ class FMPProvider:
     async def validate(self) -> bool:
         await self.quote("AAPL")
         return True
+
+
+def _raise_status_error(exc: object, operation: str, symbol: str) -> None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", "unknown")
+    if status_code == 404:
+        raise FMPProviderError(
+            f"FMP {operation} returned HTTP 404 for {symbol}. The symbol, interval, or dataset may not be available on this FMP plan."
+        ) from exc
+    raise FMPProviderError(f"FMP {operation} returned HTTP {status_code} for {symbol}") from exc
 
 
 def _optional_float(value: object) -> float | None:
