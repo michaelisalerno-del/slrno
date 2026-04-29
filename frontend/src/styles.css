@@ -1,0 +1,245 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f6f7f9;
+  color: #20242a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(1180px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 28px 0 48px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+
+h1, h2, p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 34px;
+  line-height: 1.1;
+}
+
+h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 17px;
+  margin-bottom: 16px;
+}
+
+p {
+  color: #5f6875;
+  margin-top: 6px;
+}
+
+.mode, .notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #cdd6df;
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-weight: 650;
+}
+
+.notice {
+  width: 100%;
+  margin-bottom: 16px;
+  color: #135f44;
+  background: #effaf5;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.panel, .market-table {
+  background: #ffffff;
+  border: 1px solid #dde3ea;
+  border-radius: 8px;
+  padding: 18px;
+}
+
+form {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+form:last-child {
+  margin-bottom: 0;
+}
+
+label {
+  font-size: 13px;
+  font-weight: 650;
+  color: #3c4652;
+}
+
+input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #cbd3dc;
+  border-radius: 7px;
+  padding: 9px 10px;
+  font: inherit;
+}
+
+button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 7px;
+  padding: 9px 14px;
+  font: inherit;
+  font-weight: 700;
+  color: #ffffff;
+  background: #1f6feb;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: #334155;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compact button, .compact .check {
+  grid-column: span 2;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check input {
+  width: auto;
+  min-height: auto;
+}
+
+.status-list, .plugin-list {
+  display: grid;
+  gap: 10px;
+}
+
+.status, .plugin {
+  display: grid;
+  gap: 2px;
+  padding: 12px;
+  border: 1px solid #e0e6ed;
+  border-radius: 8px;
+}
+
+.plugin {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.plugin div {
+  display: grid;
+  gap: 3px;
+}
+
+.plugin span {
+  color: #3f4854;
+  font-size: 13px;
+}
+
+.plugin small {
+  color: #6b7480;
+}
+
+.status span {
+  color: #135f44;
+  font-weight: 650;
+}
+
+.status small, .muted {
+  color: #6b7480;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric {
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+  background: #f6f8fa;
+  border-radius: 8px;
+}
+
+.metric span {
+  color: #68717d;
+  font-size: 13px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  border-bottom: 1px solid #e5eaf0;
+  padding: 11px 8px;
+  font-size: 14px;
+}
+
+th {
+  color: #586270;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 780px) {
+  .topbar, .grid.two {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .row, .compact {
+    grid-template-columns: 1fr;
+  }
+
+  .compact button, .compact .check {
+    grid-column: auto;
+  }
+}
