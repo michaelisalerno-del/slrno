@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from app.fmp_cache import FMPCache
 from app.providers.fmp import FMPProvider
@@ -55,9 +57,17 @@ def test_fmp_provider_reuses_cached_historical_chunks_across_api_keys(tmp_path, 
         async def get(self, _url: str, params: dict[str, object]) -> FakeResponse:
             return FakeResponse(params)
 
-    import httpx
+    class FakeTimeout:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
 
-    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    fake_httpx = SimpleNamespace(
+        AsyncClient=FakeClient,
+        Timeout=FakeTimeout,
+        TimeoutException=TimeoutError,
+        HTTPStatusError=RuntimeError,
+    )
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
     provider = FMPProvider("first-key", base_url="https://example.test", cache=cache)
 
     first = asyncio.run(provider.historical_bars("QQQ", "5min", "2025-01-01", "2025-01-10"))
