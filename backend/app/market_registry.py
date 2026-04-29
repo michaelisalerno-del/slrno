@@ -28,6 +28,7 @@ DEFAULT_MARKETS = [
     MarketMapping("US500", "S&P 500", "index", "^GSPC", "", True, "", "US 500", "US 500,S&P 500,SPX", "5min"),
     MarketMapping("NAS100", "Nasdaq 100", "index", "^NDX", "", True, "", "US Tech 100", "US Tech 100,Nasdaq,NASDAQ 100", "5min"),
     MarketMapping("QQQ", "QQQ Nasdaq 100 ETF proxy", "etf", "QQQ", "", True, "fmp-qqq-nasdaq-proxy", "US Tech 100", "US Tech 100,Nasdaq,QQQ", "5min"),
+    MarketMapping("SPY", "SPY S&P 500 ETF proxy", "etf", "SPY", "", True, "fmp-spy-sp500-proxy", "US 500", "US 500,S&P 500,SPY", "5min"),
     MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD", "", True, "", "Spot Gold", "Spot Gold,Gold,XAU/USD", "5min", 3.0, 1.5),
 ]
 
