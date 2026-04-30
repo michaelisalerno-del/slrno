@@ -65,6 +65,7 @@ const SEARCH_PRESETS = [
 
 const STYLE_OPTIONS = [
   { id: "find_anything_robust", label: "Find anything robust" },
+  { id: "research_ideas", label: "Known research ideas" },
   { id: "intraday_only", label: "Intraday only" },
   { id: "swing_trades", label: "Swing trades" },
   { id: "lower_drawdown", label: "Lower drawdown" },
@@ -688,7 +689,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
                 <tr key={trial.id}>
                   <td>{trial.strategy_name}</td>
                   <td><span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span></td>
-                  <td>{trial.strategy_family || trial.style}</td>
+                  <td>{strategyFamilyLabel(trial.strategy_family || trial.style)}</td>
                   <td>{round(trial.robustness_score)}</td>
                   <td>{round(trial.backtest?.sharpe)}</td>
                   <td>{round(trial.backtest?.daily_pnl_sharpe)}</td>
@@ -714,10 +715,12 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
 }
 
 function ParetoCard({ item }) {
+  const recipe = researchRecipeLabel(item.settings?.research_recipe);
   return (
     <div className="pareto-card">
       <span className="eyebrow">{labelForKind(item.kind)}</span>
       <strong>{item.strategy_name}</strong>
+      {recipe && <small>{recipe}</small>}
       <div className="mini-metrics">
         <Metric label="Score" value={round(item.robustness_score)} />
         <Metric label="Sharpe" value={round(item.sharpe)} />
@@ -750,6 +753,9 @@ function CandidateView({ candidates, critique }) {
               </div>
               <strong>{candidate.strategy_name}</strong>
               <span>{candidate.market_id} · score {round(candidate.robustness_score)}</span>
+              {researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe) && (
+                <small>{researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe)}</small>
+              )}
               <small>{humanWarnings(candidate.audit?.warnings).join(" · ") || "Passed current research gates"}</small>
               <div className="mini-metrics">
                 <Metric label="Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
@@ -1066,6 +1072,8 @@ function humanWarnings(warnings = []) {
     profits_not_consistent_across_folds: "Fragile folds",
     funding_eats_swing_edge: "Funding eats swing edge",
     needs_ig_price_validation: "Needs IG price validation",
+    calendar_effect_needs_longer_history: "Needs longer calendar history",
+    known_edge_needs_cross_market_validation: "Needs cross-market validation",
     high_sharpe_low_trade_count: "High Sharpe, low trades",
     high_sharpe_weak_folds: "High Sharpe, weak folds",
     isolated_parameter_peak: "Isolated parameter peak",
@@ -1073,6 +1081,28 @@ function humanWarnings(warnings = []) {
     multiple_testing_haircut: "Multiple-testing haircut",
   };
   return (warnings ?? []).map((warning) => labels[warning] ?? warning);
+}
+
+function strategyFamilyLabel(value) {
+  return {
+    calendar_turnaround_tuesday: "Turnaround Tuesday",
+    month_end_seasonality: "Turn of month",
+    intraday_trend: "Intraday trend",
+    swing_trend: "Swing trend",
+    mean_reversion: "Mean reversion",
+    volatility_expansion: "Volatility expansion",
+    scalping: "Scalping",
+    breakout: "Breakout",
+    research_ideas: "Known research ideas",
+    find_anything_robust: "Find anything robust",
+  }[value] ?? value;
+}
+
+function researchRecipeLabel(value) {
+  return {
+    turnaround_tuesday_after_down_previous_session: "Tests Tuesday rebounds after a down prior session",
+    turn_of_month_long_bias: "Tests turn-of-month long bias",
+  }[value] ?? "";
 }
 
 function labelForKind(kind) {

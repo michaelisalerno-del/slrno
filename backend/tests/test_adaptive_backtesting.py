@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.adaptive_research import AdaptiveSearchConfig, _promotion_tier, balanced_score, run_adaptive_search
+from app.adaptive_research import AdaptiveSearchConfig, _generate_signals, _promotion_tier, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -148,6 +148,88 @@ def test_negative_total_net_does_not_promote_to_research_candidate():
     assert _promotion_tier(evaluation, stability=1.0, cost_profile=profile) == "watchlist"
 
 
+def test_turnaround_tuesday_signals_after_down_monday():
+    bars = [
+        OHLCBar("TEST", datetime(2026, 1, 2, 16), 100, 101, 99, 100),
+        OHLCBar("TEST", datetime(2026, 1, 5, 16), 96, 97, 94, 95),
+        OHLCBar("TEST", datetime(2026, 1, 6, 9), 95, 97, 94, 96),
+        OHLCBar("TEST", datetime(2026, 1, 6, 10), 96, 98, 95, 97),
+        OHLCBar("TEST", datetime(2026, 1, 7, 9), 97, 98, 96, 97),
+    ]
+    signals = _generate_signals(
+        bars,
+        "calendar_turnaround_tuesday",
+        {
+            "lookback": 1,
+            "threshold_bps": 100,
+            "z_threshold": 1,
+            "volatility_multiplier": 1,
+            "stop_loss_bps": 500,
+            "take_profit_bps": 500,
+            "max_hold_bars": 4,
+            "min_hold_bars": 1,
+            "min_trade_spacing": 0,
+            "confidence_quantile": 1.0,
+            "regime_filter": "any",
+            "direction": "long_only",
+            "weekday": 1,
+            "previous_day_filter": "monday_down",
+        },
+    )
+
+    assert all(signal >= 0 for signal in signals)
+    assert any(signal > 0 for bar, signal in zip(bars, signals) if bar.timestamp.weekday() == 1)
+
+
+def test_month_end_seasonality_signals_last_trading_days():
+    bars = [
+        OHLCBar("TEST", datetime(2026, 1, 26 + offset, 16), 100 + offset, 101 + offset, 99 + offset, 100 + offset)
+        for offset in range(5)
+    ]
+    signals = _generate_signals(
+        bars,
+        "month_end_seasonality",
+        {
+            "lookback": 1,
+            "threshold_bps": 10,
+            "z_threshold": 1,
+            "volatility_multiplier": 1,
+            "stop_loss_bps": 500,
+            "take_profit_bps": 500,
+            "max_hold_bars": 4,
+            "min_hold_bars": 1,
+            "min_trade_spacing": 0,
+            "confidence_quantile": 1.0,
+            "regime_filter": "any",
+            "direction": "long_only",
+            "month_end_window": 2,
+            "month_start_window": 0,
+        },
+    )
+
+    active_dates = {bar.timestamp.date() for bar, signal in zip(bars, signals) if signal > 0}
+    assert datetime(2026, 1, 29).date() in active_dates
+    assert datetime(2026, 1, 30).date() in active_dates
+
+
+def test_research_ideas_style_runs_calendar_family_trials():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    bars = _calendar_research_bars()
+
+    result = run_adaptive_search(
+        bars,
+        "TEST",
+        "1day",
+        profile,
+        AdaptiveSearchConfig(preset="quick", trading_style="research_ideas", search_budget=8, seed=4),
+    )
+
+    families = {evaluation.candidate.parameters["family"] for evaluation in result.evaluations}
+    assert {"calendar_turnaround_tuesday", "month_end_seasonality"}.issubset(families)
+    assert all(evaluation.candidate.parameters["direction"] == "long_only" for evaluation in result.evaluations)
+
+
 def _trend_bars(count: int) -> list[OHLCBar]:
     start = datetime(2026, 1, 1, 9)
     price = 100.0
@@ -162,6 +244,35 @@ def _trend_bars(count: int) -> list[OHLCBar]:
                 price - 0.1,
                 price + 0.4,
                 price - 0.4,
+                price,
+            )
+        )
+    return bars
+
+
+def _calendar_research_bars() -> list[OHLCBar]:
+    start = datetime(2026, 1, 1, 16)
+    price = 100.0
+    bars: list[OHLCBar] = []
+    for index in range(180):
+        timestamp = start + timedelta(days=index)
+        if timestamp.weekday() >= 5:
+            continue
+        if timestamp.weekday() == 0:
+            price *= 0.992
+        elif timestamp.weekday() == 1:
+            price *= 1.008
+        elif index % 17 == 0:
+            price *= 1.004
+        else:
+            price *= 1.001
+        bars.append(
+            OHLCBar(
+                "TEST",
+                timestamp,
+                price * 0.998,
+                price * 1.004,
+                price * 0.996,
                 price,
             )
         )
