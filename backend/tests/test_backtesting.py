@@ -28,6 +28,10 @@ def test_vector_backtest_reports_profit_and_risk_metrics():
     assert result.estimated_slippage_bps == 0.7
     assert result.win_rate > 0
     assert result.exposure == 1
+    assert result.daily_pnl_curve
+    assert result.sharpe_observations >= 1
+    assert result.turnover_efficiency != 0
+    assert 0 <= result.probabilistic_sharpe_ratio <= 1
 
 
 def test_vector_backtest_validates_input_lengths():

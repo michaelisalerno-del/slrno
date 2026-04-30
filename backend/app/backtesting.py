@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from math import sqrt
+from math import erf, sqrt
 
 from .providers.base import OHLCBar
 
@@ -51,8 +51,15 @@ class BacktestResult:
     cost_confidence: str = "ig_public_spread_baseline"
     estimated_spread_bps: float = 0.0
     estimated_slippage_bps: float = 0.0
+    daily_pnl_sharpe: float = 0.0
+    rolling_sharpe_min: float = 0.0
+    rolling_sharpe_median: float = 0.0
+    probabilistic_sharpe_ratio: float = 0.0
+    sharpe_observations: int = 0
+    turnover_efficiency: float = 0.0
     equity_curve: tuple[float, ...] = ()
     drawdown_curve: tuple[float, ...] = ()
+    daily_pnl_curve: tuple[float, ...] = ()
 
 
 def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: BacktestConfig | None = None) -> BacktestResult:
@@ -81,6 +88,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     funding_cost = 0.0
     fx_cost = 0.0
     guaranteed_stop_cost = 0.0
+    daily_pnl: dict[str, float] = {}
 
     for index in range(1, len(bars)):
         previous_bar = bars[index - 1]
@@ -123,6 +131,8 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         fx_cost += trade_fx
         guaranteed_stop_cost += trade_guaranteed
         pnl.append(trade_pnl)
+        pnl_date = current_bar.timestamp.date().isoformat()
+        daily_pnl[pnl_date] = daily_pnl.get(pnl_date, 0.0) + trade_pnl
         equity += trade_pnl
         wins += 1 if trade_pnl > 0 else 0
         peak = max(peak, equity)
@@ -139,9 +149,12 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     train_sharpe = _sharpe(pnl[:split])
     test_sharpe = _sharpe(pnl[split:])
     total_cost = spread_cost + slippage_cost + commission_cost + funding_cost + fx_cost + guaranteed_stop_cost
+    net_profit = sum(pnl)
+    daily_pnl_values = list(daily_pnl.values())
+    rolling_sharpes = _rolling_sharpes(daily_pnl_values, window=20)
 
     return BacktestResult(
-        net_profit=sum(pnl),
+        net_profit=net_profit,
         sharpe=sharpe,
         train_sharpe=train_sharpe,
         test_sharpe=test_sharpe,
@@ -163,8 +176,15 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         cost_confidence=config.cost_confidence,
         estimated_spread_bps=config.spread_bps,
         estimated_slippage_bps=config.slippage_bps,
+        daily_pnl_sharpe=_sharpe(daily_pnl_values),
+        rolling_sharpe_min=min(rolling_sharpes) if rolling_sharpes else 0.0,
+        rolling_sharpe_median=_median(rolling_sharpes),
+        probabilistic_sharpe_ratio=_probabilistic_sharpe_ratio(daily_pnl_values),
+        sharpe_observations=len(daily_pnl_values),
+        turnover_efficiency=net_profit / max(1e-9, trade_count * config.position_size),
         equity_curve=_sample_curve(equity_values),
         drawdown_curve=_sample_curve(drawdown_values),
+        daily_pnl_curve=_sample_curve(daily_pnl_values),
     )
 
 
@@ -198,3 +218,41 @@ def _sharpe(pnl: list[float]) -> float:
     mean = sum(pnl) / len(pnl)
     variance = sum((value - mean) ** 2 for value in pnl) / len(pnl)
     return 0.0 if variance == 0 else (mean / sqrt(variance)) * sqrt(252)
+
+
+def _rolling_sharpes(pnl: list[float], window: int) -> list[float]:
+    if len(pnl) < max(5, window):
+        return []
+    return [_sharpe(pnl[index - window : index]) for index in range(window, len(pnl) + 1)]
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+
+def _probabilistic_sharpe_ratio(pnl: list[float], target_annual_sharpe: float = 0.0) -> float:
+    sample_size = len(pnl)
+    if sample_size < 3:
+        return 0.0
+    mean = sum(pnl) / sample_size
+    variance = sum((value - mean) ** 2 for value in pnl) / sample_size
+    if variance <= 0:
+        return 0.0
+    std = sqrt(variance)
+    observed = mean / std
+    target = target_annual_sharpe / sqrt(252)
+    skew = sum(((value - mean) / std) ** 3 for value in pnl) / sample_size
+    kurtosis = sum(((value - mean) / std) ** 4 for value in pnl) / sample_size
+    denominator = sqrt(max(1e-12, 1 - skew * observed + ((kurtosis - 1) / 4) * observed**2))
+    z_score = (observed - target) * sqrt(sample_size - 1) / denominator
+    return round(_normal_cdf(z_score), 6)
+
+
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1 + erf(value / sqrt(2)))

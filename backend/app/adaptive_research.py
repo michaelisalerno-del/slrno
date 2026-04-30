@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from math import erf, log, sqrt
 from random import Random
 
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
@@ -135,7 +136,7 @@ def run_adaptive_search(
             )
         )
 
-    ranked = tuple(sorted(evaluations, key=lambda item: item.robustness_score, reverse=True))
+    ranked = _annotate_evaluations(tuple(evaluations), budget, tuple(families), config, cost_profile)
     return AdaptiveSearchResult(ranked, _pareto(ranked), cost_profile)
 
 
@@ -351,6 +352,233 @@ def _warnings(
     if cost_profile.confidence != "ig_live_epic_cost_profile":
         warnings.append("needs_ig_price_validation")
     return warnings
+
+
+def _annotate_evaluations(
+    evaluations: tuple[CandidateEvaluation, ...],
+    trial_count: int,
+    families: tuple[str, ...],
+    config: AdaptiveSearchConfig,
+    cost_profile: IGCostProfile,
+) -> tuple[CandidateEvaluation, ...]:
+    ranked = tuple(sorted(evaluations, key=lambda item: item.robustness_score, reverse=True))
+    output: list[CandidateEvaluation] = []
+    for rank, evaluation in enumerate(ranked, start=1):
+        stability = _parameter_stability_score(evaluation, evaluations)
+        diagnostics = _sharpe_diagnostics(evaluation.backtest, evaluation.fold_results, trial_count, stability)
+        tier = _promotion_tier(evaluation, stability, cost_profile)
+        parameters = {
+            **evaluation.candidate.parameters,
+            "promotion_tier": tier,
+            "search_audit": {
+                "trial_rank": rank,
+                "trial_count": trial_count,
+                "families_tested": list(families),
+                "search_preset": config.preset,
+                "trading_style": config.trading_style,
+                "objective": config.objective,
+                "risk_profile": config.risk_profile,
+            },
+            "parameter_stability_score": stability,
+            "sharpe_diagnostics": diagnostics,
+        }
+        output.append(
+            replace(
+                evaluation,
+                candidate=replace(evaluation.candidate, parameters=parameters),
+                passed=tier in {"paper_candidate", "validated_candidate"},
+                warnings=tuple(sorted(set(evaluation.warnings).union(diagnostics["implausibility_flags"]))),
+                promotion_tier=tier,
+            )
+        )
+    return tuple(output)
+
+
+def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_profile: IGCostProfile) -> str:
+    backtest = evaluation.backtest
+    stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
+    fold_rate = _positive_fold_rate(evaluation.fold_results)
+    if backtest.trade_count < 5:
+        return "reject"
+    if backtest.max_drawdown > 7_500:
+        return "reject"
+    if backtest.net_profit <= 0 and backtest.test_profit <= 0:
+        return "reject"
+    paper_ready = (
+        backtest.net_profit > 0
+        and backtest.test_profit > 0
+        and stress_net_profit > 0
+        and backtest.trade_count >= 18
+        and fold_rate >= 0.55
+        and backtest.max_drawdown <= 3_500
+    )
+    if paper_ready and cost_profile.confidence == "ig_live_epic_cost_profile" and stability >= 0.55:
+        return "validated_candidate"
+    if paper_ready:
+        return "paper_candidate"
+    if (backtest.net_profit > 0 or backtest.test_profit > 0) and backtest.trade_count >= 10:
+        return "research_candidate"
+    if backtest.gross_profit > 0 or backtest.sharpe > 0.5:
+        return "watchlist"
+    return "reject"
+
+
+def _parameter_stability_score(evaluation: CandidateEvaluation, evaluations: tuple[CandidateEvaluation, ...]) -> float:
+    params = evaluation.candidate.parameters
+    family = params.get("family")
+    neighbors = [
+        item
+        for item in evaluations
+        if item is not evaluation
+        and item.candidate.parameters.get("family") == family
+        and _parameter_distance(params, item.candidate.parameters) <= 0.6
+    ]
+    if not neighbors:
+        return round(max(0.0, _positive_fold_rate(evaluation.fold_results) * (1.0 - _profit_concentration(evaluation.fold_results))), 6)
+    robust_neighbors = [
+        item
+        for item in neighbors
+        if item.backtest.test_profit > 0 and float(item.candidate.parameters.get("stress_net_profit") or 0.0) > 0
+    ]
+    neighbor_score = len(robust_neighbors) / len(neighbors)
+    fold_score = _positive_fold_rate(evaluation.fold_results)
+    concentration_score = 1.0 - _profit_concentration(evaluation.fold_results)
+    return round(_clamp(0.45 * neighbor_score + 0.35 * fold_score + 0.20 * concentration_score, 0.0, 1.0), 6)
+
+
+def _parameter_distance(left: dict[str, object], right: dict[str, object]) -> float:
+    numeric_keys = (
+        "lookback",
+        "threshold_bps",
+        "z_threshold",
+        "volatility_multiplier",
+        "stop_loss_bps",
+        "take_profit_bps",
+        "max_hold_bars",
+        "min_trade_spacing",
+        "confidence_quantile",
+        "position_size",
+    )
+    distances: list[float] = []
+    for key in numeric_keys:
+        if key not in left or key not in right:
+            continue
+        left_value = float(left[key] or 0.0)
+        right_value = float(right[key] or 0.0)
+        scale = max(abs(left_value), abs(right_value), 1.0)
+        distances.append(abs(left_value - right_value) / scale)
+    if not distances:
+        return 1.0
+    direction_penalty = 0.25 if left.get("direction") != right.get("direction") else 0.0
+    regime_penalty = 0.15 if left.get("regime_filter") != right.get("regime_filter") else 0.0
+    return sum(distances) / len(distances) + direction_penalty + regime_penalty
+
+
+def _sharpe_diagnostics(
+    backtest: BacktestResult,
+    folds: tuple[BacktestResult, ...],
+    trial_count: int,
+    parameter_stability_score: float,
+) -> dict[str, object]:
+    fold_sharpes = [fold.sharpe for fold in folds]
+    daily_pnl = list(backtest.daily_pnl_curve)
+    deflated = _deflated_sharpe_probability(daily_pnl, trial_count)
+    haircut = _multiple_testing_sharpe_haircut(backtest.daily_pnl_sharpe, len(daily_pnl), trial_count)
+    return {
+        "daily_pnl_sharpe": round(backtest.daily_pnl_sharpe, 4),
+        "full_period_sharpe": round(backtest.sharpe, 4),
+        "holdout_sharpe": round(backtest.test_sharpe, 4),
+        "walk_forward_median_sharpe": round(_median(fold_sharpes), 4),
+        "rolling_sharpe_min": round(backtest.rolling_sharpe_min, 4),
+        "rolling_sharpe_median": round(backtest.rolling_sharpe_median, 4),
+        "probabilistic_sharpe_ratio": round(backtest.probabilistic_sharpe_ratio, 6),
+        "deflated_sharpe_probability": deflated,
+        "haircut_adjusted_daily_sharpe": haircut,
+        "trial_count": trial_count,
+        "sharpe_observations": backtest.sharpe_observations,
+        "parameter_stability_score": parameter_stability_score,
+        "turnover_efficiency": round(backtest.turnover_efficiency, 6),
+        "implausibility_flags": _implausibility_flags(backtest, folds, trial_count, parameter_stability_score),
+    }
+
+
+def _implausibility_flags(
+    backtest: BacktestResult,
+    folds: tuple[BacktestResult, ...],
+    trial_count: int,
+    parameter_stability_score: float,
+) -> list[str]:
+    flags: list[str] = []
+    if backtest.daily_pnl_sharpe >= 2 and backtest.trade_count < 25:
+        flags.append("high_sharpe_low_trade_count")
+    if backtest.daily_pnl_sharpe >= 2 and _positive_fold_rate(folds) < 0.6:
+        flags.append("high_sharpe_weak_folds")
+    if backtest.daily_pnl_sharpe >= 2 and parameter_stability_score < 0.35:
+        flags.append("isolated_parameter_peak")
+    if backtest.total_cost <= max(1.0, abs(backtest.gross_profit) * 0.05) and backtest.trade_count > 25:
+        flags.append("costs_small_vs_turnover")
+    if trial_count >= 50 and _deflated_sharpe_probability(list(backtest.daily_pnl_curve), trial_count) < 0.5:
+        flags.append("multiple_testing_haircut")
+    return flags
+
+
+def _deflated_sharpe_probability(daily_pnl: list[float], trial_count: int) -> float:
+    if len(daily_pnl) < 3:
+        return 0.0
+    benchmark = _multiple_testing_sharpe_threshold(len(daily_pnl), trial_count)
+    return round(_probabilistic_sharpe_ratio(daily_pnl, benchmark), 6)
+
+
+def _multiple_testing_sharpe_haircut(observed_annual_sharpe: float, sample_size: int, trial_count: int) -> float:
+    return round(observed_annual_sharpe - _multiple_testing_sharpe_threshold(sample_size, trial_count), 4)
+
+
+def _multiple_testing_sharpe_threshold(sample_size: int, trial_count: int) -> float:
+    if sample_size < 2 or trial_count <= 1:
+        return 0.0
+    return sqrt(252) * sqrt(2 * log(max(2, trial_count)) / sample_size)
+
+
+def _probabilistic_sharpe_ratio(daily_pnl: list[float], target_annual_sharpe: float) -> float:
+    sample_size = len(daily_pnl)
+    if sample_size < 3:
+        return 0.0
+    mean = sum(daily_pnl) / sample_size
+    variance = sum((value - mean) ** 2 for value in daily_pnl) / sample_size
+    if variance <= 0:
+        return 0.0
+    std = sqrt(variance)
+    observed = mean / std
+    target = target_annual_sharpe / sqrt(252)
+    skew = sum(((value - mean) / std) ** 3 for value in daily_pnl) / sample_size
+    kurtosis = sum(((value - mean) / std) ** 4 for value in daily_pnl) / sample_size
+    denominator = sqrt(max(1e-12, 1 - skew * observed + ((kurtosis - 1) / 4) * observed**2))
+    z_score = (observed - target) * sqrt(sample_size - 1) / denominator
+    return _normal_cdf(z_score)
+
+
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1 + erf(value / sqrt(2)))
+
+
+def _profit_concentration(folds: tuple[BacktestResult, ...]) -> float:
+    if not folds:
+        return 1.0
+    positive = [fold.net_profit for fold in folds if fold.net_profit > 0]
+    if not positive:
+        return 1.0
+    total = sum(positive)
+    return max(positive) / total if total > 0 else 1.0
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
 
 
 def _pareto(evaluations: tuple[CandidateEvaluation, ...]) -> tuple[dict[str, object], ...]:

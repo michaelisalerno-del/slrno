@@ -56,6 +56,12 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert result.evaluations[0].robustness_score >= result.evaluations[-1].robustness_score
     assert result.pareto
     assert any("needs_ig_price_validation" in evaluation.warnings for evaluation in result.evaluations)
+    best = result.evaluations[0]
+    assert best.promotion_tier in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate", "reject"}
+    assert best.candidate.parameters["promotion_tier"] == best.promotion_tier
+    assert best.candidate.parameters["search_audit"]["trial_count"] == 9
+    assert "deflated_sharpe_probability" in best.candidate.parameters["sharpe_diagnostics"]
+    assert "parameter_stability_score" in best.candidate.parameters
 
 
 def _trend_bars(count: int) -> list[OHLCBar]:

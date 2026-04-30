@@ -127,6 +127,7 @@ def _candidate_like(keep: bool, test_net_profit: float, max_drawdown: float, equ
         fold_consistency_score=0.8,
         max_single_fold_profit_share=0.5,
         cost_efficiency_score=0.9,
+        promotion_tier="paper_candidate" if keep else "research_candidate",
         keep=keep,
         failed_gates=(),
         warnings=(),
