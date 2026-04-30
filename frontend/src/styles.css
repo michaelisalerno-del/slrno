@@ -317,6 +317,11 @@ button.ghost {
   background: #effaf5;
 }
 
+.run-state.finished_with_warnings {
+  border-color: #f0d28a;
+  background: #fff8e8;
+}
+
 .run-state.error {
   border-color: #f3c4c4;
   background: #fff2f2;

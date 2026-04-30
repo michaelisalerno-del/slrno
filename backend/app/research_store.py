@@ -116,6 +116,10 @@ class ResearchStore:
         with self._connect() as conn:
             conn.execute("UPDATE research_runs SET status = ?, error = ? WHERE id = ?", (status, error, run_id))
 
+    def update_run_config(self, run_id: int, config: dict[str, object]) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE research_runs SET config_json = ? WHERE id = ?", (json.dumps(config, sort_keys=True), run_id))
+
     def save_trial(self, run_id: int, evaluation: CandidateEvaluation) -> None:
         parameters = dict(evaluation.candidate.parameters)
         backtest = _compact_backtest(asdict(evaluation.backtest))
