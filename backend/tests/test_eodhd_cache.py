@@ -83,6 +83,66 @@ def test_eodhd_provider_reuses_cached_intraday_across_tokens(tmp_path, monkeypat
     assert {call["api_token"] for call in calls} == {"first-token"}
 
 
+def test_eodhd_provider_skips_incomplete_intraday_rows(tmp_path, monkeypatch):
+    cache = MarketDataCache(tmp_path / "market_data_cache.sqlite3")
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "timestamp": 1735722000,
+                    "open": None,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume": 10,
+                },
+                {
+                    "timestamp": 1735722300,
+                    "open": 100,
+                    "high": 102,
+                    "low": 99,
+                    "close": 101,
+                    "volume": None,
+                },
+            ]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, _url: str, params: dict[str, object]) -> FakeResponse:
+            return FakeResponse()
+
+    class FakeTimeout:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    fake_httpx = SimpleNamespace(
+        AsyncClient=FakeClient,
+        Timeout=FakeTimeout,
+        TimeoutException=TimeoutError,
+        HTTPStatusError=RuntimeError,
+    )
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    provider = EODHDProvider("token", base_url="https://example.test", cache=cache)
+
+    bars = asyncio.run(provider.historical_bars("NDX.INDX", "5min", "2025-01-01", "2025-01-10"))
+
+    assert len(bars) == 1
+    assert bars[0].open == 100
+    assert bars[0].volume == 0.0
+
+
 def test_eodhd_commodity_endpoint_filters_date_range(tmp_path, monkeypatch):
     cache = MarketDataCache(tmp_path / "market_data_cache.sqlite3")
     requested: list[tuple[str, dict[str, object]]] = []
