@@ -525,9 +525,17 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
     backtest = evaluation.backtest
     stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
     fold_rate = _positive_fold_rate(evaluation.fold_results)
+    viable_research_lead = (
+        backtest.net_profit > 0
+        and backtest.test_profit > 0
+        and stress_net_profit > 0
+        and backtest.trade_count >= 10
+        and backtest.cost_to_gross_ratio <= 0.85
+        and backtest.net_cost_ratio >= 0.2
+    )
     if backtest.trade_count < 5:
         return "reject"
-    if backtest.max_drawdown > 7_500:
+    if backtest.max_drawdown > 7_500 and not viable_research_lead:
         return "reject"
     if backtest.net_profit <= 0 and backtest.test_profit <= 0:
         return "reject"
@@ -551,11 +559,7 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
     if paper_ready:
         return "paper_candidate"
     if (
-        backtest.net_profit > 0
-        and backtest.test_profit > 0
-        and backtest.trade_count >= 10
-        and backtest.cost_to_gross_ratio <= 0.85
-        and backtest.net_cost_ratio >= 0.2
+        viable_research_lead
     ):
         return "research_candidate"
     if backtest.gross_profit > 0 or backtest.sharpe > 0.5:

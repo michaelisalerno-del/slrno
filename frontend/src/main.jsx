@@ -771,7 +771,7 @@ function CandidateView({ candidates, critique }) {
               </div>
             </div>
           ))}
-          {candidates.length === 0 && <span className="muted">No research-only candidates promoted yet.</span>}
+          {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
         </div>
       </section>
       <section className="lab-section span-2">
@@ -925,7 +925,7 @@ function runStateDetail(detail, plannedTrials) {
     return `Run ${detail.id}: ${savedTrials}/${plannedTrials} strategy trials saved.`;
   }
   if (detail?.status === "finished") {
-    return `Run ${detail.id}: ${savedTrials} trials, ${detail.passed_count ?? 0} passing, best score ${round(detail.best_score)}.`;
+    return `Run ${detail.id}: ${savedTrials} trials, ${detail.passed_count ?? 0} paper-ready, best score ${round(detail.best_score)}.`;
   }
   if (detail?.status === "finished_with_warnings") {
     return `Run ${detail.id}: ${savedTrials} trials saved with market data warnings.`;
@@ -1072,6 +1072,7 @@ function humanWarnings(warnings = []) {
     profits_not_consistent_across_folds: "Fragile folds",
     funding_eats_swing_edge: "Funding eats swing edge",
     needs_ig_price_validation: "Needs IG price validation",
+    not_paper_ready_research_lead: "Research lead only",
     calendar_effect_needs_longer_history: "Needs longer calendar history",
     known_edge_needs_cross_market_validation: "Needs cross-market validation",
     high_sharpe_low_trade_count: "High Sharpe, low trades",

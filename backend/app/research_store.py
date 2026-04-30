@@ -191,7 +191,9 @@ class ResearchStore:
 
     def save_candidate(self, run_id: int, market_id: str, evaluation: CandidateEvaluation) -> None:
         promotion_tier = _evaluation_tier(evaluation)
-        if promotion_tier not in {"research_candidate", "paper_candidate", "validated_candidate"}:
+        if promotion_tier not in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate"}:
+            return
+        if promotion_tier == "watchlist" and not _is_material_watchlist_lead(evaluation):
             return
         with self._connect() as conn:
             conn.execute(
@@ -392,7 +394,7 @@ class ResearchStore:
                 """,
                 params,
             ).fetchall()
-        return [
+        candidates = [
             {
                 "id": row[0],
                 "run_id": row[1],
@@ -406,8 +408,14 @@ class ResearchStore:
             }
             for row in rows
         ]
+        return self._include_trial_research_leads(candidates, run_id)
 
     def get_candidate(self, candidate_id: int) -> dict[str, object] | None:
+        if candidate_id < 0:
+            trial = next((item for item in self.list_trials() if int(item["id"]) == abs(candidate_id)), None)
+            if trial is None or not _trial_should_surface_as_research_lead(trial):
+                return None
+            return _candidate_from_trial_lead(trial)
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -429,6 +437,21 @@ class ResearchStore:
             "created_at": row[7],
             "promotion_tier": row[8],
         }
+
+    def _include_trial_research_leads(self, candidates: list[dict[str, object]], run_id: int | None) -> list[dict[str, object]]:
+        existing = {(int(candidate["run_id"]), str(candidate["strategy_name"])) for candidate in candidates}
+        limit = 12 if run_id is not None else 24
+        added = 0
+        for trial in self.list_trials(run_id):
+            key = (int(trial["run_id"]), str(trial["strategy_name"]))
+            if key in existing or not _trial_should_surface_as_research_lead(trial):
+                continue
+            candidates.append(_candidate_from_trial_lead(trial))
+            existing.add(key)
+            added += 1
+            if added >= limit:
+                break
+        return sorted(candidates, key=lambda item: (float(item["robustness_score"]), int(item["id"])), reverse=True)
 
     def save_schedule(self, name: str, cadence: str, enabled: bool, config: dict[str, object]) -> int:
         with self._connect() as conn:
@@ -458,6 +481,64 @@ def _evaluation_tier(evaluation: CandidateEvaluation) -> str:
     if evaluation.promotion_tier != "reject" or not evaluation.passed:
         return evaluation.promotion_tier
     return "paper_candidate"
+
+
+def _is_material_watchlist_lead(evaluation: CandidateEvaluation) -> bool:
+    backtest = evaluation.backtest
+    return (
+        evaluation.robustness_score >= 25
+        and backtest.trade_count >= 5
+        and (backtest.net_profit > 0 or backtest.test_profit > 0 or backtest.daily_pnl_sharpe >= 1.0)
+    )
+
+
+def _trial_should_surface_as_research_lead(trial: dict[str, object]) -> bool:
+    tier = str(trial.get("promotion_tier") or "reject")
+    if tier in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate"}:
+        return True
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    return (
+        float(trial.get("robustness_score") or 0.0) >= 25
+        and float(backtest.get("net_profit") or 0.0) > 0
+        and (float(backtest.get("test_profit") or 0.0) > 0 or float(backtest.get("daily_pnl_sharpe") or 0.0) >= 1.0)
+        and int(backtest.get("trade_count") or 0) >= 5
+    )
+
+
+def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
+    tier = str(trial.get("promotion_tier") or "reject")
+    if tier == "reject":
+        tier = "watchlist"
+    warnings = list(trial.get("warnings") or [])
+    if str(trial.get("promotion_tier") or "reject") == "reject" and "not_paper_ready_research_lead" not in warnings:
+        warnings.insert(0, "not_paper_ready_research_lead")
+    audit = {
+        "candidate": {
+            "name": trial.get("strategy_name"),
+            "module_stack": trial.get("tags") or (),
+            "parameters": trial.get("parameters") or {},
+            "probability_count": 0,
+        },
+        "metrics": trial.get("metrics") or {},
+        "backtest": trial.get("backtest") or {},
+        "fold_results": trial.get("folds") or [],
+        "warnings": warnings,
+        "research_only": True,
+        "promotion_tier": tier,
+        "derived_from_trial_id": trial.get("id"),
+    }
+    return {
+        "id": -int(trial["id"]),
+        "run_id": trial["run_id"],
+        "strategy_name": trial["strategy_name"],
+        "market_id": (trial.get("parameters") or {}).get("market_id") or "",
+        "robustness_score": trial["robustness_score"],
+        "research_only": True,
+        "audit": _compact_audit(audit),
+        "created_at": "",
+        "promotion_tier": tier,
+        "source": "trial_research_lead",
+    }
 
 
 def _compact_audit(audit: dict[str, object]) -> dict[str, object]:

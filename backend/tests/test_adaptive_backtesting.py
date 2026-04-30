@@ -148,6 +148,40 @@ def test_negative_total_net_does_not_promote_to_research_candidate():
     assert _promotion_tier(evaluation, stability=1.0, cost_profile=profile) == "watchlist"
 
 
+def test_high_drawdown_profitable_lead_remains_research_candidate():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = public_ig_cost_profile(market)
+    backtest = BacktestResult(
+        net_profit=20_000,
+        sharpe=0.8,
+        max_drawdown=12_000,
+        win_rate=0.52,
+        trade_count=120,
+        exposure=0.5,
+        turnover=120,
+        train_profit=10_000,
+        test_profit=10_000,
+        gross_profit=25_000,
+        total_cost=5_000,
+        daily_pnl_sharpe=1.2,
+        expectancy_per_trade=166.66,
+        average_cost_per_trade=41.66,
+        net_cost_ratio=4.0,
+        cost_to_gross_ratio=0.2,
+    )
+    evaluation = CandidateEvaluation(
+        candidate=ProbabilityCandidate("high_drawdown_fixture", ("adaptive_ig_v1",), {"stress_net_profit": 8_000}, [0.5, 0.6]),
+        metrics=ClassificationMetrics(0.6, 0.6, 0.2, 0.6, 0.6, 0.5, 2),
+        backtest=backtest,
+        fold_results=(backtest,),
+        robustness_score=49,
+        passed=False,
+        warnings=("drawdown_too_high",),
+    )
+
+    assert _promotion_tier(evaluation, stability=0.2, cost_profile=profile) == "research_candidate"
+
+
 def test_turnaround_tuesday_signals_after_down_monday():
     bars = [
         OHLCBar("TEST", datetime(2026, 1, 2, 16), 100, 101, 99, 100),
