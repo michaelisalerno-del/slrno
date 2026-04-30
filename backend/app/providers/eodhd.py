@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import random
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
@@ -17,6 +19,9 @@ class EODHDProvider:
     SEARCH_TTL_SECONDS = 7 * 24 * 60 * 60
     CLOSED_HISTORY_TTL_SECONDS = 180 * 24 * 60 * 60
     LIVE_HISTORY_TTL_SECONDS = 15 * 60
+    NEGATIVE_ERROR_TTL_SECONDS = 2 * 60
+    TRANSIENT_STATUS_CODES = {502, 503, 504}
+    RETRY_DELAYS_SECONDS = (0.5, 1.5, 3.0)
 
     _INTERVALS = {
         "1min": ("1m", 1),
@@ -45,11 +50,21 @@ class EODHDProvider:
     }
     _MONTHLY_COMMODITIES = {"ALUMINUM", "COPPER"}
 
-    def __init__(self, api_token: str, base_url: str | None = None, cache: MarketDataCache | None = None, cache_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        api_token: str,
+        base_url: str | None = None,
+        cache: MarketDataCache | None = None,
+        cache_enabled: bool = True,
+        retry_delays_seconds: tuple[float, ...] | None = None,
+        negative_error_ttl_seconds: int | None = None,
+    ) -> None:
         self.api_token = api_token
         self.base_url = (base_url or self.BASE_URL).rstrip("/")
         self.cache = cache if cache is not None else MarketDataCache()
         self.cache_enabled = cache_enabled
+        self.retry_delays_seconds = self.RETRY_DELAYS_SECONDS if retry_delays_seconds is None else retry_delays_seconds
+        self.negative_error_ttl_seconds = self.NEGATIVE_ERROR_TTL_SECONDS if negative_error_ttl_seconds is None else negative_error_ttl_seconds
 
     async def quote(self, symbol: str, use_cache: bool = True) -> Quote:
         payload = await self._get_json(
@@ -200,29 +215,102 @@ class EODHDProvider:
             cached = self.cache.get_json(namespace, self.base_url + endpoint, params)
             if cached is not None:
                 return cached
+            cached_error = self.cache.get_json("provider_error", self.base_url + endpoint, params)
+            if cached_error is not None:
+                stale = self.cache.get_json(namespace, self.base_url + endpoint, params, allow_stale=True)
+                if stale is not None:
+                    return stale
+                status = _cached_error_status(cached_error)
+                raise EODHDProviderError(
+                    f"Recent EODHD {operation} provider error cached for {symbol_for_error}: {status}; no stale cache available"
+                )
 
         request_params = {**params, "api_token": self.api_token, "fmt": "json"}
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=5.0)) as client:
-                response = await client.get(f"{self.base_url}{endpoint}", params=request_params)
-                response.raise_for_status()
-                payload = response.json()
-        except httpx.TimeoutException as exc:
-            if self.cache_enabled and use_cache:
-                stale = self.cache.get_json(namespace, self.base_url + endpoint, params, allow_stale=True)
-                if stale is not None:
-                    return stale
-            raise TimeoutError(timeout_message) from exc
-        except httpx.HTTPStatusError as exc:
-            if self.cache_enabled and use_cache:
-                stale = self.cache.get_json(namespace, self.base_url + endpoint, params, allow_stale=True)
-                if stale is not None:
-                    return stale
-            _raise_status_error(exc, operation, symbol_for_error)
+        max_attempts = len(self.retry_delays_seconds) + 1
+        for attempt in range(max_attempts):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=5.0)) as client:
+                    response = await client.get(f"{self.base_url}{endpoint}", params=request_params)
+                    response.raise_for_status()
+                    payload = response.json()
+                break
+            except httpx.TimeoutException as exc:
+                if attempt < len(self.retry_delays_seconds):
+                    await _sleep_before_retry(self.retry_delays_seconds[attempt])
+                    continue
+                if self.cache_enabled and use_cache:
+                    self._remember_provider_error(endpoint, params, operation, symbol_for_error, "timeout", timeout_message)
+                    stale = self.cache.get_json(namespace, self.base_url + endpoint, params, allow_stale=True)
+                    if stale is not None:
+                        return stale
+                raise TimeoutError(timeout_message) from exc
+            except httpx.HTTPStatusError as exc:
+                status_code = _status_code(exc)
+                if status_code in self.TRANSIENT_STATUS_CODES and attempt < len(self.retry_delays_seconds):
+                    await _sleep_before_retry(self.retry_delays_seconds[attempt])
+                    continue
+                if self.cache_enabled and use_cache:
+                    if status_code in self.TRANSIENT_STATUS_CODES:
+                        self._remember_provider_error(
+                            endpoint,
+                            params,
+                            operation,
+                            symbol_for_error,
+                            status_code,
+                            f"EODHD {operation} returned HTTP {status_code} for {symbol_for_error}",
+                        )
+                    stale = self.cache.get_json(namespace, self.base_url + endpoint, params, allow_stale=True)
+                    if stale is not None:
+                        return stale
+                _raise_status_error(exc, operation, symbol_for_error)
+        else:
+            raise EODHDProviderError(f"EODHD {operation} did not return a response for {symbol_for_error}")
 
         if self.cache_enabled and use_cache:
-            self.cache.set_json(namespace, self.base_url + endpoint, params, payload, ttl_seconds)
+            self.cache.set_json(
+                namespace,
+                self.base_url + endpoint,
+                params,
+                payload,
+                ttl_seconds,
+                metadata={
+                    "provider": "eodhd",
+                    "operation": operation,
+                    "symbol": symbol_for_error,
+                    "source_status": "fresh_eodhd",
+                },
+            )
         return payload
+
+    def _remember_provider_error(
+        self,
+        endpoint: str,
+        params: dict[str, object],
+        operation: str,
+        symbol: str,
+        status_code: int | str,
+        message: str,
+    ) -> None:
+        self.cache.set_json(
+            "provider_error",
+            self.base_url + endpoint,
+            params,
+            {
+                "provider": "eodhd",
+                "operation": operation,
+                "symbol": symbol,
+                "status_code": status_code,
+                "message": message,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+            self.negative_error_ttl_seconds,
+            metadata={
+                "provider": "eodhd",
+                "operation": operation,
+                "symbol": symbol,
+                "source_status": "provider_error",
+            },
+        )
 
 
 def _bar_from_row(symbol: str, row: dict[str, object]) -> OHLCBar | None:
@@ -292,7 +380,26 @@ def _raise_status_error(exc: object, operation: str, symbol: str) -> None:
         raise EODHDProviderError(f"EODHD {operation} was rejected for {symbol}. Check the API token and plan permissions.") from exc
     if status_code == 404:
         raise EODHDProviderError(f"EODHD {operation} returned HTTP 404 for {symbol}. Check the EODHD symbol and exchange suffix.") from exc
+    if status_code in EODHDProvider.TRANSIENT_STATUS_CODES:
+        raise EODHDProviderError(f"EODHD {operation} returned HTTP {status_code} for {symbol}; no stale cache available") from exc
     raise EODHDProviderError(f"EODHD {operation} returned HTTP {status_code} for {symbol}") from exc
+
+
+def _status_code(exc: object) -> int | str:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", "unknown")
+
+
+def _cached_error_status(payload: object) -> str:
+    if isinstance(payload, dict):
+        status = payload.get("status_code") or "unknown"
+        return f"HTTP {status}" if isinstance(status, int) else str(status)
+    return "provider error"
+
+
+async def _sleep_before_retry(delay_seconds: float) -> None:
+    jitter = random.uniform(0.0, min(0.1, max(0.0, delay_seconds * 0.1))) if delay_seconds > 0 else 0.0
+    await asyncio.sleep(max(0.0, delay_seconds) + jitter)
 
 
 def _optional_float(value: object) -> float | None:

@@ -249,7 +249,7 @@ function App() {
         status: detail.status,
         detail: runStateDetail(detail, plannedTrials),
       });
-      setMessage(detail.status === "finished" ? `Run ${result.run_id} finished after IG-style costs.` : `Run ${result.run_id} ${detail.status}: ${detail.error || "check run details"}`);
+      setMessage(runCompletionMessage(result.run_id, detail));
       await refresh();
     } catch (error) {
       setResearchState({ status: "error", detail: error.message });
@@ -273,11 +273,19 @@ function App() {
   async function pollResearchRun(runId, plannedTrials) {
     let detail = await getResearchRun(runId);
     setRunDetail(detail);
+    getMarketDataCacheStatus().then(setCacheStatus).catch(() => undefined);
     for (let attempt = 0; attempt < 720 && ["created", "running"].includes(detail.status); attempt += 1) {
       setResearchState({ status: "running", detail: runStateDetail(detail, plannedTrials) });
       await sleep(2000);
-      detail = await getResearchRun(runId);
+      const [nextDetail, nextCacheStatus] = await Promise.all([
+        getResearchRun(runId),
+        getMarketDataCacheStatus().catch(() => null),
+      ]);
+      detail = nextDetail;
       setRunDetail(detail);
+      if (nextCacheStatus) {
+        setCacheStatus(nextCacheStatus);
+      }
     }
     return detail;
   }
@@ -546,6 +554,8 @@ function App() {
 function ResultsView({ runDetail, researchRuns, loadRun }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
+  const marketStatuses = runDetail?.config?.market_statuses ?? [];
+  const marketFailures = runDetail?.config?.market_failures ?? [];
   return (
     <div className="lab-grid">
       <section className="lab-section span-2">
@@ -560,6 +570,22 @@ function ResultsView({ runDetail, researchRuns, loadRun }) {
           {researchRuns.length === 0 && <span className="muted">No runs yet.</span>}
         </div>
       </section>
+      {(marketStatuses.length > 0 || marketFailures.length > 0 || runDetail?.error) && (
+        <section className="lab-section span-2">
+          <h3>Market Data Status</h3>
+          <div className="status-list">
+            {marketStatuses.map((item) => (
+              <div className="status" key={`${item.market_id}-${item.status}`}>
+                <strong>{item.market_id} · <span className={`badge ${statusBadgeClass(item.status)}`}>{item.status}</span></strong>
+                <span>{item.eodhd_symbol} · {normalizeInterval(item.interval)} · {item.data_source_status || "EODHD primary symbol"}</span>
+                {item.bar_count !== undefined && <small>{item.bar_count} bars · {item.trial_count ?? 0} trials saved</small>}
+                {item.error && <small>{item.error}</small>}
+              </div>
+            ))}
+            {marketStatuses.length === 0 && runDetail?.error && <span className="muted">{runDetail.error}</span>}
+          </div>
+        </section>
+      )}
       <section className="lab-section span-2">
         <h3>Pareto Picks</h3>
         <div className="pareto-grid">
@@ -705,19 +731,28 @@ function SettingsView({ eodhdKey, setEodhdKey, ig, setIg, submitEodhd, submitIg,
       </Panel>
       <Panel icon={<Database />} title="EODHD Cache">
         <div className="metrics four">
-          <Metric label="Entries" value={cacheStatus?.stats?.entry_count ?? 0} />
+          <Metric label="Cached API payloads" value={cacheStatus?.stats?.payload_entry_count ?? cacheStatus?.stats?.entry_count ?? 0} />
           <Metric label="Expired" value={cacheStatus?.stats?.expired_count ?? 0} />
+          <Metric label="Provider errors" value={cacheStatus?.stats?.provider_error_count ?? 0} />
           <Metric label="Newest" value={shortDateTime(cacheStatus?.stats?.newest_created_at)} />
-          <Metric label="Recent TTL" value={`${round((cacheStatus?.policy?.live_history_ttl_seconds ?? 900) / 60)} min`} />
         </div>
         <div className="status-list">
           {(cacheStatus?.namespaces ?? []).slice(0, 5).map((item) => (
             <div className="status" key={item.namespace}>
               <strong>{item.namespace}</strong>
-              <span>{item.entry_count} entries · {item.expired_count} expired</span>
+              <span>{item.entry_count} cached API payloads · {item.expired_count} expired</span>
             </div>
           ))}
           {(cacheStatus?.namespaces ?? []).length === 0 && <span className="muted">No cached EODHD payloads yet.</span>}
+        </div>
+        <div className="status-list">
+          {(cacheStatus?.recent_entries ?? []).slice(0, 5).map((item) => (
+            <div className="status" key={`${item.namespace}-${item.created_at}-${item.request_url}`}>
+              <strong>{item.metadata?.symbol || item.namespace}</strong>
+              <span>{item.namespace} · {item.metadata?.source_status || "cached"} · {item.expired ? "expired" : "fresh"}</span>
+              <small>{shortDateTime(item.created_at)} · {item.payload_bytes ?? 0} bytes</small>
+            </div>
+          ))}
         </div>
         <button type="button" className="ghost" onClick={pruneCache}>Prune expired</button>
       </Panel>
@@ -781,7 +816,20 @@ function runStateDetail(detail, plannedTrials) {
   if (detail?.status === "finished") {
     return `Run ${detail.id}: ${savedTrials} trials, ${detail.passed_count ?? 0} passing, best score ${round(detail.best_score)}.`;
   }
+  if (detail?.status === "finished_with_warnings") {
+    return `Run ${detail.id}: ${savedTrials} trials saved with market data warnings.`;
+  }
   return `Run ${detail?.id ?? ""}: ${detail?.error || detail?.status || "unknown status"}`;
+}
+
+function runCompletionMessage(runId, detail) {
+  if (detail.status === "finished") {
+    return `Run ${runId} finished after IG-style costs.`;
+  }
+  if (detail.status === "finished_with_warnings") {
+    return `Run ${runId} finished with market data warnings.`;
+  }
+  return `Run ${runId} ${detail.status}: ${detail.error || "check run details"}`;
 }
 
 function sleep(milliseconds) {
@@ -818,6 +866,16 @@ function costBadge(profile, market) {
     return { label: "IG public spread baseline", className: "base" };
   }
   return { label: "Needs IG price validation", className: "warn" };
+}
+
+function statusBadgeClass(status) {
+  if (status === "completed") {
+    return "good";
+  }
+  if (status === "failed") {
+    return "warn";
+  }
+  return "base";
 }
 
 function humanWarnings(warnings = []) {

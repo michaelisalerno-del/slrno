@@ -17,8 +17,12 @@ def test_market_data_cache_excludes_tokens_and_tracks_expiry(tmp_path):
     assert cache.get_json("quote", "https://example.test/quote", {"symbol": "AAPL.US", "api_token": "second"}) == {"price": 1}
     stats = cache.stats()
     assert stats.entry_count == 1
+    assert stats.payload_entry_count == 1
     assert stats.expired_count == 0
     assert cache.namespace_stats()[0]["namespace"] == "quote"
+    recent = cache.recent_entries()
+    assert recent[0]["params"] == {"symbol": "AAPL.US"}
+    assert "api_token" not in recent[0]["params"]
 
 
 def test_eodhd_provider_reuses_cached_intraday_across_tokens(tmp_path, monkeypatch):
@@ -141,6 +145,142 @@ def test_eodhd_provider_skips_incomplete_intraday_rows(tmp_path, monkeypatch):
     assert len(bars) == 1
     assert bars[0].open == 100
     assert bars[0].volume == 0.0
+
+
+def test_eodhd_provider_retries_transient_http_errors(tmp_path, monkeypatch):
+    cache = MarketDataCache(tmp_path / "market_data_cache.sqlite3")
+    calls = 0
+
+    class FakeHTTPStatusError(Exception):
+        def __init__(self, response: object) -> None:
+            self.response = response
+
+    class FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise FakeHTTPStatusError(self)
+
+        def json(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "timestamp": 1735722000,
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume": 10,
+                }
+            ]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, _url: str, params: dict[str, object]) -> FakeResponse:
+            nonlocal calls
+            calls += 1
+            return FakeResponse(502 if calls < 3 else 200)
+
+    class FakeTimeout:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(
+            AsyncClient=FakeClient,
+            Timeout=FakeTimeout,
+            TimeoutException=TimeoutError,
+            HTTPStatusError=FakeHTTPStatusError,
+        ),
+    )
+
+    provider = EODHDProvider("token", base_url="https://example.test", cache=cache, retry_delays_seconds=(0.0, 0.0))
+    bars = asyncio.run(provider.historical_bars("GDAXI.INDX", "5min", "2025-01-01", "2025-01-10"))
+
+    assert len(bars) == 1
+    assert calls == 3
+
+
+def test_eodhd_provider_uses_stale_cache_after_transient_http_error(tmp_path, monkeypatch):
+    cache = MarketDataCache(tmp_path / "market_data_cache.sqlite3")
+    should_fail = False
+
+    class FakeHTTPStatusError(Exception):
+        def __init__(self, response: object) -> None:
+            self.response = response
+
+    class FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise FakeHTTPStatusError(self)
+
+        def json(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "timestamp": 1735722000,
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                    "volume": 10,
+                }
+            ]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, _url: str, params: dict[str, object]) -> FakeResponse:
+            return FakeResponse(502 if should_fail else 200)
+
+    class FakeTimeout:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(
+            AsyncClient=FakeClient,
+            Timeout=FakeTimeout,
+            TimeoutException=TimeoutError,
+            HTTPStatusError=FakeHTTPStatusError,
+        ),
+    )
+
+    provider = EODHDProvider("token", base_url="https://example.test", cache=cache, retry_delays_seconds=(0.0,))
+    fresh = asyncio.run(provider.historical_bars("GDAXI.INDX", "5min", "2025-01-01", "2025-01-10"))
+    with cache._connect() as conn:
+        conn.execute(
+            "UPDATE market_data_cache SET expires_at = ? WHERE namespace = ?",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), "historical_bars"),
+        )
+
+    should_fail = True
+    stale = asyncio.run(provider.historical_bars("GDAXI.INDX", "5min", "2025-01-01", "2025-01-10"))
+
+    assert [bar.close for bar in stale] == [bar.close for bar in fresh]
+    assert cache.stats().provider_error_count == 1
 
 
 def test_eodhd_commodity_endpoint_filters_date_range(tmp_path, monkeypatch):

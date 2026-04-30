@@ -150,10 +150,12 @@ def market_data_cache_status() -> dict[str, object]:
     return {
         "stats": cache.stats().as_dict(),
         "namespaces": cache.namespace_stats(),
+        "recent_entries": cache.recent_entries(limit=10),
         "policy": {
             "quote_ttl_seconds": EODHDProvider.QUOTE_TTL_SECONDS,
             "live_history_ttl_seconds": EODHDProvider.LIVE_HISTORY_TTL_SECONDS,
             "closed_history_ttl_seconds": EODHDProvider.CLOSED_HISTORY_TTL_SECONDS,
+            "provider_error_ttl_seconds": EODHDProvider.NEGATIVE_ERROR_TTL_SECONDS,
             "recent_history_refresh_days": 3,
         },
     }
@@ -265,22 +267,7 @@ async def create_research_run(payload: ResearchRunPayload, background_tasks: Bac
         market_id=run_market_id,
         data_source="eodhd_with_ig_cost_model",
         status="running",
-        config={
-            "start": payload.start,
-            "end": payload.end,
-            "interval": payload.interval,
-            "engine": payload.engine,
-            "market_ids": [market.market_id for market in selected_markets],
-            "search_preset": payload.search_preset,
-            "trading_style": payload.trading_style,
-            "objective": payload.objective,
-            "search_budget": payload.search_budget,
-            "risk_profile": payload.risk_profile,
-            "strategy_families": payload.strategy_families,
-            "product_mode": payload.product_mode,
-            "research_only": True,
-            "ig_validation_required": True,
-        },
+        config=_research_run_config(payload, selected_markets),
     )
     background_tasks.add_task(_run_research_job, run_id, payload.model_dump(), api_token)
     return {
@@ -304,39 +291,102 @@ def _run_research_job(run_id: int, payload_data: dict[str, object], api_token: s
 async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_token: str) -> None:
     selected_markets = _selected_markets(payload.market_ids or [payload.market_id])
     provider = EODHDProvider(api_token)
-    provider.cache.prune_expired()
+    market_statuses: list[dict[str, object]] = []
+    market_failures: list[dict[str, object]] = []
+    saved_trials = 0
+
+    def persist_status() -> None:
+        research_store.update_run_config(
+            run_id,
+            _research_run_config(payload, selected_markets, market_statuses=market_statuses, market_failures=market_failures),
+        )
+
     for market in selected_markets:
-        if not market.enabled:
-            raise ValueError(f"Market {market.market_id} is disabled")
         interval = payload.interval or market.default_timeframe
+        market_status: dict[str, object] = {
+            "market_id": market.market_id,
+            "name": market.name,
+            "eodhd_symbol": market.eodhd_symbol,
+            "interval": interval,
+            "status": "loading",
+            "data_source_status": "eodhd_primary_symbol",
+            "cost_source_status": "ig_cost_model",
+        }
+        market_statuses.append(market_status)
+        persist_status()
+        if not market.enabled:
+            _mark_market_failed(market_status, market_failures, market, f"Market {market.market_id} is disabled")
+            persist_status()
+            continue
         try:
             bars = await provider.historical_bars(market.eodhd_symbol, interval, payload.start, payload.end)
         except Exception as exc:
-            raise RuntimeError(f"{market.market_id} ({market.eodhd_symbol}) EODHD data load failed: {_public_error(exc)}") from exc
-        if len(bars) < market.min_backtest_bars:
-            raise ValueError(f"{market.market_id}: need at least {market.min_backtest_bars} bars; received {len(bars)}")
-        cost_profile = _cost_profile_for_market(market)
-        if payload.engine == "adaptive_ig_v1":
-            result = run_adaptive_search(
-                bars,
-                market.market_id,
-                interval,
-                cost_profile,
-                AdaptiveSearchConfig(
-                    preset=payload.search_preset,
-                    trading_style=payload.trading_style,
-                    objective=payload.objective,
-                    search_budget=payload.search_budget,
-                    risk_profile=payload.risk_profile,
-                    strategy_families=tuple(payload.strategy_families),
-                ),
+            _mark_market_failed(
+                market_status,
+                market_failures,
+                market,
+                f"{market.market_id} skipped: {market.eodhd_symbol} EODHD data load failed: {_public_error(exc)}",
             )
-            market_evaluations = list(result.evaluations)
-        else:
-            market_evaluations = ResearchStack.default().evaluate(bars, backtest_config_from_profile(cost_profile))
+            persist_status()
+            continue
+        if len(bars) < market.min_backtest_bars:
+            _mark_market_failed(
+                market_status,
+                market_failures,
+                market,
+                f"{market.market_id} skipped: need at least {market.min_backtest_bars} bars; received {len(bars)}",
+                bar_count=len(bars),
+            )
+            persist_status()
+            continue
+        market_status.update({"status": "evaluating", "bar_count": len(bars)})
+        persist_status()
+        cost_profile = _cost_profile_for_market(market)
+        try:
+            if payload.engine == "adaptive_ig_v1":
+                result = run_adaptive_search(
+                    bars,
+                    market.market_id,
+                    interval,
+                    cost_profile,
+                    AdaptiveSearchConfig(
+                        preset=payload.search_preset,
+                        trading_style=payload.trading_style,
+                        objective=payload.objective,
+                        search_budget=payload.search_budget,
+                        risk_profile=payload.risk_profile,
+                        strategy_families=tuple(payload.strategy_families),
+                    ),
+                )
+                market_evaluations = list(result.evaluations)
+            else:
+                market_evaluations = ResearchStack.default().evaluate(bars, backtest_config_from_profile(cost_profile))
+        except Exception as exc:
+            _mark_market_failed(
+                market_status,
+                market_failures,
+                market,
+                f"{market.market_id} skipped: research evaluation failed: {_public_error(exc)}",
+                bar_count=len(bars),
+            )
+            persist_status()
+            continue
+        trial_count = 0
         for evaluation in market_evaluations:
             research_store.save_trial(run_id, evaluation)
             research_store.save_candidate(run_id, market.market_id, evaluation)
+            saved_trials += 1
+            trial_count += 1
+        market_status.update({"status": "completed", "bar_count": len(bars), "trial_count": trial_count})
+        persist_status()
+
+    if saved_trials == 0:
+        error = _market_failure_summary(market_failures) or "No valid trials were produced for the selected markets"
+        research_store.update_run_status(run_id, "error", error)
+        return
+    if market_failures:
+        research_store.update_run_status(run_id, "finished_with_warnings", _market_failure_summary(market_failures))
+        return
     research_store.update_run_status(run_id, "finished")
 
 
@@ -431,6 +481,57 @@ def _selected_markets(market_ids: list[str]) -> list[MarketMapping]:
             raise HTTPException(status_code=404, detail=f"Market {market_id} not found")
         selected.append(market)
     return selected
+
+
+def _research_run_config(
+    payload: ResearchRunPayload,
+    selected_markets: list[MarketMapping],
+    market_statuses: list[dict[str, object]] | None = None,
+    market_failures: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "start": payload.start,
+        "end": payload.end,
+        "interval": payload.interval,
+        "engine": payload.engine,
+        "market_ids": [market.market_id for market in selected_markets],
+        "search_preset": payload.search_preset,
+        "trading_style": payload.trading_style,
+        "objective": payload.objective,
+        "search_budget": payload.search_budget,
+        "risk_profile": payload.risk_profile,
+        "strategy_families": payload.strategy_families,
+        "product_mode": payload.product_mode,
+        "research_only": True,
+        "ig_validation_required": True,
+        "data_source_policy": "eodhd_primary_symbol_no_silent_proxy",
+        "market_statuses": market_statuses or [],
+        "market_failures": market_failures or [],
+    }
+
+
+def _mark_market_failed(
+    market_status: dict[str, object],
+    market_failures: list[dict[str, object]],
+    market: MarketMapping,
+    error: str,
+    bar_count: int | None = None,
+) -> None:
+    failure: dict[str, object] = {
+        "market_id": market.market_id,
+        "name": market.name,
+        "eodhd_symbol": market.eodhd_symbol,
+        "status": "failed",
+        "error": error,
+    }
+    if bar_count is not None:
+        failure["bar_count"] = bar_count
+    market_status.update(failure)
+    market_failures.append(failure)
+
+
+def _market_failure_summary(market_failures: list[dict[str, object]]) -> str:
+    return "; ".join(str(item.get("error", "")) for item in market_failures if item.get("error"))
 
 
 def _market_response(market: MarketMapping) -> dict[str, object]:
