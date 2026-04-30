@@ -45,6 +45,27 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     assert error_run["error"] == "fixture failure"
 
 
+def test_research_store_deletes_run_trials_and_candidates(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")
+    other_run_id = store.create_run("US500", {"interval": "1h"}, status="finished")
+    accepted = _evaluation("accepted", passed=True)
+
+    store.save_trial(run_id, accepted)
+    store.save_candidate(run_id, "NAS100", accepted)
+    store.save_trial(other_run_id, accepted)
+
+    result = store.delete_run(run_id)
+
+    assert result == {"run_id": run_id, "deleted_trials": 1, "deleted_candidates": 1}
+    assert store.get_run(run_id) is None
+    assert store.list_trials(run_id) == []
+    assert store.list_candidates(run_id) == []
+    assert store.get_run(other_run_id) is not None
+    assert len(store.list_trials(other_run_id)) == 1
+    assert store.delete_run(999_999) is None
+
+
 def _evaluation(name: str, passed: bool) -> CandidateEvaluation:
     return CandidateEvaluation(
         candidate=ProbabilityCandidate(name, ("fixture",), {}, [0.1, 0.9]),

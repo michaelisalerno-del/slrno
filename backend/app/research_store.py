@@ -122,6 +122,18 @@ class ResearchStore:
         with self._connect() as conn:
             conn.execute("UPDATE research_runs SET config_json = ? WHERE id = ?", (json.dumps(config, sort_keys=True), run_id))
 
+    def delete_run(self, run_id: int) -> dict[str, int] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM research_runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                return None
+            trial_count = int(conn.execute("SELECT COUNT(*) FROM strategy_trials WHERE run_id = ?", (run_id,)).fetchone()[0] or 0)
+            candidate_count = int(conn.execute("SELECT COUNT(*) FROM candidates WHERE run_id = ?", (run_id,)).fetchone()[0] or 0)
+            conn.execute("DELETE FROM candidates WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM strategy_trials WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM research_runs WHERE id = ?", (run_id,))
+        return {"run_id": run_id, "deleted_trials": trial_count, "deleted_candidates": candidate_count}
+
     def save_trial(self, run_id: int, evaluation: CandidateEvaluation) -> None:
         parameters = dict(evaluation.candidate.parameters)
         backtest = _compact_backtest(asdict(evaluation.backtest))

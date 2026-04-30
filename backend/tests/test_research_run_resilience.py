@@ -64,6 +64,23 @@ def test_multi_market_run_errors_when_all_markets_fail(tmp_path, monkeypatch):
     assert run["config"]["market_statuses"][0]["status"] == "failed"
 
 
+def test_delete_research_run_endpoint_removes_finished_run_and_blocks_running(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    monkeypatch.setattr(main, "research_store", store)
+    finished_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")
+    running_id = store.create_run("US500", {"interval": "1h"}, status="running")
+    store.save_trial(finished_id, _evaluation("accepted"))
+    store.save_candidate(finished_id, "NAS100", _evaluation("accepted"))
+
+    result = main.delete_research_run(finished_id)
+
+    assert result == {"status": "deleted", "run_id": finished_id, "deleted_trials": 1, "deleted_candidates": 1}
+    assert store.get_run(finished_id) is None
+    with pytest.raises(main.HTTPException) as exc_info:
+        main.delete_research_run(running_id)
+    assert exc_info.value.status_code == 409
+
+
 class FakeCache:
     def prune_expired(self) -> int:
         return 0
