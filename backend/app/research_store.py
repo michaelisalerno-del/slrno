@@ -119,7 +119,7 @@ class ResearchStore:
     def save_trial(self, run_id: int, evaluation: CandidateEvaluation) -> None:
         parameters = dict(evaluation.candidate.parameters)
         backtest = _compact_backtest(asdict(evaluation.backtest))
-        folds = _compact_folds([asdict(fold) for fold in evaluation.fold_results])
+        folds = [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results]
         costs = {
             "cost_confidence": evaluation.backtest.cost_confidence,
             "gross_profit": evaluation.backtest.gross_profit,
@@ -243,10 +243,10 @@ class ResearchStore:
                        COALESCE(SUM(trial.passed), 0) AS passed_count,
                        MAX(trial.robustness_score) AS best_score
                 FROM research_runs run
-                LEFT JOIN strategy_trialps trial ON trial.run_id = run.id
+                LEFT JOIN strategy_trials trial ON trial.run_id = run.id
                 WHERE run.id = ?
                 GROUP BY run.id
-                "",
+                """,
                 (run_id,),
             ).fetchone()
         if row is None:
@@ -290,7 +290,7 @@ class ResearchStore:
                 "style": row[8],
                 "parameters": json.loads(row[9]),
                 "backtest": json.loads(row[10]),
-                "folds": _compact_folds(json.loads(row[11])),
+                "folds": json.loads(row[11]),
                 "costs": json.loads(row[12]),
                 "tags": json.loads(row[13]),
             }
@@ -400,7 +400,7 @@ def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
         "candidate": _compact_candidate(asdict(evaluation.candidate)),
         "metrics": asdict(evaluation.metrics),
         "backtest": _compact_backtest(asdict(evaluation.backtest)),
-        "fold_results": _compact_folds([asdict(fold) for fold in evaluation.fold_results]),
+        "fold_results": [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results],
         "warnings": list(evaluation.warnings),
         "research_only": evaluation.research_only,
     }
@@ -427,23 +427,6 @@ def _compact_backtest(backtest: dict[str, object]) -> dict[str, object]:
         if len(values) > 120:
             backtest[key] = _sample_values(values, 120)
     return backtest
-
-
-def _compact_folds(folds: list[dict[str, object]]) -> list[dict[str, object]]:
-    return [_fold_summary(fold) for fold in folds[:12]]
-
-
-def _fold_summary(fold: dict[str, object]) -> dict[str, object]:
-    return {
-        "net_profit": fold.get("net_profit", 0),
-        "gross_profit": fold.get("gross_profit", 0),
-        "sharpe": fold.get("sharpe", 0),
-        "max_drawdown": fold.get("max_drawdown", 0),
-        "win_rate": fold.get("win_rate", 0),
-        "trade_count": fold.get("trade_count", 0),
-        "total_cost": fold.get("total_cost", 0),
-        "cost_confidence": fold.get("cost_confidence", ""),
-    }
 
 
 def _sample_values(values: list[object], limit: int) -> list[object]:
