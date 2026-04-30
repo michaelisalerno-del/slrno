@@ -6,13 +6,15 @@ async function request(path, options = {}) {
     ...options,
   });
   const contentType = response.headers.get("content-type") ?? "";
-  const payload = contentType.includes("application/json")
-    ? await response.json().catch(() => ({}))
-    : {};
+  const isJson = contentType.includes("application/json");
+  const payload = isJson ? await response.json().catch(() => ({})) : {};
+  const fallbackText = isJson ? "" : await response.text().catch(() => "");
   if (!response.ok) {
-    throw new Error(payload.detail ?? "Request failed");
+    const fallback = fallbackText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const detail = payload.detail ?? fallback.slice(0, 180);
+    throw new Error(detail || `Request failed (${response.status})`);
   }
-  if (!contentType.includes("application/json")) {
+  if (!isJson) {
     throw new Error(`API returned non-JSON for ${path}`);
   }
   return payload;

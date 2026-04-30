@@ -38,6 +38,7 @@ class ResearchStore:
                 )
                 """
             )
+            self._add_column(conn, "research_runs", "error", "TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS strategy_trials (
@@ -111,9 +112,9 @@ class ResearchStore:
             )
             return int(cursor.lastrowid)
 
-    def update_run_status(self, run_id: int, status: str) -> None:
+    def update_run_status(self, run_id: int, status: str, error: str = "") -> None:
         with self._connect() as conn:
-            conn.execute("UPDATE research_runs SET status = ? WHERE id = ?", (status, run_id))
+            conn.execute("UPDATE research_runs SET status = ?, error = ? WHERE id = ?", (status, error, run_id))
 
     def save_trial(self, run_id: int, evaluation: CandidateEvaluation) -> None:
         parameters = dict(evaluation.candidate.parameters)
@@ -207,7 +208,7 @@ class ResearchStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT run.id, run.created_at, run.status, run.market_id, run.data_source,
+                SELECT run.id, run.created_at, run.status, run.market_id, run.data_source, run.error,
                        COUNT(trial.id) AS trial_count,
                        COALESCE(SUM(trial.passed), 0) AS passed_count,
                        MAX(trial.robustness_score) AS best_score
@@ -224,9 +225,10 @@ class ResearchStore:
                 "status": row[2],
                 "market_id": row[3],
                 "data_source": row[4],
-                "trial_count": row[5],
-                "passed_count": row[6],
-                "best_score": row[7] or 0,
+                "error": row[5],
+                "trial_count": row[6],
+                "passed_count": row[7],
+                "best_score": row[8] or 0,
             }
             for row in rows
         ]
@@ -236,7 +238,7 @@ class ResearchStore:
             row = conn.execute(
                 """
                 SELECT run.id, run.created_at, run.status, run.market_id, run.data_source,
-                       run.config_json,
+                       run.config_json, run.error,
                        COUNT(trial.id) AS trial_count,
                        COALESCE(SUM(trial.passed), 0) AS passed_count,
                        MAX(trial.robustness_score) AS best_score
@@ -256,9 +258,10 @@ class ResearchStore:
             "market_id": row[3],
             "data_source": row[4],
             "config": json.loads(row[5]),
-            "trial_count": row[6],
-            "passed_count": row[7],
-            "best_score": row[8] or 0,
+            "error": row[6],
+            "trial_count": row[7],
+            "passed_count": row[8],
+            "best_score": row[9] or 0,
         }
 
     def list_trials(self, run_id: int | None = None) -> list[dict[str, object]]:
@@ -352,7 +355,7 @@ class ResearchStore:
                 "market_id": row[3],
                 "robustness_score": row[4],
                 "research_only": bool(row[5]),
-                "audit": json.loads(row[6]),
+                "audit": _compact_audit(json.loads(row[6])),
                 "created_at": row[7],
             }
             for row in rows
@@ -376,7 +379,7 @@ class ResearchStore:
             "market_id": row[3],
             "robustness_score": row[4],
             "research_only": bool(row[5]),
-            "audit": json.loads(row[6]),
+            "audit": _compact_audit(json.loads(row[6])),
             "created_at": row[7],
         }
 
@@ -394,7 +397,7 @@ class ResearchStore:
 
 def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
     return {
-        "candidate": asdict(evaluation.candidate),
+        "candidate": _compact_candidate(asdict(evaluation.candidate)),
         "metrics": asdict(evaluation.metrics),
         "backtest": _compact_backtest(asdict(evaluation.backtest)),
         "fold_results": [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results],
@@ -403,13 +406,34 @@ def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
     }
 
 
+def _compact_audit(audit: dict[str, object]) -> dict[str, object]:
+    candidate = audit.get("candidate")
+    if isinstance(candidate, dict):
+        audit["candidate"] = _compact_candidate(candidate)
+    return audit
+
+
+def _compact_candidate(candidate: dict[str, object]) -> dict[str, object]:
+    probabilities = list(candidate.pop("probabilities", []) or [])
+    if probabilities:
+        candidate["probability_count"] = len(probabilities)
+        candidate["probability_sample"] = _sample_values(probabilities, 120)
+    return candidate
+
+
 def _compact_backtest(backtest: dict[str, object]) -> dict[str, object]:
     for key in ("equity_curve", "drawdown_curve"):
         values = list(backtest.get(key) or [])
         if len(values) > 120:
-            step = max(1, len(values) // 120)
-            backtest[key] = values[::step][:120]
+            backtest[key] = _sample_values(values, 120)
     return backtest
+
+
+def _sample_values(values: list[object], limit: int) -> list[object]:
+    if len(values) <= limit:
+        return values
+    step = max(1, len(values) // limit)
+    return values[::step][:limit]
 
 
 def _now() -> str:
