@@ -102,7 +102,7 @@ class EODHDProvider:
         )
         if not isinstance(payload, list):
             raise EODHDProviderError(f"EODHD returned an unexpected historical data shape for {symbol}")
-        bars = [_bar_from_row(symbol, row) for row in payload]
+        bars = [bar for row in payload if (bar := _bar_from_row(symbol, row)) is not None]
         bars = sorted({bar.timestamp: bar for bar in bars}.values(), key=lambda bar: bar.timestamp)
         return _aggregate_bars(bars, aggregate_size) if aggregate_size > 1 else bars
 
@@ -147,7 +147,8 @@ class EODHDProvider:
         )
         if not isinstance(payload, list):
             raise EODHDProviderError(f"EODHD returned an unexpected EOD data shape for {symbol}")
-        return sorted((_bar_from_row(symbol, row) for row in payload), key=lambda bar: bar.timestamp)
+        bars = [bar for row in payload if (bar := _bar_from_row(symbol, row)) is not None]
+        return sorted(bars, key=lambda bar: bar.timestamp)
 
     async def _commodity_bars(self, symbol: str, interval: str, start_date: date, end_date: date) -> list[OHLCBar]:
         provider_interval = self._COMMODITY_INTERVALS.get(interval)
@@ -174,7 +175,9 @@ class EODHDProvider:
             row_date = date.fromisoformat(str(row.get("date"))[:10])
             if row_date < start_date or row_date > end_date:
                 continue
-            value = float(row.get("value") or row.get("close") or 0)
+            value = _optional_float(row.get("value") or row.get("close"))
+            if value is None:
+                continue
             timestamp = datetime.combine(row_date, time.min, tzinfo=UTC)
             bars.append(OHLCBar(symbol=symbol, timestamp=timestamp, open=value, high=value, low=value, close=value, volume=0.0))
         return sorted(bars, key=lambda bar: bar.timestamp)
@@ -222,20 +225,29 @@ class EODHDProvider:
         return payload
 
 
-def _bar_from_row(symbol: str, row: dict[str, object]) -> OHLCBar:
+def _bar_from_row(symbol: str, row: dict[str, object]) -> OHLCBar | None:
     timestamp_value = row.get("datetime") or row.get("timestamp") or row.get("date")
-    if isinstance(timestamp_value, (int, float)):
-        timestamp = datetime.fromtimestamp(float(timestamp_value), UTC)
-    else:
-        timestamp = datetime.fromisoformat(str(timestamp_value).replace("Z", "+00:00"))
+    try:
+        if isinstance(timestamp_value, (int, float)):
+            timestamp = datetime.fromtimestamp(float(timestamp_value), UTC)
+        else:
+            timestamp = datetime.fromisoformat(str(timestamp_value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    open_price = _optional_float(row.get("open"))
+    high_price = _optional_float(row.get("high"))
+    low_price = _optional_float(row.get("low"))
+    close_price = _optional_float(row.get("close"))
+    if open_price is None or high_price is None or low_price is None or close_price is None:
+        return None
     return OHLCBar(
         symbol=symbol,
         timestamp=timestamp,
-        open=float(row["open"]),
-        high=float(row["high"]),
-        low=float(row["low"]),
-        close=float(row["close"]),
-        volume=float(row.get("volume") or 0),
+        open=open_price,
+        high=high_price,
+        low=low_price,
+        close=close_price,
+        volume=_optional_float(row.get("volume")) or 0.0,
     )
 
 

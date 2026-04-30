@@ -309,7 +309,10 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
         if not market.enabled:
             raise ValueError(f"Market {market.market_id} is disabled")
         interval = payload.interval or market.default_timeframe
-        bars = await provider.historical_bars(market.eodhd_symbol, interval, payload.start, payload.end)
+        try:
+            bars = await provider.historical_bars(market.eodhd_symbol, interval, payload.start, payload.end)
+        except Exception as exc:
+            raise RuntimeError(f"{market.market_id} ({market.eodhd_symbol}) EODHD data load failed: {_public_error(exc)}") from exc
         if len(bars) < market.min_backtest_bars:
             raise ValueError(f"{market.market_id}: need at least {market.min_backtest_bars} bars; received {len(bars)}")
         cost_profile = _cost_profile_for_market(market)
