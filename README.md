@@ -34,6 +34,20 @@ The first research layer is modular and FMP-first. It records every strategy tri
 
 Passing candidates are not execution-ready until a later IG-price validation step confirms the same edge on the tradable IG EPIC.
 
+## Automated Edge Discovery
+
+The backend includes a one-command, profit-first edge discovery pipeline. It ingests FMP bars, searches the adaptive IG-aware strategy families, applies realistic and stressed cost assumptions, then writes timestamped artifacts with a KEEP/REJECT leaderboard, secondary Sharpe tracking, an aggregation report, and a 30-day paper-trading protocol.
+
+From the server:
+
+```bash
+cd /opt/slrno
+docker compose exec backend python -m app.edge_discovery --config configs/edge_discovery.yaml --mode quick
+docker compose exec backend python -m app.edge_discovery --config configs/edge_discovery.yaml --mode deep
+```
+
+Artifacts are written under `/data/artifacts/edge_discovery` inside the backend container volume by default. A candidate is KEEP only if holdout net profit, stressed-cost profit, fold consistency, trade count, drawdown, cost/gross efficiency, and profit-concentration gates all pass. Sharpe >= 2 is tracked as an aspirational quality target, not a reason to keep a fragile candidate.
+
 ## Server Deployment
 
 Copy this repository to your server, create a `.env` from `.env.example`, then run:

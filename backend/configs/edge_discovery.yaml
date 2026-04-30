@@ -1,0 +1,30 @@
+mode: quick
+markets:
+  - NAS100
+  - US500
+  - DE40
+  - FTSE100
+  - EURUSD
+  - GBPUSD
+  - XAUUSD
+start: "2026-01-01"
+end: "2026-04-29"
+interval: 5min
+trading_style: find_anything_robust
+risk_profile: balanced
+quick_budget: 18
+deep_budget: 120
+strategy_families:
+  - intraday_trend
+  - breakout
+  - mean_reversion
+  - volatility_expansion
+artifact_root: /data/artifacts/edge_discovery
+starting_cash: 10000
+gates:
+  min_trade_count: 30
+  max_drawdown_fraction: 0.35
+  min_fold_consistency: 0.55
+  max_cost_gross_ratio: 0.45
+  max_single_fold_profit_share: 0.55
+  stress_multiplier: 2.0

@@ -38,6 +38,8 @@ class BacktestResult:
     turnover: float
     train_profit: float
     test_profit: float
+    train_sharpe: float = 0.0
+    test_sharpe: float = 0.0
     gross_profit: float = 0.0
     spread_cost: float = 0.0
     slippage_cost: float = 0.0
@@ -131,14 +133,16 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     split = max(1, int(len(pnl) * config.train_fraction))
     train_profit = sum(pnl[:split])
     test_profit = sum(pnl[split:])
-    mean = sum(pnl) / len(pnl)
-    variance = sum((value - mean) ** 2 for value in pnl) / len(pnl)
-    sharpe = 0.0 if variance == 0 else (mean / sqrt(variance)) * sqrt(252)
+    sharpe = _sharpe(pnl)
+    train_sharpe = _sharpe(pnl[:split])
+    test_sharpe = _sharpe(pnl[split:])
     total_cost = spread_cost + slippage_cost + commission_cost + funding_cost + fx_cost + guaranteed_stop_cost
 
     return BacktestResult(
         net_profit=sum(pnl),
         sharpe=sharpe,
+        train_sharpe=train_sharpe,
+        test_sharpe=test_sharpe,
         max_drawdown=abs(max_drawdown),
         win_rate=wins / len(pnl),
         trade_count=trade_count,
@@ -182,3 +186,11 @@ def _sample_curve(values: list[float], max_points: int = 250) -> tuple[float, ..
     if sampled[-1] != values[-1]:
         sampled.append(values[-1])
     return tuple(round(value, 4) for value in sampled[:max_points])
+
+
+def _sharpe(pnl: list[float]) -> float:
+    if not pnl:
+        return 0.0
+    mean = sum(pnl) / len(pnl)
+    variance = sum((value - mean) ** 2 for value in pnl) / len(pnl)
+    return 0.0 if variance == 0 else (mean / sqrt(variance)) * sqrt(252)
