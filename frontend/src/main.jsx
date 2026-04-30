@@ -579,6 +579,9 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
   const marketFailures = runDetail?.config?.market_failures ?? [];
+  const [trialTierFilter, setTrialTierFilter] = React.useState("active");
+  const qualitySummary = runQualitySummary(trials);
+  const filteredTrials = trials.filter((trial) => tierMatchesFilter(trial.promotion_tier, trialTierFilter));
   return (
     <div className="lab-grid">
       <section className="lab-section span-2">
@@ -616,7 +619,33 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
                 {item.error && <small>{item.error}</small>}
               </div>
             ))}
+            {marketFailures.map((item) => (
+              <div className="status" key={`${item.market_id}-${item.error}`}>
+                <strong>{item.market_id} · <span className="badge warn">failed</span></strong>
+                <span>{item.error}</span>
+              </div>
+            ))}
             {marketStatuses.length === 0 && runDetail?.error && <span className="muted">{runDetail.error}</span>}
+          </div>
+        </section>
+      )}
+      {trials.length > 0 && (
+        <section className="lab-section span-2">
+          <h3>Run Quality</h3>
+          <div className="metrics four">
+            <Metric label="Paper-ready" value={qualitySummary.paperReady} />
+            <Metric label="Research/watch" value={qualitySummary.researchWatch} />
+            <Metric label="Rejected" value={qualitySummary.rejected} />
+            <Metric label="Cost fragile" value={qualitySummary.costFragile} />
+          </div>
+          <div className="status-list">
+            {qualitySummary.topWarnings.map((item) => (
+              <div className="status compact-status" key={item.warning}>
+                <strong>{humanWarnings([item.warning])[0]}</strong>
+                <span>{item.count} trials</span>
+              </div>
+            ))}
+            {qualitySummary.topWarnings.length === 0 && <span className="muted">No warnings on saved trials.</span>}
           </div>
         </section>
       )}
@@ -628,14 +657,34 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
         </div>
       </section>
       <section className="lab-section span-2">
-        <h3>Top Trials</h3>
+        <div className="label-row table-heading">
+          <h3>Top Trials</h3>
+          <div className="segmented compact-filter">
+            {[
+              ["active", "Active"],
+              ["paper", "Paper"],
+              ["research", "Research"],
+              ["rejected", "Rejected"],
+              ["all", "All"],
+            ].map(([id, label]) => (
+              <button
+                className={trialTierFilter === id ? "segment active" : "segment"}
+                key={id}
+                type="button"
+                onClick={() => setTrialTierFilter(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="table-scroll">
           <table>
             <thead>
-              <tr><th>Strategy</th><th>Tier</th><th>Style</th><th>Score</th><th>Sharpe</th><th>Daily Sharpe</th><th>DSR</th><th>Net</th><th>Cost</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
+              <tr><th>Strategy</th><th>Tier</th><th>Style</th><th>Score</th><th>Sharpe</th><th>Daily Sharpe</th><th>DSR</th><th>Net</th><th>Expectancy</th><th>Net/cost</th><th>Cost/gross</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
             </thead>
             <tbody>
-              {trials.slice(0, 12).map((trial) => (
+              {filteredTrials.slice(0, 12).map((trial) => (
                 <tr key={trial.id}>
                   <td>{trial.strategy_name}</td>
                   <td><span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span></td>
@@ -645,7 +694,9 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
                   <td>{round(trial.backtest?.daily_pnl_sharpe)}</td>
                   <td>{percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)}</td>
                   <td>{formatMoney(trial.backtest?.net_profit)}</td>
-                  <td>{formatMoney(trial.backtest?.total_cost)}</td>
+                  <td>{formatMoney(trial.backtest?.expectancy_per_trade)}</td>
+                  <td>{formatRatio(trial.backtest?.net_cost_ratio)}</td>
+                  <td>{percent(trial.backtest?.cost_to_gross_ratio)}</td>
                   <td>{round(trial.backtest?.estimated_spread_bps)} / {round(trial.backtest?.estimated_slippage_bps)} bps</td>
                   <td>{trial.backtest?.trade_count ?? 0}</td>
                   <td>{humanWarnings(trial.warnings).join(", ") || "Clear"}</td>
@@ -654,6 +705,9 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
             </tbody>
           </table>
         </div>
+        {filteredTrials.length === 0 && trials.length > 0 && (
+          <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
+        )}
       </section>
     </div>
   );
@@ -671,6 +725,8 @@ function ParetoCard({ item }) {
         <Metric label="DSR" value={percent(item.deflated_sharpe_probability)} />
         <Metric label="Net" value={formatMoney(item.net_profit)} />
         <Metric label="Cost" value={formatMoney(item.total_cost)} />
+        <Metric label="Expectancy" value={formatMoney(item.expectancy_per_trade)} />
+        <Metric label="Net/cost" value={formatRatio(item.net_cost_ratio)} />
         <Metric label="Est spread/slip" value={`${round(item.estimated_spread_bps)} / ${round(item.estimated_slippage_bps)} bps`} />
       </div>
       <small>{humanWarnings(item.warnings).join(" · ") || "Ready for research review"}</small>
@@ -702,6 +758,8 @@ function CandidateView({ candidates, critique }) {
                 <Metric label="Stability" value={percent(candidate.audit?.candidate?.parameters?.parameter_stability_score)} />
                 <Metric label="Net" value={formatMoney(candidate.audit?.backtest?.net_profit)} />
                 <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
+                <Metric label="Expectancy" value={formatMoney(candidate.audit?.backtest?.expectancy_per_trade)} />
+                <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
                 <Metric label="Spread/slip" value={`${round(candidate.audit?.backtest?.estimated_spread_bps)} / ${round(candidate.audit?.backtest?.estimated_slippage_bps)} bps`} />
                 <Metric label="Trades" value={candidate.audit?.backtest?.trade_count ?? 0} />
               </div>
@@ -948,10 +1006,60 @@ function tierLabel(tier) {
   }[tier] ?? "Research";
 }
 
+function tierMatchesFilter(tier, filter) {
+  if (filter === "all") {
+    return true;
+  }
+  if (filter === "paper") {
+    return tier === "validated_candidate" || tier === "paper_candidate";
+  }
+  if (filter === "research") {
+    return tier === "research_candidate" || tier === "watchlist";
+  }
+  if (filter === "rejected") {
+    return tier === "reject";
+  }
+  return tier !== "reject";
+}
+
+function runQualitySummary(trials = []) {
+  const warningCounts = new Map();
+  let paperReady = 0;
+  let researchWatch = 0;
+  let rejected = 0;
+  let costFragile = 0;
+  for (const trial of trials) {
+    const tier = trial.promotion_tier;
+    if (tier === "validated_candidate" || tier === "paper_candidate") {
+      paperReady += 1;
+    } else if (tier === "research_candidate" || tier === "watchlist") {
+      researchWatch += 1;
+    } else {
+      rejected += 1;
+    }
+    const warnings = trial.warnings ?? [];
+    if (warnings.some((warning) => ["fails_higher_slippage", "costs_overwhelm_edge", "weak_net_cost_efficiency", "high_turnover_cost_drag"].includes(warning))) {
+      costFragile += 1;
+    }
+    for (const warning of warnings) {
+      warningCounts.set(warning, (warningCounts.get(warning) ?? 0) + 1);
+    }
+  }
+  const topWarnings = [...warningCounts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 4)
+    .map(([warning, count]) => ({ warning, count }));
+  return { paperReady, researchWatch, rejected, costFragile, topWarnings };
+}
+
 function humanWarnings(warnings = []) {
   const labels = {
     too_few_trades: "Too few trades",
     negative_after_costs: "Negative after costs",
+    costs_overwhelm_edge: "Costs overwhelm edge",
+    weak_net_cost_efficiency: "Weak net/cost efficiency",
+    high_turnover_cost_drag: "High-turnover cost drag",
+    negative_expectancy_after_costs: "Negative expectancy after costs",
     weak_sharpe: "Weak Sharpe",
     drawdown_too_high: "Drawdown too high",
     fails_higher_slippage: "Fails higher slippage",
@@ -977,7 +1085,13 @@ function labelForKind(kind) {
 
 function formatMoney(value) {
   const number = Number(value ?? 0);
-  return `£${number.toFixed(0)}`;
+  const prefix = number < 0 ? "-£" : "£";
+  return `${prefix}${Math.abs(number).toFixed(0)}`;
+}
+
+function formatRatio(value) {
+  const number = Number(value ?? 0);
+  return `${number.toFixed(2)}x`;
 }
 
 function percent(value) {

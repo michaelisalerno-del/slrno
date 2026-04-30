@@ -152,6 +152,10 @@ class ResearchStore:
             "stress_net_profit": parameters.get("stress_net_profit"),
             "stress_sharpe": parameters.get("stress_sharpe"),
             "turnover_efficiency": evaluation.backtest.turnover_efficiency,
+            "expectancy_per_trade": evaluation.backtest.expectancy_per_trade,
+            "average_cost_per_trade": evaluation.backtest.average_cost_per_trade,
+            "net_cost_ratio": evaluation.backtest.net_cost_ratio,
+            "cost_to_gross_ratio": evaluation.backtest.cost_to_gross_ratio,
             "daily_pnl_sharpe": evaluation.backtest.daily_pnl_sharpe,
             "deflated_sharpe_probability": (parameters.get("sharpe_diagnostics") or {}).get("deflated_sharpe_probability")
             if isinstance(parameters.get("sharpe_diagnostics"), dict)
@@ -356,6 +360,9 @@ class ResearchStore:
                     "net_profit": backtest.get("net_profit", 0),
                     "gross_profit": backtest.get("gross_profit", 0),
                     "total_cost": backtest.get("total_cost", 0),
+                    "net_cost_ratio": backtest.get("net_cost_ratio", 0),
+                    "expectancy_per_trade": backtest.get("expectancy_per_trade", 0),
+                    "cost_to_gross_ratio": backtest.get("cost_to_gross_ratio", 0),
                     "estimated_spread_bps": backtest.get("estimated_spread_bps", 0),
                     "estimated_slippage_bps": backtest.get("estimated_slippage_bps", 0),
                     "max_drawdown": backtest.get("max_drawdown", 0),

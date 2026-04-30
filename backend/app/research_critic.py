@@ -247,13 +247,16 @@ def _backtest_findings(strategy_name: str, backtest: dict[str, object], folds: l
     sharpe = float(backtest.get("sharpe") or 0.0)
     net_profit = float(backtest.get("net_profit") or 0.0)
     turnover = float(backtest.get("turnover") or 0.0)
+    net_cost_ratio = float(backtest.get("net_cost_ratio") or 0.0)
+    cost_to_gross_ratio = float(backtest.get("cost_to_gross_ratio") or 0.0)
+    expectancy_per_trade = float(backtest.get("expectancy_per_trade") or 0.0)
 
     if trade_count < 50:
         findings.append(
             CriticFinding(
                 "warning",
                 "low_trade_count",
-                "Too few trades can make Sharpe and win rate unstable.",
+                "Too few trades can make the risk-adjusted statistics unstable.",
                 {"strategy_name": strategy_name, "trade_count": trade_count},
             )
         )
@@ -273,6 +276,33 @@ def _backtest_findings(strategy_name: str, backtest: dict[str, object], folds: l
                 "high_turnover",
                 "High turnover makes spread, slippage, and rejected fills more important than this first model assumes.",
                 {"strategy_name": strategy_name, "turnover": turnover, "trade_count": trade_count},
+            )
+        )
+    if net_profit > 0 and net_cost_ratio < 0.5:
+        findings.append(
+            CriticFinding(
+                "warning",
+                "weak_net_cost_efficiency",
+                "The candidate makes less than 0.5 units of net profit per unit of modeled cost.",
+                {"strategy_name": strategy_name, "net_cost_ratio": round(net_cost_ratio, 4), "net_profit": net_profit},
+            )
+        )
+    if cost_to_gross_ratio > 0.65:
+        findings.append(
+            CriticFinding(
+                "warning",
+                "costs_overwhelm_edge",
+                "Modeled costs consume most of the gross edge, so small slippage changes can flip the result.",
+                {"strategy_name": strategy_name, "cost_to_gross_ratio": round(cost_to_gross_ratio, 4)},
+            )
+        )
+    if trade_count > 0 and expectancy_per_trade <= 0:
+        findings.append(
+            CriticFinding(
+                "warning",
+                "negative_expectancy_after_costs",
+                "Average net expectancy per trade is not positive after modeled costs.",
+                {"strategy_name": strategy_name, "expectancy_per_trade": round(expectancy_per_trade, 4)},
             )
         )
     if folds:
