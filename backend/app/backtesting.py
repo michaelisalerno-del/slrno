@@ -57,6 +57,10 @@ class BacktestResult:
     probabilistic_sharpe_ratio: float = 0.0
     sharpe_observations: int = 0
     turnover_efficiency: float = 0.0
+    expectancy_per_trade: float = 0.0
+    average_cost_per_trade: float = 0.0
+    net_cost_ratio: float = 0.0
+    cost_to_gross_ratio: float = 0.0
     equity_curve: tuple[float, ...] = ()
     drawdown_curve: tuple[float, ...] = ()
     daily_pnl_curve: tuple[float, ...] = ()
@@ -152,6 +156,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     net_profit = sum(pnl)
     daily_pnl_values = list(daily_pnl.values())
     rolling_sharpes = _rolling_sharpes(daily_pnl_values, window=20)
+    trade_denominator = max(1, trade_count)
 
     return BacktestResult(
         net_profit=net_profit,
@@ -182,6 +187,10 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         probabilistic_sharpe_ratio=_probabilistic_sharpe_ratio(daily_pnl_values),
         sharpe_observations=len(daily_pnl_values),
         turnover_efficiency=net_profit / max(1e-9, trade_count * config.position_size),
+        expectancy_per_trade=net_profit / trade_denominator,
+        average_cost_per_trade=total_cost / trade_denominator,
+        net_cost_ratio=net_profit / max(1.0, total_cost),
+        cost_to_gross_ratio=total_cost / max(1e-9, abs(gross_profit)),
         equity_curve=_sample_curve(equity_values),
         drawdown_curve=_sample_curve(drawdown_values),
         daily_pnl_curve=_sample_curve(daily_pnl_values),

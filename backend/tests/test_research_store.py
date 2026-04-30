@@ -31,6 +31,8 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     assert run_detail["error"] == ""
     assert [trial["strategy_name"] for trial in trials] == ["rejected", "accepted"]
     assert "estimated_spread_bps" in trials[0]["costs"]
+    assert "net_cost_ratio" in trials[0]["costs"]
+    assert "expectancy_per_trade" in trials[0]["costs"]
     assert "estimated_slippage_bps" in trials[0]["backtest"]
     assert trials[1]["promotion_tier"] == "paper_candidate"
     assert candidate["strategy_name"] == "accepted"

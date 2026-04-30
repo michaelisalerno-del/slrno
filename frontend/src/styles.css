@@ -126,6 +126,17 @@ p {
   margin-bottom: 18px;
 }
 
+.table-heading {
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.compact-filter .segment {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
 .tab,
 .segment,
 .market-chip,
@@ -387,6 +398,11 @@ button.ghost {
 .engine-list {
   display: grid;
   gap: 10px;
+}
+
+.compact-status {
+  grid-template-columns: 1fr auto;
+  align-items: center;
 }
 
 .metrics,

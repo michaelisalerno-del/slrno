@@ -20,8 +20,8 @@ SEARCH_PRESETS = {
 }
 
 STYLE_FAMILIES = {
-    "find_anything_robust": ("intraday_trend", "breakout", "mean_reversion", "volatility_expansion", "scalping", "swing_trend"),
-    "intraday_only": ("intraday_trend", "breakout", "mean_reversion", "volatility_expansion", "scalping"),
+    "find_anything_robust": ("intraday_trend", "swing_trend", "breakout", "mean_reversion", "volatility_expansion", "intraday_trend", "swing_trend"),
+    "intraday_only": ("intraday_trend", "breakout", "mean_reversion", "volatility_expansion", "intraday_trend", "scalping"),
     "swing_trades": ("swing_trend", "breakout", "mean_reversion"),
     "lower_drawdown": ("mean_reversion", "intraday_trend", "volatility_expansion"),
     "higher_profit": ("breakout", "swing_trend", "intraday_trend"),
@@ -146,21 +146,26 @@ def balanced_score(
     stress: BacktestResult,
     config: BacktestConfig,
 ) -> float:
-    sharpe_component = _clamp(backtest.sharpe / 2.0, 0.0, 1.0)
-    profit_component = _clamp(backtest.test_profit / max(250.0, config.starting_cash * 0.04), 0.0, 1.0)
+    profit_target = max(250.0, config.starting_cash * 0.04)
+    profit_component = _clamp(backtest.test_profit / profit_target, 0.0, 1.0)
+    stress_component = _clamp(stress.net_profit / profit_target, 0.0, 1.0)
+    net_cost_component = _clamp(backtest.net_cost_ratio, 0.0, 1.0)
+    expectancy_component = _expectancy_efficiency(backtest)
+    sharpe_component = _clamp(backtest.daily_pnl_sharpe / 2.0, 0.0, 1.0)
     fold_component = _positive_fold_rate(folds)
-    stress_component = 1.0 if stress.net_profit > 0 else 0.0
     drawdown_component = 1.0 - _clamp(backtest.max_drawdown / max(1.0, config.starting_cash * 0.35), 0.0, 1.0)
-    trade_component = _clamp(backtest.trade_count / 60, 0.0, 1.0)
+    churn_penalty = _churn_penalty(backtest)
     return round(
         100
         * (
-            0.35 * sharpe_component
-            + 0.25 * profit_component
-            + 0.15 * fold_component
-            + 0.10 * stress_component
-            + 0.10 * drawdown_component
-            + 0.05 * trade_component
+            0.30 * profit_component
+            + 0.18 * stress_component
+            + 0.17 * net_cost_component
+            + 0.12 * expectancy_component
+            + 0.10 * sharpe_component
+            + 0.08 * fold_component
+            + 0.05 * drawdown_component
+            - 0.25 * churn_penalty
         ),
         4,
     )
@@ -179,15 +184,15 @@ def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index:
     risk_scale = {"conservative": 0.7, "balanced": 1.0, "aggressive": 1.35}.get(risk_profile, 1.0)
     return {
         "lookback": rng.choice(lookbacks),
-        "threshold_bps": round(rng.choice((4, 8, 12, 18, 25, 35, 50)) * risk_scale, 2),
+        "threshold_bps": round(rng.choice(_threshold_choices(family)) * risk_scale, 2),
         "z_threshold": round(rng.uniform(0.65, 2.2), 3),
         "volatility_multiplier": round(rng.uniform(1.1, 2.8), 3),
         "stop_loss_bps": round(rng.choice((18, 25, 35, 50, 75, 110)) * risk_scale, 2),
         "take_profit_bps": round(rng.choice((20, 35, 55, 80, 130, 180)) * risk_scale, 2),
-        "max_hold_bars": rng.choice((8, 12, 24, 48, 96, 144)),
-        "min_hold_bars": rng.choice((1, 2, 3, 5)),
-        "min_trade_spacing": rng.choice((0, 2, 4, 8, 12)),
-        "confidence_quantile": rng.choice((0.2, 0.25, 0.3, 0.4, 1.0)),
+        "max_hold_bars": rng.choice(_max_hold_choices(family)),
+        "min_hold_bars": rng.choice((2, 3, 5, 8)),
+        "min_trade_spacing": rng.choice(_spacing_choices(family)),
+        "confidence_quantile": rng.choice((0.1, 0.15, 0.2, 0.25, 0.3, 0.4)),
         "regime_filter": rng.choice(("any", "trend", "volatile", "calm")),
         "false_breakout_filter": rng.choice((0, 1)),
         "position_size": round(rng.choice((0.5, 1.0, 1.5, 2.0)) * risk_scale, 2),
@@ -339,6 +344,12 @@ def _warnings(
         warnings.append("too_few_trades")
     if backtest.net_profit <= 0:
         warnings.append("negative_after_costs")
+    if backtest.cost_to_gross_ratio > 0.65 or backtest.total_cost > max(1.0, abs(backtest.net_profit) * 1.5):
+        warnings.append("costs_overwhelm_edge")
+    if backtest.net_profit > 0 and backtest.net_cost_ratio < 0.5:
+        warnings.append("weak_net_cost_efficiency")
+    if backtest.trade_count > 180 and backtest.total_cost > max(1.0, abs(backtest.net_profit)):
+        warnings.append("high_turnover_cost_drag")
     if backtest.sharpe < 0.55:
         warnings.append("weak_sharpe")
     if backtest.max_drawdown > config.starting_cash * 0.35:
@@ -361,12 +372,30 @@ def _annotate_evaluations(
     config: AdaptiveSearchConfig,
     cost_profile: IGCostProfile,
 ) -> tuple[CandidateEvaluation, ...]:
-    ranked = tuple(sorted(evaluations, key=lambda item: item.robustness_score, reverse=True))
-    output: list[CandidateEvaluation] = []
-    for rank, evaluation in enumerate(ranked, start=1):
+    prepared: list[tuple[CandidateEvaluation, float, dict[str, object]]] = []
+    for evaluation in evaluations:
         stability = _parameter_stability_score(evaluation, evaluations)
         diagnostics = _sharpe_diagnostics(evaluation.backtest, evaluation.fold_results, trial_count, stability)
         tier = _promotion_tier(evaluation, stability, cost_profile)
+        score = _cost_aware_score(evaluation, diagnostics, stability, config)
+        warnings = tuple(sorted(set(evaluation.warnings).union(diagnostics["implausibility_flags"])))
+        prepared.append(
+            (
+                replace(
+                    evaluation,
+                    robustness_score=score,
+                    passed=tier in {"paper_candidate", "validated_candidate"},
+                    warnings=warnings,
+                    promotion_tier=tier,
+                ),
+                stability,
+                diagnostics,
+            )
+        )
+    ranked = tuple(sorted(prepared, key=lambda item: _trial_ranking_key(item[0], item[1], item[2]), reverse=True))
+    output: list[CandidateEvaluation] = []
+    for rank, (evaluation, stability, diagnostics) in enumerate(ranked, start=1):
+        tier = evaluation.promotion_tier
         parameters = {
             **evaluation.candidate.parameters,
             "promotion_tier": tier,
@@ -386,9 +415,6 @@ def _annotate_evaluations(
             replace(
                 evaluation,
                 candidate=replace(evaluation.candidate, parameters=parameters),
-                passed=tier in {"paper_candidate", "validated_candidate"},
-                warnings=tuple(sorted(set(evaluation.warnings).union(diagnostics["implausibility_flags"]))),
-                promotion_tier=tier,
             )
         )
     return tuple(output)
@@ -404,6 +430,11 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
         return "reject"
     if backtest.net_profit <= 0 and backtest.test_profit <= 0:
         return "reject"
+    cost_robust = (
+        backtest.net_cost_ratio >= 0.5
+        and _expectancy_efficiency(backtest) >= 0.35
+        and backtest.cost_to_gross_ratio <= 0.65
+    )
     paper_ready = (
         backtest.net_profit > 0
         and backtest.test_profit > 0
@@ -411,16 +442,89 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
         and backtest.trade_count >= 18
         and fold_rate >= 0.55
         and backtest.max_drawdown <= 3_500
+        and cost_robust
+        and stability >= 0.35
     )
     if paper_ready and cost_profile.confidence == "ig_live_epic_cost_profile" and stability >= 0.55:
         return "validated_candidate"
     if paper_ready:
         return "paper_candidate"
-    if (backtest.net_profit > 0 or backtest.test_profit > 0) and backtest.trade_count >= 10:
+    if (
+        backtest.net_profit > 0
+        and backtest.test_profit > 0
+        and backtest.trade_count >= 10
+        and backtest.cost_to_gross_ratio <= 0.85
+        and backtest.net_cost_ratio >= 0.2
+    ):
         return "research_candidate"
     if backtest.gross_profit > 0 or backtest.sharpe > 0.5:
         return "watchlist"
     return "reject"
+
+
+def _cost_aware_score(
+    evaluation: CandidateEvaluation,
+    diagnostics: dict[str, object],
+    stability: float,
+    config: AdaptiveSearchConfig,
+) -> float:
+    backtest = evaluation.backtest
+    stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
+    profit_target = max(250.0, abs(backtest.total_cost) * 0.75, abs(backtest.max_drawdown) * 0.25)
+    profit_component = _clamp(backtest.test_profit / profit_target, 0.0, 1.0)
+    net_component = _clamp(backtest.net_profit / profit_target, 0.0, 1.0)
+    stress_component = _clamp(stress_net_profit / profit_target, 0.0, 1.0)
+    deflated_sharpe_component = _clamp(float(diagnostics.get("deflated_sharpe_probability") or 0.0), 0.0, 1.0)
+    net_cost_component = _clamp(backtest.net_cost_ratio, 0.0, 1.0)
+    expectancy_component = _expectancy_efficiency(backtest)
+    fold_component = _positive_fold_rate(evaluation.fold_results)
+    drawdown_component = 1.0 - _clamp(backtest.max_drawdown / 3_500.0, 0.0, 1.0)
+    churn_penalty = _churn_penalty(backtest)
+    if config.objective == "profit_first":
+        profit_weight, sharpe_weight = 0.36, 0.10
+    elif config.objective == "sharpe_first":
+        profit_weight, sharpe_weight = 0.24, 0.24
+    else:
+        profit_weight, sharpe_weight = 0.30, 0.16
+    score = 100 * (
+        profit_weight * profit_component
+        + 0.10 * net_component
+        + 0.15 * stress_component
+        + sharpe_weight * deflated_sharpe_component
+        + 0.12 * net_cost_component
+        + 0.10 * expectancy_component
+        + 0.08 * stability
+        + 0.05 * fold_component
+        + 0.04 * drawdown_component
+        - 0.28 * churn_penalty
+    )
+    return round(_clamp(score, -100.0, 100.0), 4)
+
+
+def _trial_ranking_key(
+    evaluation: CandidateEvaluation,
+    stability: float,
+    diagnostics: dict[str, object],
+) -> tuple[float, ...]:
+    tier_rank = {
+        "validated_candidate": 4,
+        "paper_candidate": 3,
+        "research_candidate": 2,
+        "watchlist": 1,
+        "reject": 0,
+    }.get(evaluation.promotion_tier, 0)
+    stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
+    return (
+        float(tier_rank),
+        float(evaluation.backtest.test_profit),
+        float(stress_net_profit),
+        float(evaluation.backtest.net_profit),
+        float(diagnostics.get("deflated_sharpe_probability") or 0.0),
+        float(evaluation.backtest.net_cost_ratio),
+        float(stability),
+        -float(evaluation.backtest.max_drawdown),
+        -float(_churn_penalty(evaluation.backtest)),
+    )
 
 
 def _parameter_stability_score(evaluation: CandidateEvaluation, evaluations: tuple[CandidateEvaluation, ...]) -> float:
@@ -517,6 +621,12 @@ def _implausibility_flags(
         flags.append("isolated_parameter_peak")
     if backtest.total_cost <= max(1.0, abs(backtest.gross_profit) * 0.05) and backtest.trade_count > 25:
         flags.append("costs_small_vs_turnover")
+    if backtest.cost_to_gross_ratio > 0.65:
+        flags.append("costs_overwhelm_edge")
+    if backtest.net_profit > 0 and backtest.net_cost_ratio < 0.5:
+        flags.append("weak_net_cost_efficiency")
+    if backtest.trade_count > 180 and backtest.total_cost > max(1.0, abs(backtest.net_profit)):
+        flags.append("high_turnover_cost_drag")
     if trial_count >= 50 and _deflated_sharpe_probability(list(backtest.daily_pnl_curve), trial_count) < 0.5:
         flags.append("multiple_testing_haircut")
     return flags
@@ -604,13 +714,23 @@ def _pareto(evaluations: tuple[CandidateEvaluation, ...]) -> tuple[dict[str, obj
                 "style": evaluation.candidate.parameters.get("style"),
                 "robustness_score": evaluation.robustness_score,
                 "sharpe": round(evaluation.backtest.sharpe, 4),
+                "daily_pnl_sharpe": round(evaluation.backtest.daily_pnl_sharpe, 4),
+                "deflated_sharpe_probability": (
+                    evaluation.candidate.parameters.get("sharpe_diagnostics") or {}
+                ).get("deflated_sharpe_probability")
+                if isinstance(evaluation.candidate.parameters.get("sharpe_diagnostics"), dict)
+                else 0.0,
                 "net_profit": round(evaluation.backtest.net_profit, 4),
                 "gross_profit": round(evaluation.backtest.gross_profit, 4),
                 "total_cost": round(evaluation.backtest.total_cost, 4),
+                "net_cost_ratio": round(evaluation.backtest.net_cost_ratio, 6),
+                "expectancy_per_trade": round(evaluation.backtest.expectancy_per_trade, 4),
+                "cost_to_gross_ratio": round(evaluation.backtest.cost_to_gross_ratio, 6),
                 "max_drawdown": round(evaluation.backtest.max_drawdown, 4),
                 "trade_count": evaluation.backtest.trade_count,
                 "warnings": list(evaluation.warnings),
                 "settings": evaluation.candidate.parameters,
+                "promotion_tier": evaluation.promotion_tier,
             }
         )
     return tuple(output)
@@ -624,6 +744,47 @@ def _positive_fold_rate(folds: tuple[BacktestResult, ...]) -> float:
     if not folds:
         return 0.0
     return sum(1 for fold in folds if fold.net_profit > 0) / len(folds)
+
+
+def _expectancy_efficiency(backtest: BacktestResult) -> float:
+    if backtest.trade_count <= 0:
+        return 0.0
+    if backtest.average_cost_per_trade <= 0:
+        return 1.0 if backtest.expectancy_per_trade > 0 else 0.0
+    return _clamp(backtest.expectancy_per_trade / max(1.0, backtest.average_cost_per_trade), 0.0, 1.0)
+
+
+def _churn_penalty(backtest: BacktestResult) -> float:
+    cost_drag = _clamp((backtest.cost_to_gross_ratio - 0.35) / 0.65, 0.0, 1.0)
+    turnover_drag = _clamp((backtest.trade_count - 160) / 640, 0.0, 1.0)
+    poor_expectancy_drag = 1.0 if backtest.trade_count > 0 and backtest.expectancy_per_trade <= 0 else 0.0
+    return _clamp(0.55 * cost_drag + 0.30 * turnover_drag + 0.15 * poor_expectancy_drag, 0.0, 1.0)
+
+
+def _threshold_choices(family: str) -> tuple[int, ...]:
+    if family == "scalping":
+        return (12, 18, 25, 35, 50, 75)
+    if family in {"intraday_trend", "breakout", "volatility_expansion"}:
+        return (12, 18, 25, 35, 50, 75, 110)
+    if family == "swing_trend":
+        return (18, 25, 35, 50, 75, 110, 150)
+    return (8, 12, 18, 25, 35, 50, 75)
+
+
+def _max_hold_choices(family: str) -> tuple[int, ...]:
+    if family == "scalping":
+        return (8, 12, 18, 24, 36)
+    if family == "swing_trend":
+        return (48, 96, 144, 192, 288)
+    return (24, 48, 72, 96, 144)
+
+
+def _spacing_choices(family: str) -> tuple[int, ...]:
+    if family == "scalping":
+        return (4, 8, 12, 18)
+    if family == "swing_trend":
+        return (12, 24, 36, 48)
+    return (4, 8, 12, 18, 24, 36)
 
 
 def _zscore(values: list[float], current: float) -> float:
