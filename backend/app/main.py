@@ -422,6 +422,19 @@ def get_research_pareto(run_id: int) -> list[dict[str, object]]:
     return research_store.list_pareto(run_id)
 
 
+@app.delete("/research/runs/{run_id}")
+def delete_research_run(run_id: int) -> dict[str, object]:
+    run = research_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    if run["status"] in {"created", "running"}:
+        raise HTTPException(status_code=409, detail="Running research runs cannot be deleted")
+    result = research_store.delete_run(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return {"status": "deleted", **result}
+
+
 @app.get("/research/critique")
 def critique_latest_research() -> dict[str, object]:
     runs = research_store.list_runs()
