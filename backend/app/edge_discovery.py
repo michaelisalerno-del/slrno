@@ -12,7 +12,7 @@ from .adaptive_research import AdaptiveSearchConfig, run_adaptive_search
 from .config import app_home
 from .ig_costs import IGCostProfile, public_ig_cost_profile
 from .market_registry import MarketMapping, MarketRegistry
-from .providers.fmp import FMPProvider
+from .providers.eodhd import EODHDProvider
 from .research_lab import CandidateEvaluation
 from .research_store import ResearchStore
 from .settings_store import SettingsStore
@@ -164,7 +164,7 @@ def load_config(path: Path, mode_override: str | None = None) -> EdgeRuntimeConf
 
 async def run_edge_discovery(
     config: EdgeRuntimeConfig,
-    provider: FMPProvider | None = None,
+    provider: EODHDProvider | None = None,
     market_registry: MarketRegistry | None = None,
     research_store: ResearchStore | None = None,
     command: str = DEFAULT_COMMAND,
@@ -172,7 +172,7 @@ async def run_edge_discovery(
     market_registry = market_registry or MarketRegistry()
     market_registry.seed_defaults()
     research_store = research_store or ResearchStore()
-    provider = provider or FMPProvider(_fmp_api_key())
+    provider = provider or EODHDProvider(_eodhd_api_token())
     artifact_dir = _artifact_dir(config)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -187,7 +187,7 @@ async def run_edge_discovery(
             failures.append({"market_id": market_id, "error": "market_disabled"})
             continue
         try:
-            bars = await provider.historical_bars(market.fmp_symbol, config.interval or market.default_timeframe, config.start, config.end)
+            bars = await provider.historical_bars(market.eodhd_symbol, config.interval or market.default_timeframe, config.start, config.end)
         except Exception as exc:
             failures.append({"market_id": market.market_id, "error": str(exc)})
             continue
@@ -499,12 +499,12 @@ def _markdown_report(output: EdgeDiscoveryOutput, config: EdgeRuntimeConfig, com
         "",
         "## Profit-first leaderboard",
         "",
-        "| Decision | Candidate | Family | Test net | Holdout Sharpe | WF Sharpe | Gross | Costs | Cost/gross | Trades | Max DD | Stress net | Fold score | Profit concentration | Failed gates |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Decision | Candidate | Family | Test net | Holdout Sharpe | WF Sharpe | Gross | Costs | Est spread/slip | Cost/gross | Trades | Max DD | Stress net | Fold score | Profit concentration | Failed gates |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for item in output.leaderboard[:30]:
         lines.append(
-            "| {decision} | {candidate} | {family} | {test:.2f} | {holdout_sharpe:.2f} | {wf_sharpe:.2f} | {gross:.2f} | {costs:.2f} | {ratio:.3f} | {trades} | {dd:.2f} | {stress:.2f} | {fold:.3f} | {concentration:.3f} | {failed} |".format(
+            "| {decision} | {candidate} | {family} | {test:.2f} | {holdout_sharpe:.2f} | {wf_sharpe:.2f} | {gross:.2f} | {costs:.2f} | {spread:.2f}/{slippage:.2f} bps | {ratio:.3f} | {trades} | {dd:.2f} | {stress:.2f} | {fold:.3f} | {concentration:.3f} | {failed} |".format(
                 decision="KEEP" if item.keep else "REJECT",
                 candidate=item.candidate_id,
                 family=item.strategy_family,
@@ -513,6 +513,8 @@ def _markdown_report(output: EdgeDiscoveryOutput, config: EdgeRuntimeConfig, com
                 wf_sharpe=item.walk_forward_sharpe,
                 gross=item.gross_profit,
                 costs=item.total_cost,
+                spread=float(item.settings.get("estimated_spread_bps") or 0.0),
+                slippage=float(item.settings.get("estimated_slippage_bps") or 0.0),
                 ratio=item.cost_gross_ratio,
                 trades=item.trade_count,
                 dd=item.max_drawdown,
@@ -594,7 +596,7 @@ def _markdown_report(output: EdgeDiscoveryOutput, config: EdgeRuntimeConfig, com
             "",
             f"- Command: `{command}`",
             f"- Artifact directory: `{output.artifact_dir}`",
-            "- Assumption: FMP remains the discovery data source; IG profiles/cost envelopes are applied during evaluation.",
+            "- Assumption: EODHD is the discovery data source; IG profiles/cost envelopes are applied during evaluation.",
             "- Limitation: Candidates remain research-only until live-paper review and IG price validation pass.",
             "- Integrity rule: Sharpe >= 2 is aspirational only; high Sharpe without trade count, fold stability, and stress survival remains REJECT.",
         ]
@@ -682,13 +684,13 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _fmp_api_key() -> str:
-    env_key = os.environ.get("FMP_API_KEY")
+def _eodhd_api_token() -> str:
+    env_key = os.environ.get("EODHD_API_TOKEN")
     if env_key:
         return env_key
-    key = SettingsStore().get_secret("fmp", "api_key")
+    key = SettingsStore().get_secret("eodhd", "api_token")
     if not key:
-        raise RuntimeError("FMP API key is required. Save it in settings or set FMP_API_KEY.")
+        raise RuntimeError("EODHD API token is required. Save it in settings or set EODHD_API_TOKEN.")
     return key
 
 

@@ -49,6 +49,8 @@ class BacktestResult:
     guaranteed_stop_cost: float = 0.0
     total_cost: float = 0.0
     cost_confidence: str = "ig_public_spread_baseline"
+    estimated_spread_bps: float = 0.0
+    estimated_slippage_bps: float = 0.0
     equity_curve: tuple[float, ...] = ()
     drawdown_curve: tuple[float, ...] = ()
 
@@ -159,6 +161,8 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         guaranteed_stop_cost=guaranteed_stop_cost,
         total_cost=total_cost,
         cost_confidence=config.cost_confidence,
+        estimated_spread_bps=config.spread_bps,
+        estimated_slippage_bps=config.slippage_bps,
         equity_curve=_sample_curve(equity_values),
         drawdown_curve=_sample_curve(drawdown_values),
     )

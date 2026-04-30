@@ -8,12 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .adaptive_research import AdaptiveSearchConfig, available_research_engines, run_adaptive_search
-from .backtesting import BacktestConfig
 from .config import allowed_origins
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile
+from .ig_spread_bet_engines import list_spread_bet_engines
+from .market_data_cache import MarketDataCache
 from .market_plugins import get_market_plugin, list_market_plugins
 from .market_registry import MarketMapping, MarketRegistry
-from .providers.fmp import FMPProvider
+from .providers.eodhd import EODHDProvider
 from .providers.ig import IGDemoProvider
 from .research_critic import ResearchCritic
 from .research_lab import ResearchStack
@@ -35,8 +36,8 @@ research_store = ResearchStore()
 research_critic = ResearchCritic.default()
 
 
-class FMPSettings(BaseModel):
-    api_key: str = Field(min_length=1)
+class EODHDSettings(BaseModel):
+    api_token: str = Field(min_length=1)
 
 
 class IGSettings(BaseModel):
@@ -51,7 +52,8 @@ class MarketPayload(BaseModel):
     market_id: str
     name: str
     asset_class: str
-    fmp_symbol: str
+    eodhd_symbol: str = ""
+    fmp_symbol: str = ""
     ig_epic: str = ""
     enabled: bool = True
     plugin_id: str = ""
@@ -101,17 +103,17 @@ def settings_status() -> list[dict[str, object]]:
     return [status.__dict__ for status in settings.statuses()]
 
 
-@app.post("/settings/fmp")
-async def save_fmp(payload: FMPSettings) -> dict[str, str]:
-    settings.set_secret("fmp", "api_key", payload.api_key)
-    provider = FMPProvider(payload.api_key)
+@app.post("/settings/eodhd")
+async def save_eodhd(payload: EODHDSettings) -> dict[str, str]:
+    settings.set_secret("eodhd", "api_token", payload.api_token)
+    provider = EODHDProvider(payload.api_token)
     try:
         await provider.validate()
     except Exception as exc:
         detail = _public_error(exc)
-        settings.set_status("fmp", "error", detail)
-        raise HTTPException(status_code=400, detail=f"FMP validation failed: {detail}") from exc
-    settings.set_status("fmp", "connected")
+        settings.set_status("eodhd", "error", detail)
+        raise HTTPException(status_code=400, detail=f"EODHD validation failed: {detail}") from exc
+    settings.set_status("eodhd", "connected")
     return {"status": "connected"}
 
 
@@ -139,7 +141,29 @@ async def save_ig(payload: IGSettings) -> dict[str, str]:
 
 @app.get("/markets")
 def list_markets() -> list[dict[str, object]]:
-    return [market.__dict__ for market in markets.list()]
+    return [_market_response(market) for market in markets.list()]
+
+
+@app.get("/market-data/cache")
+def market_data_cache_status() -> dict[str, object]:
+    cache = MarketDataCache()
+    return {
+        "stats": cache.stats().as_dict(),
+        "namespaces": cache.namespace_stats(),
+        "policy": {
+            "quote_ttl_seconds": EODHDProvider.QUOTE_TTL_SECONDS,
+            "live_history_ttl_seconds": EODHDProvider.LIVE_HISTORY_TTL_SECONDS,
+            "closed_history_ttl_seconds": EODHDProvider.CLOSED_HISTORY_TTL_SECONDS,
+            "recent_history_refresh_days": 3,
+        },
+    }
+
+
+@app.post("/market-data/cache/prune")
+def prune_market_data_cache() -> dict[str, object]:
+    cache = MarketDataCache()
+    deleted = cache.prune_expired()
+    return {"status": "pruned", "deleted": deleted, "stats": cache.stats().as_dict()}
 
 
 @app.get("/market-plugins")
@@ -163,7 +187,7 @@ def upsert_market(payload: MarketPayload) -> dict[str, str]:
             payload.market_id,
             payload.name,
             payload.asset_class,
-            payload.fmp_symbol,
+            payload.eodhd_symbol or payload.fmp_symbol,
             payload.ig_epic,
             payload.enabled,
             payload.plugin_id,
@@ -181,6 +205,11 @@ def upsert_market(payload: MarketPayload) -> dict[str, str]:
 @app.get("/research/engines")
 def research_engines() -> list[dict[str, object]]:
     return available_research_engines()
+
+
+@app.get("/ig/spread-bet/engines")
+def ig_spread_bet_engines() -> list[dict[str, object]]:
+    return list_spread_bet_engines()
 
 
 @app.post("/ig/markets/sync-costs")
@@ -226,15 +255,15 @@ async def create_research_run(payload: ResearchRunPayload, background_tasks: Bac
     engine_ids = {engine["id"] for engine in available_research_engines()}
     if payload.engine not in engine_ids:
         raise HTTPException(status_code=400, detail="Unknown research engine")
-    api_key = settings.get_secret("fmp", "api_key")
-    if api_key is None:
-        raise HTTPException(status_code=400, detail="FMP API key is required before launching research")
+    api_token = settings.get_secret("eodhd", "api_token")
+    if api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before launching research")
 
     selected_markets = _selected_markets(payload.market_ids or [payload.market_id])
     run_market_id = selected_markets[0].market_id if len(selected_markets) == 1 else "MULTI"
     run_id = research_store.create_run(
         market_id=run_market_id,
-        data_source="fmp_with_ig_cost_model",
+        data_source="eodhd_with_ig_cost_model",
         status="running",
         config={
             "start": payload.start,
@@ -253,7 +282,7 @@ async def create_research_run(payload: ResearchRunPayload, background_tasks: Bac
             "ig_validation_required": True,
         },
     )
-    background_tasks.add_task(_run_research_job, run_id, payload.model_dump(), api_key)
+    background_tasks.add_task(_run_research_job, run_id, payload.model_dump(), api_token)
     return {
         "run_id": run_id,
         "status": "running",
@@ -265,21 +294,22 @@ async def create_research_run(payload: ResearchRunPayload, background_tasks: Bac
     }
 
 
-def _run_research_job(run_id: int, payload_data: dict[str, object], api_key: str) -> None:
+def _run_research_job(run_id: int, payload_data: dict[str, object], api_token: str) -> None:
     try:
-        asyncio.run(_execute_research_run(run_id, ResearchRunPayload(**payload_data), api_key))
+        asyncio.run(_execute_research_run(run_id, ResearchRunPayload(**payload_data), api_token))
     except Exception as exc:
         research_store.update_run_status(run_id, "error", _public_error(exc))
 
 
-async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_key: str) -> None:
+async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_token: str) -> None:
     selected_markets = _selected_markets(payload.market_ids or [payload.market_id])
-    provider = FMPProvider(api_key)
+    provider = EODHDProvider(api_token)
+    provider.cache.prune_expired()
     for market in selected_markets:
         if not market.enabled:
             raise ValueError(f"Market {market.market_id} is disabled")
         interval = payload.interval or market.default_timeframe
-        bars = await provider.historical_bars(market.fmp_symbol, interval, payload.start, payload.end)
+        bars = await provider.historical_bars(market.eodhd_symbol, interval, payload.start, payload.end)
         if len(bars) < market.min_backtest_bars:
             raise ValueError(f"{market.market_id}: need at least {market.min_backtest_bars} bars; received {len(bars)}")
         cost_profile = _cost_profile_for_market(market)
@@ -384,7 +414,7 @@ def save_research_schedule(payload: ResearchSchedulePayload) -> dict[str, object
         payload.name,
         payload.cadence,
         payload.enabled,
-        {"market_ids": payload.market_ids, "interval": payload.interval, "data_source": "fmp"},
+        {"market_ids": payload.market_ids, "interval": payload.interval, "data_source": "eodhd"},
     )
     return {"status": "saved", "schedule_id": schedule_id}
 
@@ -398,6 +428,13 @@ def _selected_markets(market_ids: list[str]) -> list[MarketMapping]:
             raise HTTPException(status_code=404, detail=f"Market {market_id} not found")
         selected.append(market)
     return selected
+
+
+def _market_response(market: MarketMapping) -> dict[str, object]:
+    payload = dict(market.__dict__)
+    payload["estimated_spread_bps"] = market.spread_bps
+    payload["estimated_slippage_bps"] = market.slippage_bps
+    return payload
 
 
 def _cost_profile_for_market(market: MarketMapping) -> IGCostProfile:
@@ -423,5 +460,6 @@ def _ig_provider_from_settings() -> IGDemoProvider | None:
 def _public_error(exc: Exception) -> str:
     text = str(exc)
     text = re.sub(r"apikey=[^&'\"\s]+", "apikey=***", text, flags=re.IGNORECASE)
+    text = re.sub(r"api_token=[^&'\"\s]+", "api_token=***", text, flags=re.IGNORECASE)
     text = re.sub(r"api[-_ ]?key[^,;\n]*", "API key hidden", text, flags=re.IGNORECASE)
     return text

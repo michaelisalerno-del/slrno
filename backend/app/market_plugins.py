@@ -19,7 +19,7 @@ class MarketPlugin:
     market_id: str
     name: str
     asset_class: str
-    fmp_symbol: str
+    eodhd_symbol: str
     ig_name: str
     ig_search_terms: tuple[str, ...]
     backtest_profile: BacktestProfile
@@ -31,7 +31,7 @@ class MarketPlugin:
             market_id=self.market_id,
             name=self.name,
             asset_class=self.asset_class,
-            fmp_symbol=self.fmp_symbol,
+            eodhd_symbol=self.eodhd_symbol,
             ig_epic="",
             enabled=True,
             plugin_id=self.plugin_id,
@@ -49,9 +49,11 @@ class MarketPlugin:
             "market_id": self.market_id,
             "name": self.name,
             "asset_class": self.asset_class,
-            "fmp_symbol": self.fmp_symbol,
+            "eodhd_symbol": self.eodhd_symbol,
             "ig_name": self.ig_name,
             "ig_search_terms": list(self.ig_search_terms),
+            "estimated_spread_bps": self.backtest_profile.spread_bps,
+            "estimated_slippage_bps": self.backtest_profile.slippage_bps,
             "backtest_profile": self.backtest_profile.__dict__,
             "source_url": self.source_url,
             "notes": self.notes,
@@ -64,7 +66,7 @@ def _plugin_from_market(market: MarketMapping, source_url: str, notes: str) -> M
         market_id=market.market_id,
         name=market.name,
         asset_class=market.asset_class,
-        fmp_symbol=market.fmp_symbol,
+        eodhd_symbol=market.eodhd_symbol,
         ig_name=market.ig_name,
         ig_search_terms=tuple(term.strip() for term in market.ig_search_terms.split(",") if term.strip()),
         backtest_profile=BacktestProfile(market.default_timeframe, market.spread_bps, market.slippage_bps, market.min_backtest_bars),
@@ -86,8 +88,6 @@ _SOURCE_URLS = {
     "US500": "https://www.ig.com/en/indices/markets-indices/us-spx-500",
     "FTSE100": "https://www.ig.com/uk/indices/markets-indices/ftse-100",
     "DE40": "https://www.ig.com/uk/indices/markets-indices/germany-40",
-    "QQQ": "https://www.invesco.com/qqq-etf/en/home.html",
-    "SPY": "https://www.ssga.com/us/en/intermediary/etfs/spdr-sp-500-etf-trust-spy",
     "XAUUSD": "https://www.ig.com/en/commodities/gold-trading",
 }
 

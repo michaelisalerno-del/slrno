@@ -41,15 +41,11 @@ class IGCostProfile:
 
 
 def public_ig_cost_profile(market: MarketMapping, account_currency: str = "GBP") -> IGCostProfile:
-    is_proxy = market.market_id in {"QQQ", "SPY"} or market.plugin_id.startswith("fmp-")
     admin_fee = 0.01 if market.asset_class == "forex" else 0.03
-    confidence = "fmp_proxy_ig_cost_envelope" if is_proxy else "ig_public_spread_baseline"
     notes = [
         "Uses the market registry spread/slippage as an IG UK spread-betting cost envelope.",
         "Sync IG costs after binding an exact EPIC to upgrade this profile.",
     ]
-    if is_proxy:
-        notes.append("This is an FMP proxy, not the exact tradable IG instrument.")
     return IGCostProfile(
         market_id=market.market_id,
         epic=market.ig_epic,
@@ -61,7 +57,7 @@ def public_ig_cost_profile(market: MarketMapping, account_currency: str = "GBP")
         slippage_bps=max(0.0, market.slippage_bps),
         overnight_admin_fee_annual=admin_fee,
         source="market_registry",
-        confidence=confidence,
+        confidence="ig_public_spread_baseline",
         notes=tuple(notes),
     )
 
@@ -139,7 +135,7 @@ def profile_badge(profile: IGCostProfile | dict[str, object] | None) -> str:
         "ig_live_epic_cost_profile": "IG live EPIC cost profile",
         "ig_live_epic_rules_no_spread": "IG EPIC rules, public spread fallback",
         "ig_public_spread_baseline": "IG public spread baseline",
-        "fmp_proxy_ig_cost_envelope": "FMP proxy with IG cost envelope",
+        "eodhd_ig_cost_envelope": "EODHD bars with IG cost envelope",
     }.get(confidence, "Needs IG price validation")
 
 
@@ -189,12 +185,13 @@ def _instrument_currency(instrument: dict[str, Any]) -> str:
 
 
 def _default_currency(market: MarketMapping) -> str:
-    if market.asset_class == "forex" and len(market.fmp_symbol) >= 6:
-        return market.fmp_symbol[3:6].upper()
-    if market.market_id in {"US500", "NAS100", "QQQ", "SPY", "XAUUSD", "XAGUSD", "BRENT", "NATGAS"}:
+    symbol = market.eodhd_symbol.split(".")[0]
+    if market.asset_class == "forex" and len(symbol) >= 6:
+        return symbol[3:6].upper()
+    if market.market_id in {"US500", "NAS100", "US30", "RUSSELL2000", "JP225", "HK50", "AUS200", "VIX", "XAUUSD", "XAGUSD", "BRENT", "WTI", "NATGAS", "COPPER"}:
         return "USD"
     if market.market_id in {"FTSE100"}:
         return "GBP"
-    if market.market_id in {"DE40"}:
+    if market.market_id in {"DE40", "FR40", "EU50"}:
         return "EUR"
     return "GBP"

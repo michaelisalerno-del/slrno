@@ -111,6 +111,8 @@ def run_adaptive_search(
             "objective": config.objective,
             "cost_confidence": cost_profile.confidence,
             "cost_badge": profile_badge(cost_profile),
+            "estimated_spread_bps": cost_profile.spread_bps,
+            "estimated_slippage_bps": cost_profile.slippage_bps,
             "stress_net_profit": round(stress.net_profit, 4),
             "stress_sharpe": round(stress.sharpe, 4),
         }

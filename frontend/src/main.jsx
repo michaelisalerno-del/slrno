@@ -14,6 +14,8 @@ import {
 import {
   createResearchRun,
   getIgCostProfile,
+  getIgSpreadBetEngines,
+  getMarketDataCacheStatus,
   getMarketPlugins,
   getMarkets,
   getResearchCandidates,
@@ -23,7 +25,8 @@ import {
   getResearchRuns,
   getStatus,
   installMarketPlugin,
-  saveFmp,
+  pruneMarketDataCache,
+  saveEodhd,
   saveIg,
   saveMarket,
   saveResearchSchedule,
@@ -49,6 +52,7 @@ const CANDLE_INTERVALS = [
   { value: "15min", label: "15 minute" },
   { value: "30min", label: "30 minute" },
   { value: "1hour", label: "1 hour" },
+  { value: "1day", label: "1 day" },
 ];
 
 const SEARCH_PRESETS = [
@@ -75,6 +79,8 @@ function App() {
   const [status, setStatus] = React.useState([]);
   const [markets, setMarkets] = React.useState([]);
   const [plugins, setPlugins] = React.useState([]);
+  const [cacheStatus, setCacheStatus] = React.useState(null);
+  const [spreadBetEngines, setSpreadBetEngines] = React.useState([]);
   const [engines, setEngines] = React.useState(FALLBACK_ENGINES);
   const [researchRuns, setResearchRuns] = React.useState([]);
   const [candidates, setCandidates] = React.useState([]);
@@ -82,13 +88,13 @@ function App() {
   const [runDetail, setRunDetail] = React.useState(null);
   const [costProfiles, setCostProfiles] = React.useState({});
   const [message, setMessage] = React.useState("");
-  const [fmpKey, setFmpKey] = React.useState("");
+  const [eodhdKey, setEodhdKey] = React.useState("");
   const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "", accountId: "" });
   const [market, setMarket] = React.useState({
     market_id: "GBPUSD",
     name: "GBP/USD",
     asset_class: "forex",
-    fmp_symbol: "GBPUSD",
+    eodhd_symbol: "GBPUSD.FOREX",
     ig_epic: "",
     ig_name: "GBP/USD",
     ig_search_terms: "GBP/USD,GBPUSD",
@@ -114,7 +120,7 @@ function App() {
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
 
-  const fmpStatus = providerStatus(status, "fmp");
+  const eodhdStatus = providerStatus(status, "eodhd");
   const igStatus = providerStatus(status, "ig");
   const enabledMarkets = markets.filter((item) => item.enabled);
   const selectedMarkets = enabledMarkets.filter((item) => activeMarketIds.includes(item.market_id));
@@ -122,11 +128,13 @@ function App() {
   const selectedPreset = SEARCH_PRESETS.find((preset) => preset.id === researchRun.search_preset) ?? SEARCH_PRESETS[1];
 
   const refresh = React.useCallback(async () => {
-    const [nextStatus, nextMarkets, nextPlugins, nextEngines, nextRuns, nextCandidates, nextCritique] = await Promise.all([
+    const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, nextEngines, nextSpreadBetEngines, nextRuns, nextCandidates, nextCritique] = await Promise.all([
       getStatus(),
       getMarkets(),
       getMarketPlugins(),
+      getMarketDataCacheStatus().catch(() => null),
       getResearchEngines().catch(() => FALLBACK_ENGINES),
+      getIgSpreadBetEngines().catch(() => []),
       getResearchRuns(),
       getResearchCandidates(),
       getResearchCritique(),
@@ -134,7 +142,9 @@ function App() {
     setStatus(nextStatus);
     setMarkets(nextMarkets);
     setPlugins(nextPlugins);
+    setCacheStatus(nextCacheStatus);
     setEngines(nextEngines.length ? nextEngines : FALLBACK_ENGINES);
+    setSpreadBetEngines(nextSpreadBetEngines);
     setResearchRuns(nextRuns);
     setCandidates(nextCandidates);
     setCritique(nextCritique);
@@ -156,13 +166,13 @@ function App() {
     }
   }, [activeMarketIds]);
 
-  async function submitFmp(event) {
+  async function submitEodhd(event) {
     event.preventDefault();
-    setMessage("Validating FMP...");
+    setMessage("Validating EODHD...");
     try {
-      await saveFmp(fmpKey);
-      setFmpKey("");
-      setMessage("FMP connected.");
+      await saveEodhd(eodhdKey);
+      setEodhdKey("");
+      setMessage("EODHD connected.");
       await refresh();
     } catch (error) {
       setMessage(error.message);
@@ -218,10 +228,11 @@ function App() {
     event.preventDefault();
     const market_ids = activeMarketIds.length ? activeMarketIds : [researchRun.market_id];
     const budget = researchRun.search_budget === "" ? selectedPreset.budget : Number(researchRun.search_budget);
+    const plannedTrials = budget * market_ids.length;
     setMessage("Launching adaptive IG-aware search...");
     setResearchState({
       status: "running",
-      detail: `${selectedEngine.label} across ${market_ids.length} market${market_ids.length === 1 ? "" : "s"}.`,
+      detail: `${selectedEngine.label}: ${budget} strategy trials per market, ${plannedTrials} total.`,
     });
     try {
       const result = await createResearchRun({
@@ -231,14 +242,14 @@ function App() {
         search_budget: budget,
         product_mode: "spread_bet",
       });
-      const detail = await getResearchRun(result.run_id);
-      setRunDetail(detail);
       setActiveTab("results");
+      setMessage(`Run ${result.run_id} started: ${budget} strategy trials per market, ${plannedTrials} total.`);
+      const detail = await pollResearchRun(result.run_id, plannedTrials);
       setResearchState({
-        status: "finished",
-        detail: `Run ${result.run_id}: ${result.trial_count} trials, ${result.candidate_count} research candidates, best score ${round(result.best_score)}.`,
+        status: detail.status,
+        detail: runStateDetail(detail, plannedTrials),
       });
-      setMessage(`Run ${result.run_id} finished after IG-style costs.`);
+      setMessage(detail.status === "finished" ? `Run ${result.run_id} finished after IG-style costs.` : `Run ${result.run_id} ${detail.status}: ${detail.error || "check run details"}`);
       await refresh();
     } catch (error) {
       setResearchState({ status: "error", detail: error.message });
@@ -257,6 +268,25 @@ function App() {
       interval: researchRun.interval,
     });
     setMessage(`Research schedule ${result.schedule_id} saved.`);
+  }
+
+  async function pollResearchRun(runId, plannedTrials) {
+    let detail = await getResearchRun(runId);
+    setRunDetail(detail);
+    for (let attempt = 0; attempt < 720 && ["created", "running"].includes(detail.status); attempt += 1) {
+      setResearchState({ status: "running", detail: runStateDetail(detail, plannedTrials) });
+      await sleep(2000);
+      detail = await getResearchRun(runId);
+      setRunDetail(detail);
+    }
+    return detail;
+  }
+
+  async function pruneCache() {
+    const result = await pruneMarketDataCache();
+    setCacheStatus({ stats: result.stats, namespaces: cacheStatus?.namespaces ?? [], policy: cacheStatus?.policy ?? {} });
+    setMessage(`Pruned ${result.deleted} expired cache entries.`);
+    await refresh().catch(() => undefined);
   }
 
   function toggleMarket(marketId) {
@@ -380,7 +410,7 @@ function App() {
               <input value={researchRun.start} onChange={(event) => setResearchRun({ ...researchRun, start: event.target.value })} required />
               <label>End</label>
               <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} required />
-              <label>Trial budget</label>
+              <label>Strategy trials / market</label>
               <input
                 value={researchRun.search_budget}
                 onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })}
@@ -417,14 +447,16 @@ function App() {
         {activeTab === "settings" && (
           <SettingsView
             status={status}
-            fmpKey={fmpKey}
-            setFmpKey={setFmpKey}
+            eodhdKey={eodhdKey}
+            setEodhdKey={setEodhdKey}
             ig={ig}
             setIg={setIg}
-            submitFmp={submitFmp}
+            submitEodhd={submitEodhd}
             submitIg={submitIg}
-            fmpStatus={fmpStatus}
+            eodhdStatus={eodhdStatus}
             igStatus={igStatus}
+            cacheStatus={cacheStatus}
+            pruneCache={pruneCache}
           />
         )}
       </section>
@@ -437,7 +469,7 @@ function App() {
                 <div>
                   <strong>{plugin.name}</strong>
                   <span>{plugin.ig_name} · {plugin.asset_class}</span>
-                  <small>{plugin.ig_search_terms.join(", ")}</small>
+                  <small>{plugin.ig_search_terms.join(", ")} · est {round(plugin.estimated_spread_bps)} / {round(plugin.estimated_slippage_bps)} bps</small>
                 </div>
                 <button type="button" onClick={() => installPlugin(plugin.plugin_id)}>Install</button>
               </div>
@@ -450,7 +482,7 @@ function App() {
             <input value={market.market_id} onChange={(event) => setMarket({ ...market, market_id: event.target.value })} placeholder="Market ID" required />
             <input value={market.name} onChange={(event) => setMarket({ ...market, name: event.target.value })} placeholder="Name" required />
             <input value={market.asset_class} onChange={(event) => setMarket({ ...market, asset_class: event.target.value })} placeholder="Asset class" required />
-            <input value={market.fmp_symbol} onChange={(event) => setMarket({ ...market, fmp_symbol: event.target.value })} placeholder="FMP symbol" required />
+            <input value={market.eodhd_symbol} onChange={(event) => setMarket({ ...market, eodhd_symbol: event.target.value })} placeholder="EODHD symbol" required />
             <input value={market.ig_epic} onChange={(event) => setMarket({ ...market, ig_epic: event.target.value })} placeholder="IG EPIC" />
             <input value={market.ig_name} onChange={(event) => setMarket({ ...market, ig_name: event.target.value })} placeholder="IG market name" />
             <input value={market.ig_search_terms} onChange={(event) => setMarket({ ...market, ig_search_terms: event.target.value })} placeholder="IG search terms" />
@@ -465,13 +497,31 @@ function App() {
             <button>Save market</button>
           </form>
         </Panel>
+
+        <Panel icon={<BarChart3 />} title="IG Spread Betting Engines">
+          <div className="engine-list">
+            {spreadBetEngines.map((engine) => (
+              <div className="engine" key={engine.engine_id}>
+                <div>
+                  <strong>{engine.label}</strong>
+                  <span>{engine.instrument_types.join(", ")}</span>
+                  <small>{engine.notes}</small>
+                </div>
+                <span className={`badge ${engine.eligible_for_adaptive_backtest ? "good" : "base"}`}>
+                  {engine.eligible_for_adaptive_backtest ? "Backtest-ready" : "Needs product model"}
+                </span>
+              </div>
+            ))}
+            {spreadBetEngines.length === 0 && <span className="muted">Engine registry unavailable.</span>}
+          </div>
+        </Panel>
       </section>
 
       <section className="market-table">
         <h2><SlidersHorizontal size={20} /> Markets</h2>
         <table>
           <thead>
-            <tr><th>ID</th><th>Name</th><th>Class</th><th>FMP</th><th>IG market</th><th>EPIC</th><th>Costs</th><th>Enabled</th></tr>
+            <tr><th>ID</th><th>Name</th><th>Class</th><th>EODHD</th><th>IG market</th><th>EPIC</th><th>Costs</th><th>Enabled</th></tr>
           </thead>
           <tbody>
             {markets.map((item) => (
@@ -479,10 +529,10 @@ function App() {
                 <td>{item.market_id}</td>
                 <td>{item.name}</td>
                 <td>{item.asset_class}</td>
-                <td>{item.fmp_symbol}</td>
+                <td>{item.eodhd_symbol}</td>
                 <td>{item.ig_name || "search required"}</td>
                 <td>{item.ig_epic || "manual"}</td>
-                <td>{normalizeInterval(item.default_timeframe)} · {item.spread_bps}/{item.slippage_bps} bps</td>
+                <td>{normalizeInterval(item.default_timeframe)} · est {round(item.estimated_spread_bps ?? item.spread_bps)} / {round(item.estimated_slippage_bps ?? item.slippage_bps)} bps</td>
                 <td>{item.enabled ? "Yes" : "No"}</td>
               </tr>
             ))}
@@ -522,7 +572,7 @@ function ResultsView({ runDetail, researchRuns, loadRun }) {
         <div className="table-scroll">
           <table>
             <thead>
-              <tr><th>Strategy</th><th>Style</th><th>Score</th><th>Sharpe</th><th>Net</th><th>Cost</th><th>Trades</th><th>Warnings</th></tr>
+              <tr><th>Strategy</th><th>Style</th><th>Score</th><th>Sharpe</th><th>Net</th><th>Cost</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
             </thead>
             <tbody>
               {trials.slice(0, 12).map((trial) => (
@@ -533,6 +583,7 @@ function ResultsView({ runDetail, researchRuns, loadRun }) {
                   <td>{round(trial.backtest?.sharpe)}</td>
                   <td>{formatMoney(trial.backtest?.net_profit)}</td>
                   <td>{formatMoney(trial.backtest?.total_cost)}</td>
+                  <td>{round(trial.backtest?.estimated_spread_bps)} / {round(trial.backtest?.estimated_slippage_bps)} bps</td>
                   <td>{trial.backtest?.trade_count ?? 0}</td>
                   <td>{humanWarnings(trial.warnings).join(", ") || "Clear"}</td>
                 </tr>
@@ -555,6 +606,7 @@ function ParetoCard({ item }) {
         <Metric label="Sharpe" value={round(item.sharpe)} />
         <Metric label="Net" value={formatMoney(item.net_profit)} />
         <Metric label="Cost" value={formatMoney(item.total_cost)} />
+        <Metric label="Est spread/slip" value={`${round(item.estimated_spread_bps)} / ${round(item.estimated_slippage_bps)} bps`} />
       </div>
       <small>{humanWarnings(item.warnings).join(" · ") || "Ready for research review"}</small>
     </div>
@@ -577,6 +629,7 @@ function CandidateView({ candidates, critique }) {
                 <Metric label="Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
                 <Metric label="Net" value={formatMoney(candidate.audit?.backtest?.net_profit)} />
                 <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
+                <Metric label="Spread/slip" value={`${round(candidate.audit?.backtest?.estimated_spread_bps)} / ${round(candidate.audit?.backtest?.estimated_slippage_bps)} bps`} />
                 <Metric label="Trades" value={candidate.audit?.backtest?.trade_count ?? 0} />
               </div>
             </div>
@@ -609,18 +662,18 @@ function CandidateView({ candidates, critique }) {
   );
 }
 
-function SettingsView({ fmpKey, setFmpKey, ig, setIg, submitFmp, submitIg, fmpStatus, igStatus }) {
+function SettingsView({ eodhdKey, setEodhdKey, ig, setIg, submitEodhd, submitIg, eodhdStatus, igStatus, cacheStatus, pruneCache }) {
   return (
     <div className="grid two">
       <Panel icon={<KeyRound />} title="Provider Settings">
-        <form onSubmit={submitFmp}>
+        <form onSubmit={submitEodhd}>
           <div className="label-row">
-            <label>FMP API key</label>
-            <SecretBadge status={fmpStatus} />
+            <label>EODHD API token</label>
+            <SecretBadge status={eodhdStatus} />
           </div>
           <div className="row">
-            <input value={fmpKey} onChange={(event) => setFmpKey(event.target.value)} type="password" required />
-            <button>{fmpStatus?.configured ? "Replace" : "Validate"}</button>
+            <input value={eodhdKey} onChange={(event) => setEodhdKey(event.target.value)} type="password" required />
+            <button>{eodhdStatus?.configured ? "Replace" : "Validate"}</button>
           </div>
         </form>
         <form onSubmit={submitIg}>
@@ -641,7 +694,7 @@ function SettingsView({ fmpKey, setFmpKey, ig, setIg, submitFmp, submitIg, fmpSt
       </Panel>
       <Panel icon={<Activity />} title="Connection Status">
         <div className="status-list">
-          {[fmpStatus, igStatus].filter(Boolean).map((item) => (
+          {[eodhdStatus, igStatus].filter(Boolean).map((item) => (
             <div className="status" key={item.provider}>
               <strong>{item.provider.toUpperCase()}</strong>
               <span>{item.configured ? "saved on server" : "not saved"} · {item.last_status}</span>
@@ -649,6 +702,24 @@ function SettingsView({ fmpKey, setFmpKey, ig, setIg, submitFmp, submitIg, fmpSt
             </div>
           ))}
         </div>
+      </Panel>
+      <Panel icon={<Database />} title="EODHD Cache">
+        <div className="metrics four">
+          <Metric label="Entries" value={cacheStatus?.stats?.entry_count ?? 0} />
+          <Metric label="Expired" value={cacheStatus?.stats?.expired_count ?? 0} />
+          <Metric label="Newest" value={shortDateTime(cacheStatus?.stats?.newest_created_at)} />
+          <Metric label="Recent TTL" value={`${round((cacheStatus?.policy?.live_history_ttl_seconds ?? 900) / 60)} min`} />
+        </div>
+        <div className="status-list">
+          {(cacheStatus?.namespaces ?? []).slice(0, 5).map((item) => (
+            <div className="status" key={item.namespace}>
+              <strong>{item.namespace}</strong>
+              <span>{item.entry_count} entries · {item.expired_count} expired</span>
+            </div>
+          ))}
+          {(cacheStatus?.namespaces ?? []).length === 0 && <span className="muted">No cached EODHD payloads yet.</span>}
+        </div>
+        <button type="button" className="ghost" onClick={pruneCache}>Prune expired</button>
       </Panel>
     </div>
   );
@@ -702,6 +773,32 @@ function providerStatus(statuses, provider) {
   return statuses.find((item) => item.provider === provider);
 }
 
+function runStateDetail(detail, plannedTrials) {
+  const savedTrials = detail?.trial_count ?? 0;
+  if (["created", "running"].includes(detail?.status)) {
+    return `Run ${detail.id}: ${savedTrials}/${plannedTrials} strategy trials saved.`;
+  }
+  if (detail?.status === "finished") {
+    return `Run ${detail.id}: ${savedTrials} trials, ${detail.passed_count ?? 0} passing, best score ${round(detail.best_score)}.`;
+  }
+  return `Run ${detail?.id ?? ""}: ${detail?.error || detail?.status || "unknown status"}`;
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function shortDateTime(value) {
+  if (!value) {
+    return "none";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function normalizeInterval(value) {
   if (value === "1h") {
     return "1hour";
@@ -710,12 +807,12 @@ function normalizeInterval(value) {
 }
 
 function costBadge(profile, market) {
-  const confidence = profile?.confidence ?? (market.plugin_id?.startsWith("fmp-") ? "fmp_proxy_ig_cost_envelope" : "ig_public_spread_baseline");
+  const confidence = profile?.confidence ?? "ig_public_spread_baseline";
   if (confidence === "ig_live_epic_cost_profile") {
     return { label: "IG live EPIC cost profile", className: "good" };
   }
-  if (confidence === "fmp_proxy_ig_cost_envelope") {
-    return { label: "FMP proxy with IG cost envelope", className: "warn" };
+  if (confidence === "eodhd_ig_cost_envelope") {
+    return { label: "EODHD bars with IG cost envelope", className: "warn" };
   }
   if (confidence === "ig_public_spread_baseline") {
     return { label: "IG public spread baseline", className: "base" };

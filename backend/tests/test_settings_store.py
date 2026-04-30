@@ -14,9 +14,9 @@ class ReverseCipher:
 def test_settings_store_encrypts_and_recovers_secret(tmp_path):
     store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
 
-    store.set_secret("fmp", "api_key", "secret-value")
+    store.set_secret("eodhd", "api_token", "secret-value")
 
-    assert store.get_secret("fmp", "api_key") == "secret-value"
+    assert store.get_secret("eodhd", "api_token") == "secret-value"
     assert b"secret-value" not in (tmp_path / "settings.sqlite3").read_bytes()
 
 
