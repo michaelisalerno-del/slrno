@@ -68,6 +68,7 @@ class EdgeCandidate:
     fold_consistency_score: float
     max_single_fold_profit_share: float
     cost_efficiency_score: float
+    promotion_tier: str
     keep: bool
     failed_gates: tuple[str, ...]
     warnings: tuple[str, ...]
@@ -268,6 +269,7 @@ def _candidate_from_evaluation(
         fold_consistency_score=round(fold_consistency, 6),
         max_single_fold_profit_share=round(profit_concentration, 6),
         cost_efficiency_score=round(max(0.0, 1.0 - cost_gross_ratio), 6),
+        promotion_tier=str(settings.get("promotion_tier") or evaluation.promotion_tier),
         keep=len(failed) == 0,
         failed_gates=tuple(failed),
         warnings=tuple(sorted(set(evaluation.warnings))),
@@ -499,13 +501,14 @@ def _markdown_report(output: EdgeDiscoveryOutput, config: EdgeRuntimeConfig, com
         "",
         "## Profit-first leaderboard",
         "",
-        "| Decision | Candidate | Family | Test net | Holdout Sharpe | WF Sharpe | Gross | Costs | Est spread/slip | Cost/gross | Trades | Max DD | Stress net | Fold score | Profit concentration | Failed gates |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Decision | Tier | Candidate | Family | Test net | Holdout Sharpe | WF Sharpe | Gross | Costs | Est spread/slip | Cost/gross | Trades | Max DD | Stress net | Fold score | Profit concentration | Failed gates |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for item in output.leaderboard[:30]:
         lines.append(
-            "| {decision} | {candidate} | {family} | {test:.2f} | {holdout_sharpe:.2f} | {wf_sharpe:.2f} | {gross:.2f} | {costs:.2f} | {spread:.2f}/{slippage:.2f} bps | {ratio:.3f} | {trades} | {dd:.2f} | {stress:.2f} | {fold:.3f} | {concentration:.3f} | {failed} |".format(
+            "| {decision} | {tier} | {candidate} | {family} | {test:.2f} | {holdout_sharpe:.2f} | {wf_sharpe:.2f} | {gross:.2f} | {costs:.2f} | {spread:.2f}/{slippage:.2f} bps | {ratio:.3f} | {trades} | {dd:.2f} | {stress:.2f} | {fold:.3f} | {concentration:.3f} | {failed} |".format(
                 decision="KEEP" if item.keep else "REJECT",
+                tier=item.promotion_tier,
                 candidate=item.candidate_id,
                 family=item.strategy_family,
                 test=item.test_net_profit,

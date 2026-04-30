@@ -60,6 +60,7 @@ class ResearchStore:
             self._add_column(conn, "strategy_trials", "folds_json", "TEXT NOT NULL DEFAULT '[]'")
             self._add_column(conn, "strategy_trials", "costs_json", "TEXT NOT NULL DEFAULT '{}'")
             self._add_column(conn, "strategy_trials", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._add_column(conn, "strategy_trials", "promotion_tier", "TEXT NOT NULL DEFAULT 'reject'")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS candidates (
@@ -75,6 +76,7 @@ class ResearchStore:
                 )
                 """
             )
+            self._add_column(conn, "candidates", "promotion_tier", "TEXT NOT NULL DEFAULT 'paper_candidate'")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ig_cost_profiles (
@@ -137,15 +139,21 @@ class ResearchStore:
             "total_cost": evaluation.backtest.total_cost,
             "stress_net_profit": parameters.get("stress_net_profit"),
             "stress_sharpe": parameters.get("stress_sharpe"),
+            "turnover_efficiency": evaluation.backtest.turnover_efficiency,
+            "daily_pnl_sharpe": evaluation.backtest.daily_pnl_sharpe,
+            "deflated_sharpe_probability": (parameters.get("sharpe_diagnostics") or {}).get("deflated_sharpe_probability")
+            if isinstance(parameters.get("sharpe_diagnostics"), dict)
+            else None,
         }
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO strategy_trials(
                   run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
-                  strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json
+                  strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json,
+                  promotion_tier
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -161,17 +169,19 @@ class ResearchStore:
                     json.dumps(folds, sort_keys=True),
                     json.dumps(costs, sort_keys=True),
                     json.dumps(list(evaluation.candidate.module_stack), sort_keys=True),
+                    _evaluation_tier(evaluation),
                 ),
             )
 
     def save_candidate(self, run_id: int, market_id: str, evaluation: CandidateEvaluation) -> None:
-        if not evaluation.passed:
+        promotion_tier = _evaluation_tier(evaluation)
+        if promotion_tier not in {"research_candidate", "paper_candidate", "validated_candidate"}:
             return
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO candidates(run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO candidates(run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at, promotion_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -181,6 +191,7 @@ class ResearchStore:
                     int(evaluation.research_only),
                     json.dumps(_evaluation_audit(evaluation), sort_keys=True),
                     _now(),
+                    promotion_tier,
                 ),
             )
 
@@ -273,7 +284,8 @@ class ResearchStore:
     def list_trials(self, run_id: int | None = None) -> list[dict[str, object]]:
         query = """
             SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
-                   strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json
+                   strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json,
+                   promotion_tier
             FROM strategy_trials
         """
         params: tuple[object, ...] = ()
@@ -299,6 +311,7 @@ class ResearchStore:
                 "folds": json.loads(row[11]),
                 "costs": json.loads(row[12]),
                 "tags": json.loads(row[13]),
+                "promotion_tier": row[14],
             }
             for row in rows
         ]
@@ -337,6 +350,11 @@ class ResearchStore:
                     "trade_count": backtest.get("trade_count", 0),
                     "warnings": trial["warnings"],
                     "settings": trial["parameters"],
+                    "promotion_tier": trial["promotion_tier"],
+                    "daily_pnl_sharpe": backtest.get("daily_pnl_sharpe", 0),
+                    "deflated_sharpe_probability": (trial["parameters"].get("sharpe_diagnostics") or {}).get("deflated_sharpe_probability")
+                    if isinstance(trial["parameters"].get("sharpe_diagnostics"), dict)
+                    else 0,
                 }
             )
         return output
@@ -350,7 +368,7 @@ class ResearchStore:
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at
+                SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at, promotion_tier
                 FROM candidates {where} ORDER BY robustness_score DESC, id DESC
                 """,
                 params,
@@ -365,6 +383,7 @@ class ResearchStore:
                 "research_only": bool(row[5]),
                 "audit": _compact_audit(json.loads(row[6])),
                 "created_at": row[7],
+                "promotion_tier": row[8],
             }
             for row in rows
         ]
@@ -373,7 +392,7 @@ class ResearchStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at
+                SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at, promotion_tier
                 FROM candidates WHERE id = ?
                 """,
                 (candidate_id,),
@@ -389,6 +408,7 @@ class ResearchStore:
             "research_only": bool(row[5]),
             "audit": _compact_audit(json.loads(row[6])),
             "created_at": row[7],
+            "promotion_tier": row[8],
         }
 
     def save_schedule(self, name: str, cadence: str, enabled: bool, config: dict[str, object]) -> int:
@@ -411,7 +431,14 @@ def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
         "fold_results": [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results],
         "warnings": list(evaluation.warnings),
         "research_only": evaluation.research_only,
+        "promotion_tier": _evaluation_tier(evaluation),
     }
+
+
+def _evaluation_tier(evaluation: CandidateEvaluation) -> str:
+    if evaluation.promotion_tier != "reject" or not evaluation.passed:
+        return evaluation.promotion_tier
+    return "paper_candidate"
 
 
 def _compact_audit(audit: dict[str, object]) -> dict[str, object]:
@@ -430,7 +457,7 @@ def _compact_candidate(candidate: dict[str, object]) -> dict[str, object]:
 
 
 def _compact_backtest(backtest: dict[str, object]) -> dict[str, object]:
-    for key in ("equity_curve", "drawdown_curve"):
+    for key in ("equity_curve", "drawdown_curve", "daily_pnl_curve"):
         values = list(backtest.get(key) or [])
         if len(values) > 120:
             backtest[key] = _sample_values(values, 120)

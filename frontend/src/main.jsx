@@ -598,15 +598,18 @@ function ResultsView({ runDetail, researchRuns, loadRun }) {
         <div className="table-scroll">
           <table>
             <thead>
-              <tr><th>Strategy</th><th>Style</th><th>Score</th><th>Sharpe</th><th>Net</th><th>Cost</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
+              <tr><th>Strategy</th><th>Tier</th><th>Style</th><th>Score</th><th>Sharpe</th><th>Daily Sharpe</th><th>DSR</th><th>Net</th><th>Cost</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
             </thead>
             <tbody>
               {trials.slice(0, 12).map((trial) => (
                 <tr key={trial.id}>
                   <td>{trial.strategy_name}</td>
+                  <td><span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span></td>
                   <td>{trial.strategy_family || trial.style}</td>
                   <td>{round(trial.robustness_score)}</td>
                   <td>{round(trial.backtest?.sharpe)}</td>
+                  <td>{round(trial.backtest?.daily_pnl_sharpe)}</td>
+                  <td>{percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)}</td>
                   <td>{formatMoney(trial.backtest?.net_profit)}</td>
                   <td>{formatMoney(trial.backtest?.total_cost)}</td>
                   <td>{round(trial.backtest?.estimated_spread_bps)} / {round(trial.backtest?.estimated_slippage_bps)} bps</td>
@@ -630,6 +633,8 @@ function ParetoCard({ item }) {
       <div className="mini-metrics">
         <Metric label="Score" value={round(item.robustness_score)} />
         <Metric label="Sharpe" value={round(item.sharpe)} />
+        <Metric label="Daily Sharpe" value={round(item.daily_pnl_sharpe)} />
+        <Metric label="DSR" value={percent(item.deflated_sharpe_probability)} />
         <Metric label="Net" value={formatMoney(item.net_profit)} />
         <Metric label="Cost" value={formatMoney(item.total_cost)} />
         <Metric label="Est spread/slip" value={`${round(item.estimated_spread_bps)} / ${round(item.estimated_slippage_bps)} bps`} />
@@ -647,12 +652,20 @@ function CandidateView({ candidates, critique }) {
         <div className="candidate-grid">
           {candidates.slice(0, 8).map((candidate) => (
             <div className="candidate-card" key={candidate.id}>
-              <span className="badge muted-badge">Research only</span>
+              <div className="label-row">
+                <span className="badge muted-badge">Research only</span>
+                <span className={`badge ${tierBadgeClass(candidate.promotion_tier || candidate.audit?.promotion_tier)}`}>
+                  {tierLabel(candidate.promotion_tier || candidate.audit?.promotion_tier)}
+                </span>
+              </div>
               <strong>{candidate.strategy_name}</strong>
               <span>{candidate.market_id} · score {round(candidate.robustness_score)}</span>
               <small>{humanWarnings(candidate.audit?.warnings).join(" · ") || "Passed current research gates"}</small>
               <div className="mini-metrics">
                 <Metric label="Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
+                <Metric label="Daily Sharpe" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
+                <Metric label="DSR" value={percent(candidate.audit?.candidate?.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
+                <Metric label="Stability" value={percent(candidate.audit?.candidate?.parameters?.parameter_stability_score)} />
                 <Metric label="Net" value={formatMoney(candidate.audit?.backtest?.net_profit)} />
                 <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
                 <Metric label="Spread/slip" value={`${round(candidate.audit?.backtest?.estimated_spread_bps)} / ${round(candidate.audit?.backtest?.estimated_slippage_bps)} bps`} />
@@ -878,6 +891,29 @@ function statusBadgeClass(status) {
   return "base";
 }
 
+function tierBadgeClass(tier) {
+  if (tier === "validated_candidate" || tier === "paper_candidate") {
+    return "good";
+  }
+  if (tier === "research_candidate") {
+    return "base";
+  }
+  if (tier === "watchlist") {
+    return "warn";
+  }
+  return "muted-badge";
+}
+
+function tierLabel(tier) {
+  return {
+    validated_candidate: "IG validated",
+    paper_candidate: "Paper candidate",
+    research_candidate: "Research",
+    watchlist: "Watchlist",
+    reject: "Reject",
+  }[tier] ?? "Research";
+}
+
 function humanWarnings(warnings = []) {
   const labels = {
     too_few_trades: "Too few trades",
@@ -888,6 +924,11 @@ function humanWarnings(warnings = []) {
     profits_not_consistent_across_folds: "Fragile folds",
     funding_eats_swing_edge: "Funding eats swing edge",
     needs_ig_price_validation: "Needs IG price validation",
+    high_sharpe_low_trade_count: "High Sharpe, low trades",
+    high_sharpe_weak_folds: "High Sharpe, weak folds",
+    isolated_parameter_peak: "Isolated parameter peak",
+    costs_small_vs_turnover: "Costs small vs turnover",
+    multiple_testing_haircut: "Multiple-testing haircut",
   };
   return (warnings ?? []).map((warning) => labels[warning] ?? warning);
 }
@@ -903,6 +944,13 @@ function labelForKind(kind) {
 function formatMoney(value) {
   const number = Number(value ?? 0);
   return `£${number.toFixed(0)}`;
+}
+
+function percent(value) {
+  if (value === undefined || value === null || Number.isNaN(Number(value))) {
+    return "0%";
+  }
+  return `${Math.round(Number(value) * 100)}%`;
 }
 
 function round(value) {

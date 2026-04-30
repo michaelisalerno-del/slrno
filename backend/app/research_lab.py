@@ -47,6 +47,7 @@ class CandidateEvaluation:
     passed: bool
     warnings: tuple[str, ...]
     research_only: bool = True
+    promotion_tier: str = "reject"
 
 
 @dataclass(frozen=True)
@@ -99,14 +100,16 @@ def evaluate_candidate(
         if fold.test_end - fold.test_start >= 2
     )
     warnings = candidate_warnings(metrics, backtest, folds, gate, backtest_config)
+    promotion_tier = candidate_promotion_tier(warnings, backtest, folds, gate, backtest_config)
     return CandidateEvaluation(
         candidate=candidate,
         metrics=metrics,
         backtest=backtest,
         fold_results=folds,
         robustness_score=robustness_score(metrics, backtest, folds),
-        passed=len(warnings) == 0,
+        passed=promotion_tier in {"paper_candidate", "validated_candidate"},
         warnings=tuple(warnings),
+        promotion_tier=promotion_tier,
     )
 
 
@@ -167,6 +170,28 @@ def candidate_warnings(
     else:
         warnings.append("no_walk_forward_folds")
     return warnings
+
+
+def candidate_promotion_tier(
+    warnings: list[str] | tuple[str, ...],
+    backtest: BacktestResult,
+    folds: tuple[BacktestResult, ...],
+    gate: CandidateGate,
+    backtest_config: BacktestConfig,
+) -> str:
+    if backtest.trade_count < max(3, gate.min_total_trades // 5):
+        return "reject"
+    if backtest.max_drawdown > backtest_config.starting_cash * min(0.75, gate.max_drawdown_fraction * 2):
+        return "reject"
+    if backtest.net_profit <= 0 and backtest.test_profit <= 0:
+        return "reject"
+    fold_rate = sum(1 for fold in folds if fold.net_profit > 0) / len(folds) if folds else 0.0
+    severe = {"negative_profit", "excess_drawdown", "no_walk_forward_folds"}
+    if not set(warnings).intersection(severe) and fold_rate >= gate.min_positive_fold_rate:
+        return "paper_candidate"
+    if backtest.net_profit > 0 and fold_rate >= max(0.35, gate.min_positive_fold_rate - 0.2):
+        return "research_candidate"
+    return "watchlist"
 
 
 def robustness_score(metrics: ClassificationMetrics, backtest: BacktestResult, folds: tuple[BacktestResult, ...]) -> float:
