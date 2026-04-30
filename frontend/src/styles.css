@@ -334,7 +334,8 @@ button.ghost {
 .pareto-card,
 .candidate-card,
 .status,
-.plugin {
+.plugin,
+.engine {
   display: grid;
   gap: 8px;
   padding: 12px;
@@ -344,19 +345,23 @@ button.ghost {
 }
 
 .cost-card > div:first-child,
-.plugin {
+.plugin,
+.engine {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
-.plugin div {
+.plugin div,
+.engine div {
   display: grid;
   gap: 3px;
+  min-width: 0;
 }
 
 .plugin span,
+.engine span,
 .status span,
 .candidate-card span,
 .pareto-card small {
@@ -365,6 +370,7 @@ button.ghost {
 }
 
 .plugin small,
+.engine small,
 .status small,
 .muted,
 .candidate-card small {
@@ -372,7 +378,8 @@ button.ghost {
 }
 
 .status-list,
-.plugin-list {
+.plugin-list,
+.engine-list {
   display: grid;
   gap: 10px;
 }

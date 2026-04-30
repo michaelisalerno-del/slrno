@@ -10,14 +10,14 @@ def test_market_registry_upserts_and_lists_enabled_markets(tmp_path):
             "GBPUSD",
             "GBP/USD",
             "forex",
-            "GBPUSD",
+            "GBPUSD.FOREX",
             "CS.D.GBPUSD.TODAY.IP",
             True,
             ig_name="GBP/USD",
             ig_search_terms="GBP/USD,GBPUSD",
         )
     )
-    registry.upsert(MarketMapping("DISABLED", "Disabled", "index", "^TEST", "", False))
+    registry.upsert(MarketMapping("DISABLED", "Disabled", "index", "TEST.INDX", "", False))
 
     enabled = registry.list(enabled_only=True)
 
@@ -33,5 +33,6 @@ def test_market_registry_seeds_priority_ig_markets(tmp_path):
 
     markets = {market.market_id: market for market in registry.list()}
     assert markets["NAS100"].ig_name == "US Tech 100"
+    assert markets["NAS100"].eodhd_symbol == "NDX.INDX"
     assert markets["US500"].ig_name == "US 500"
     assert markets["XAUUSD"].asset_class == "commodity"

@@ -4,18 +4,18 @@ from app.ig_costs import backtest_config_from_profile, profile_badge, profile_fr
 from app.market_registry import MarketMapping
 
 
-def test_public_cost_profile_marks_fmp_proxy_envelope():
-    market = MarketMapping("QQQ", "QQQ proxy", "etf", "QQQ", "", plugin_id="fmp-qqq-nasdaq-proxy")
+def test_public_cost_profile_uses_ig_public_baseline():
+    market = MarketMapping("NAS100", "Nasdaq 100", "index", "NDX.INDX", "", plugin_id="ig-us-tech-100")
 
     profile = public_ig_cost_profile(market)
 
-    assert profile.confidence == "fmp_proxy_ig_cost_envelope"
-    assert profile_badge(profile) == "FMP proxy with IG cost envelope"
+    assert profile.confidence == "ig_public_spread_baseline"
+    assert profile_badge(profile) == "IG public spread baseline"
     assert profile.overnight_admin_fee_annual == 0.03
 
 
 def test_ig_market_payload_sets_live_spread_and_rules():
-    market = MarketMapping("GBPUSD", "GBP/USD", "forex", "GBPUSD", "CS.D.GBPUSD.TODAY.IP", spread_bps=2.0, slippage_bps=0.8)
+    market = MarketMapping("GBPUSD", "GBP/USD", "forex", "GBPUSD.FOREX", "CS.D.GBPUSD.TODAY.IP", spread_bps=2.0, slippage_bps=0.8)
     payload = {
         "instrument": {
             "epic": "CS.D.GBPUSD.TODAY.IP",

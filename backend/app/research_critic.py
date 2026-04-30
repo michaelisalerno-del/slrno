@@ -120,12 +120,13 @@ class AuditTrailRule:
 
 class ProviderValidationRule:
     def evaluate(self, context: CriticContext) -> list[CriticFinding]:
-        if context.run.get("data_source") == "fmp":
+        data_source = str(context.run.get("data_source") or "")
+        if data_source.startswith("eodhd"):
             return [
                 CriticFinding(
                     "warning",
-                    "fmp_only_validation",
-                    "This is still FMP-first evidence. It must be re-tested on IG prices for the exact EPIC before it can leave the research watchlist.",
+                    "eodhd_only_validation",
+                    "This is still EODHD discovery evidence. It must be re-tested on IG bid/offer prices for the exact EPIC before it can leave the research watchlist.",
                     {"required_next_step": "ig_price_validation"},
                 )
             ]
@@ -305,7 +306,7 @@ def _decision(findings: list[CriticFinding], candidates: list[dict[str, object]]
         return "reject"
     if not candidates:
         return "reject"
-    if any(finding.code == "fmp_only_validation" for finding in findings):
+    if any(finding.code == "eodhd_only_validation" for finding in findings):
         return "watchlist_only"
     if any(finding.severity == "warning" for finding in findings):
         return "revise_before_validation"

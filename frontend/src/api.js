@@ -24,10 +24,10 @@ export function getStatus() {
   return request("/settings/status");
 }
 
-export function saveFmp(apiKey) {
-  return request("/settings/fmp", {
+export function saveEodhd(apiToken) {
+  return request("/settings/eodhd", {
     method: "POST",
-    body: JSON.stringify({ api_key: apiKey }),
+    body: JSON.stringify({ api_token: apiToken }),
   });
 }
 
@@ -52,6 +52,17 @@ export function getMarketPlugins() {
   return request("/market-plugins");
 }
 
+export function getMarketDataCacheStatus() {
+  return request("/market-data/cache");
+}
+
+export function pruneMarketDataCache() {
+  return request("/market-data/cache/prune", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 export function installMarketPlugin(pluginId) {
   return request(`/market-plugins/${pluginId}/install`, {
     method: "POST",
@@ -67,6 +78,10 @@ export function saveMarket(market) {
 
 export function getResearchEngines() {
   return request("/research/engines");
+}
+
+export function getIgSpreadBetEngines() {
+  return request("/ig/spread-bet/engines");
 }
 
 export function syncIgCosts(payload = {}) {

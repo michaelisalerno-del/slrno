@@ -1,4 +1,4 @@
-from .fmp import FMPProvider
+from .eodhd import EODHDProvider
 from .ig import IGDemoProvider, PaperBrokerProvider
 
-__all__ = ["FMPProvider", "IGDemoProvider", "PaperBrokerProvider"]
+__all__ = ["EODHDProvider", "IGDemoProvider", "PaperBrokerProvider"]

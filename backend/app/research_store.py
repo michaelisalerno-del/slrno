@@ -101,7 +101,7 @@ class ResearchStore:
         if name not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
-    def create_run(self, market_id: str, config: dict[str, object], data_source: str = "fmp", status: str = "created") -> int:
+    def create_run(self, market_id: str, config: dict[str, object], data_source: str = "eodhd", status: str = "created") -> int:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -122,6 +122,8 @@ class ResearchStore:
         folds = [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results]
         costs = {
             "cost_confidence": evaluation.backtest.cost_confidence,
+            "estimated_spread_bps": evaluation.backtest.estimated_spread_bps,
+            "estimated_slippage_bps": evaluation.backtest.estimated_slippage_bps,
             "gross_profit": evaluation.backtest.gross_profit,
             "spread_cost": evaluation.backtest.spread_cost,
             "slippage_cost": evaluation.backtest.slippage_cost,
@@ -325,6 +327,8 @@ class ResearchStore:
                     "net_profit": backtest.get("net_profit", 0),
                     "gross_profit": backtest.get("gross_profit", 0),
                     "total_cost": backtest.get("total_cost", 0),
+                    "estimated_spread_bps": backtest.get("estimated_spread_bps", 0),
+                    "estimated_slippage_bps": backtest.get("estimated_slippage_bps", 0),
                     "max_drawdown": backtest.get("max_drawdown", 0),
                     "trade_count": backtest.get("trade_count", 0),
                     "warnings": trial["warnings"],

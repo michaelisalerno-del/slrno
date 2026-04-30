@@ -48,6 +48,7 @@ class AdaptiveSearchConfig:
     search_budget: int | None = None
     risk_profile: str = "balanced"
     strategy_families: tuple[str, ...] = ()
+    cost_stress_multiplier: float = 2.0
     seed: int = 7
 
 
@@ -91,7 +92,11 @@ def run_adaptive_search(
         stress = run_vector_backtest(
             bars,
             signals,
-            replace(backtest_config, cost_stress_multiplier=2.0, cost_confidence=f"{cost_profile.confidence}_stress"),
+            replace(
+                backtest_config,
+                cost_stress_multiplier=max(1.0, config.cost_stress_multiplier),
+                cost_confidence=f"{cost_profile.confidence}_stress",
+            ),
         )
         probabilities = _signals_to_probabilities(signals)
         metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
@@ -106,6 +111,8 @@ def run_adaptive_search(
             "objective": config.objective,
             "cost_confidence": cost_profile.confidence,
             "cost_badge": profile_badge(cost_profile),
+            "estimated_spread_bps": cost_profile.spread_bps,
+            "estimated_slippage_bps": cost_profile.slippage_bps,
             "stress_net_profit": round(stress.net_profit, 4),
             "stress_sharpe": round(stress.sharpe, 4),
         }
@@ -178,6 +185,10 @@ def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index:
         "take_profit_bps": round(rng.choice((20, 35, 55, 80, 130, 180)) * risk_scale, 2),
         "max_hold_bars": rng.choice((8, 12, 24, 48, 96, 144)),
         "min_hold_bars": rng.choice((1, 2, 3, 5)),
+        "min_trade_spacing": rng.choice((0, 2, 4, 8, 12)),
+        "confidence_quantile": rng.choice((0.2, 0.25, 0.3, 0.4, 1.0)),
+        "regime_filter": rng.choice(("any", "trend", "volatile", "calm")),
+        "false_breakout_filter": rng.choice((0, 1)),
         "position_size": round(rng.choice((0.5, 1.0, 1.5, 2.0)) * risk_scale, 2),
         "direction": direction,
     }
@@ -189,29 +200,45 @@ def _generate_signals(bars: list[OHLCBar], family: str, parameters: dict[str, fl
     threshold = float(parameters["threshold_bps"]) / 10_000
     z_threshold = float(parameters["z_threshold"])
     raw: list[int] = []
+    confidences: list[float] = []
     for index, bar in enumerate(bars):
         signal = 0
+        confidence = 0.0
         if index >= lookback:
             if family in {"intraday_trend", "swing_trend"}:
                 move = (bar.close - closes[index - lookback]) / closes[index - lookback]
                 signal = 1 if move > threshold else -1 if move < -threshold else 0
+                confidence = abs(move) / max(threshold, 1e-12)
             elif family == "breakout":
                 window = bars[index - lookback : index]
                 high = max(item.high for item in window)
                 low = min(item.low for item in window)
-                signal = 1 if bar.close > high * (1 + threshold) else -1 if bar.close < low * (1 - threshold) else 0
+                long_break = bar.close > high * (1 + threshold)
+                short_break = bar.close < low * (1 - threshold)
+                if int(parameters.get("false_breakout_filter", 0)):
+                    long_break = long_break and bar.close >= bar.open
+                    short_break = short_break and bar.close <= bar.open
+                signal = 1 if long_break else -1 if short_break else 0
+                breakout_distance = max((bar.close - high) / max(high, 1e-12), (low - bar.close) / max(low, 1e-12), 0.0)
+                confidence = breakout_distance / max(threshold, 1e-12)
             elif family == "mean_reversion":
                 zscore = _zscore(closes[index - lookback : index], bar.close)
                 signal = 1 if zscore < -z_threshold else -1 if zscore > z_threshold else 0
+                confidence = abs(zscore) / max(z_threshold, 1e-12)
             elif family == "volatility_expansion":
                 average_range = sum((item.high - item.low) / max(item.close, 1e-12) for item in bars[index - lookback : index]) / lookback
                 current_range = (bar.high - bar.low) / max(bar.close, 1e-12)
                 if current_range > average_range * float(parameters["volatility_multiplier"]):
                     signal = 1 if bar.close >= bar.open else -1
+                confidence = current_range / max(average_range * float(parameters["volatility_multiplier"]), 1e-12)
             elif family == "scalping":
                 one_bar = (bar.close - bars[index - 1].close) / bars[index - 1].close
                 signal = -1 if one_bar > threshold else 1 if one_bar < -threshold else 0
+                confidence = abs(one_bar) / max(threshold, 1e-12)
+            signal = _apply_regime_filter(bars, index, signal, parameters)
         raw.append(_apply_direction(signal, str(parameters["direction"])))
+        confidences.append(confidence if signal else 0.0)
+    raw = _apply_confidence_gate(raw, confidences, float(parameters.get("confidence_quantile", 1.0)))
     return _apply_risk_controls(bars, raw, parameters)
 
 
@@ -219,6 +246,7 @@ def _apply_risk_controls(bars: list[OHLCBar], raw: list[int], parameters: dict[s
     position = 0
     entry = 0.0
     hold = 0
+    bars_since_trade = 10_000
     signals: list[int] = []
     for index, bar in enumerate(bars):
         desired = raw[index]
@@ -228,19 +256,53 @@ def _apply_risk_controls(bars: list[OHLCBar], raw: list[int], parameters: dict[s
                 position = 0
                 entry = 0.0
                 hold = 0
-        if desired != 0:
+                bars_since_trade = 0
+        if desired != 0 and bars_since_trade >= int(parameters.get("min_trade_spacing", 0)):
             if position == 0:
                 position = desired
                 entry = bar.close
                 hold = 0
+                bars_since_trade = 0
             elif desired != position and hold >= int(parameters["min_hold_bars"]):
                 position = desired
                 entry = bar.close
                 hold = 0
+                bars_since_trade = 0
         signals.append(position)
         if position != 0:
             hold += 1
+        bars_since_trade += 1
     return signals
+
+
+def _apply_confidence_gate(raw: list[int], confidences: list[float], top_quantile: float) -> list[int]:
+    if top_quantile >= 1:
+        return raw
+    active = sorted((confidence for signal, confidence in zip(raw, confidences) if signal and confidence > 0), reverse=True)
+    if not active:
+        return raw
+    take = max(1, int(round(len(active) * max(0.01, top_quantile))))
+    threshold = active[take - 1]
+    return [signal if confidence >= threshold else 0 for signal, confidence in zip(raw, confidences)]
+
+
+def _apply_regime_filter(bars: list[OHLCBar], index: int, signal: int, parameters: dict[str, float | int | str]) -> int:
+    regime = str(parameters.get("regime_filter", "any"))
+    lookback = int(parameters["lookback"])
+    if signal == 0 or regime == "any" or index < lookback:
+        return signal
+    window = bars[index - lookback : index]
+    average_range = sum((item.high - item.low) / max(item.close, 1e-12) for item in window) / lookback
+    current_range = (bars[index].high - bars[index].low) / max(bars[index].close, 1e-12)
+    move = abs((bars[index].close - bars[index - lookback].close) / max(bars[index - lookback].close, 1e-12))
+    threshold = float(parameters["threshold_bps"]) / 10_000
+    if regime == "trend" and move < threshold:
+        return 0
+    if regime == "volatile" and current_range < average_range:
+        return 0
+    if regime == "calm" and current_range > average_range * 1.5:
+        return 0
+    return signal
 
 
 def _fold_backtests(

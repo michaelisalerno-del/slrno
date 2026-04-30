@@ -8,7 +8,7 @@ from app.research_store import ResearchStore
 from app.research_strategies import ProbabilityCandidate
 
 
-def test_research_critic_keeps_fmp_candidates_on_watchlist_only(tmp_path):
+def test_research_critic_keeps_eodhd_candidates_on_watchlist_only(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")
     evaluation = _evaluation("accepted", passed=True)
@@ -22,7 +22,7 @@ def test_research_critic_keeps_fmp_candidates_on_watchlist_only(tmp_path):
     )
 
     assert report.decision == "watchlist_only"
-    assert any(finding.code == "fmp_only_validation" for finding in report.findings)
+    assert any(finding.code == "eodhd_only_validation" for finding in report.findings)
     assert all(finding.code != "no_trial_audit" for finding in report.findings)
 
 

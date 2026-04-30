@@ -7,6 +7,7 @@ def test_builtin_plugins_cover_initial_ig_markets():
     plugins = {plugin.market_id: plugin for plugin in list_market_plugins()}
 
     assert plugins["NAS100"].ig_name == "US Tech 100"
+    assert plugins["NAS100"].as_dict()["estimated_spread_bps"] > 0
     assert plugins["US500"].ig_name == "US 500"
     assert plugins["XAUUSD"].ig_name == "Spot Gold"
 
