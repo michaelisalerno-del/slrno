@@ -164,6 +164,36 @@ p {
   text-align: left;
 }
 
+.run-item {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.run-item .run-pill {
+  flex: 1 1 auto;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  padding: 0;
+  color: #27313d;
+  background: #ffffff;
+  border: 1px solid #d8e0e8;
+}
+
+.icon-button.danger {
+  color: #8a1f1f;
+}
+
+.icon-button.danger:hover:not(:disabled) {
+  background: #fff2f2;
+  border-color: #f0b8b8;
+}
+
 .market-chip span,
 .run-pill span {
   font-size: 12px;

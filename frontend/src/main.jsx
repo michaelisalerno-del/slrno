@@ -10,9 +10,11 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import {
   createResearchRun,
+  deleteResearchRun,
   getIgCostProfile,
   getIgSpreadBetEngines,
   getMarketDataCacheStatus,
@@ -297,6 +299,22 @@ function App() {
     await refresh().catch(() => undefined);
   }
 
+  async function deleteRun(run) {
+    if (["created", "running"].includes(run.status)) {
+      setMessage(`Run ${run.id} is still ${run.status}; stop waiting for it to finish before deleting it.`);
+      return;
+    }
+    if (!window.confirm(`Delete Run ${run.id} and its saved trials/candidates?`)) {
+      return;
+    }
+    const result = await deleteResearchRun(run.id);
+    if (runDetail?.id === run.id) {
+      setRunDetail(null);
+    }
+    setMessage(`Deleted Run ${run.id}: ${result.deleted_trials} trials and ${result.deleted_candidates} candidates removed.`);
+    await refresh();
+  }
+
   function toggleMarket(marketId) {
     setActiveMarketIds((current) => {
       if (current.includes(marketId)) {
@@ -447,7 +465,12 @@ function App() {
         )}
 
         {activeTab === "results" && (
-          <ResultsView runDetail={runDetail} researchRuns={researchRuns} loadRun={async (id) => setRunDetail(await getResearchRun(id))} />
+          <ResultsView
+            runDetail={runDetail}
+            researchRuns={researchRuns}
+            loadRun={async (id) => setRunDetail(await getResearchRun(id))}
+            deleteRun={deleteRun}
+          />
         )}
 
         {activeTab === "candidates" && <CandidateView candidates={candidates} critique={critique} />}
@@ -551,7 +574,7 @@ function App() {
   );
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
@@ -565,10 +588,21 @@ function ResultsView({ runDetail, researchRuns, loadRun }) {
         <h3>Recent Runs</h3>
         <div className="run-list">
           {researchRuns.slice(0, 6).map((run) => (
-            <button className="run-pill" type="button" key={run.id} onClick={() => loadRun(run.id)}>
-              <strong>Run {run.id}</strong>
-              <span>{run.market_id} · {run.trial_count} trials · best {round(run.best_score)}</span>
-            </button>
+            <div className="run-item" key={run.id}>
+              <button className="run-pill" type="button" onClick={() => loadRun(run.id)}>
+                <strong>Run {run.id}</strong>
+                <span>{run.market_id} · {run.trial_count} trials · best {round(run.best_score)}</span>
+              </button>
+              <button
+                className="icon-button danger"
+                type="button"
+                onClick={() => deleteRun(run)}
+                disabled={["created", "running"].includes(run.status)}
+                title={`Delete Run ${run.id}`}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
           ))}
           {researchRuns.length === 0 && <span className="muted">No runs yet.</span>}
         </div>

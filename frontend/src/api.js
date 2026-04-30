@@ -110,6 +110,12 @@ export function getResearchRun(runId) {
   return request(`/research/runs/${runId}`);
 }
 
+export function deleteResearchRun(runId) {
+  return request(`/research/runs/${runId}`, {
+    method: "DELETE",
+  });
+}
+
 export function getResearchTrials(runId) {
   return request(`/research/runs/${runId}/trials`);
 }
