@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import re
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -221,7 +222,7 @@ def get_ig_cost_profile(market_id: str) -> dict[str, object]:
 
 
 @app.post("/research/runs")
-async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
+async def create_research_run(payload: ResearchRunPayload, background_tasks: BackgroundTasks) -> dict[str, object]:
     engine_ids = {engine["id"] for engine in available_research_engines()}
     if payload.engine not in engine_ids:
         raise HTTPException(status_code=400, detail="Unknown research engine")
@@ -252,55 +253,58 @@ async def create_research_run(payload: ResearchRunPayload) -> dict[str, object]:
             "ig_validation_required": True,
         },
     )
-    evaluations = []
-    try:
-        provider = FMPProvider(api_key)
-        for market in selected_markets:
-            if not market.enabled:
-                raise ValueError(f"Market {market.market_id} is disabled")
-            interval = payload.interval or market.default_timeframe
-            bars = await provider.historical_bars(market.fmp_symbol, interval, payload.start, payload.end)
-            if len(bars) < market.min_backtest_bars:
-                raise ValueError(f"{market.market_id}: need at least {market.min_backtest_bars} bars; received {len(bars)}")
-            if payload.engine == "adaptive_ig_v1":
-                cost_profile = _cost_profile_for_market(market)
-                result = run_adaptive_search(
-                    bars,
-                    market.market_id,
-                    interval,
-                    cost_profile,
-                    AdaptiveSearchConfig(
-                        preset=payload.search_preset,
-                        trading_style=payload.trading_style,
-                        objective=payload.objective,
-                        search_budget=payload.search_budget,
-                        risk_profile=payload.risk_profile,
-                        strategy_families=tuple(payload.strategy_families),
-                    ),
-                )
-                market_evaluations = list(result.evaluations)
-            else:
-                cost_profile = _cost_profile_for_market(market)
-                market_evaluations = ResearchStack.default().evaluate(bars, backtest_config_from_profile(cost_profile))
-            for evaluation in market_evaluations:
-                evaluations.append(evaluation)
-                research_store.save_trial(run_id, evaluation)
-                research_store.save_candidate(run_id, market.market_id, evaluation)
-        research_store.update_run_status(run_id, "finished")
-    except Exception as exc:
-        research_store.update_run_status(run_id, "error")
-        raise HTTPException(status_code=400, detail=f"Research run failed: {_public_error(exc)}") from exc
-
-    passed = [evaluation for evaluation in evaluations if evaluation.passed]
+    background_tasks.add_task(_run_research_job, run_id, payload.model_dump(), api_key)
     return {
         "run_id": run_id,
-        "status": "finished",
+        "status": "running",
         "market_id": run_market_id,
-        "trial_count": len(evaluations),
-        "candidate_count": len(passed),
-        "best_score": max((evaluation.robustness_score for evaluation in evaluations), default=0),
-        "pareto": research_store.list_pareto(run_id),
+        "trial_count": 0,
+        "candidate_count": 0,
+        "best_score": 0,
+        "pareto": [],
     }
+
+
+def _run_research_job(run_id: int, payload_data: dict[str, object], api_key: str) -> None:
+    try:
+        asyncio.run(_execute_research_run(run_id, ResearchRunPayload(**payload_data), api_key))
+    except Exception as exc:
+        research_store.update_run_status(run_id, "error", _public_error(exc))
+
+
+async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_key: str) -> None:
+    selected_markets = _selected_markets(payload.market_ids or [payload.market_id])
+    provider = FMPProvider(api_key)
+    for market in selected_markets:
+        if not market.enabled:
+            raise ValueError(f"Market {market.market_id} is disabled")
+        interval = payload.interval or market.default_timeframe
+        bars = await provider.historical_bars(market.fmp_symbol, interval, payload.start, payload.end)
+        if len(bars) < market.min_backtest_bars:
+            raise ValueError(f"{market.market_id}: need at least {market.min_backtest_bars} bars; received {len(bars)}")
+        cost_profile = _cost_profile_for_market(market)
+        if payload.engine == "adaptive_ig_v1":
+            result = run_adaptive_search(
+                bars,
+                market.market_id,
+                interval,
+                cost_profile,
+                AdaptiveSearchConfig(
+                    preset=payload.search_preset,
+                    trading_style=payload.trading_style,
+                    objective=payload.objective,
+                    search_budget=payload.search_budget,
+                    risk_profile=payload.risk_profile,
+                    strategy_families=tuple(payload.strategy_families),
+                ),
+            )
+            market_evaluations = list(result.evaluations)
+        else:
+            market_evaluations = ResearchStack.default().evaluate(bars, backtest_config_from_profile(cost_profile))
+        for evaluation in market_evaluations:
+            research_store.save_trial(run_id, evaluation)
+            research_store.save_candidate(run_id, market.market_id, evaluation)
+    research_store.update_run_status(run_id, "finished")
 
 
 @app.get("/research/runs")

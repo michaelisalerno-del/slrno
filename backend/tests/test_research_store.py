@@ -22,11 +22,23 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     [run] = store.list_runs()
     trials = store.list_trials(run_id)
     [candidate] = store.list_candidates()
+    run_detail = store.get_run(run_id)
     assert run["trial_count"] == 2
     assert run["passed_count"] == 1
+    assert run["status"] == "finished"
+    assert run["error"] == ""
+    assert run_detail is not None
+    assert run_detail["error"] == ""
     assert [trial["strategy_name"] for trial in trials] == ["rejected", "accepted"]
     assert candidate["strategy_name"] == "accepted"
     assert candidate["research_only"] is True
+    assert "probabilities" not in candidate["audit"]["candidate"]
+    assert candidate["audit"]["candidate"]["probability_count"] == 2
+
+    store.update_run_status(run_id, "error", "fixture failure")
+    error_run = store.get_run(run_id)
+    assert error_run is not None
+    assert error_run["error"] == "fixture failure"
 
 
 def _evaluation(name: str, passed: bool) -> CandidateEvaluation:
