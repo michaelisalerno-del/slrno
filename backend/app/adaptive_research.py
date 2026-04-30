@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import date
 from math import erf, log, sqrt
 from random import Random
 
@@ -20,12 +21,25 @@ SEARCH_PRESETS = {
 }
 
 STYLE_FAMILIES = {
-    "find_anything_robust": ("intraday_trend", "swing_trend", "breakout", "mean_reversion", "volatility_expansion", "intraday_trend", "swing_trend"),
+    "find_anything_robust": (
+        "intraday_trend",
+        "swing_trend",
+        "calendar_turnaround_tuesday",
+        "breakout",
+        "month_end_seasonality",
+        "mean_reversion",
+        "volatility_expansion",
+        "intraday_trend",
+        "swing_trend",
+    ),
     "intraday_only": ("intraday_trend", "breakout", "mean_reversion", "volatility_expansion", "intraday_trend", "scalping"),
     "swing_trades": ("swing_trend", "breakout", "mean_reversion"),
     "lower_drawdown": ("mean_reversion", "intraday_trend", "volatility_expansion"),
     "higher_profit": ("breakout", "swing_trend", "intraday_trend"),
+    "research_ideas": ("calendar_turnaround_tuesday", "month_end_seasonality", "calendar_turnaround_tuesday", "month_end_seasonality"),
 }
+
+CALENDAR_FAMILIES = {"calendar_turnaround_tuesday", "month_end_seasonality"}
 
 ENGINE_DEFINITIONS = [
     {
@@ -179,10 +193,12 @@ def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index:
         "mean_reversion": (10, 16, 24, 36),
         "volatility_expansion": (12, 18, 30, 42),
         "swing_trend": (48, 72, 96, 144),
+        "calendar_turnaround_tuesday": (1,),
+        "month_end_seasonality": (1,),
     }.get(family, (12, 24, 36))
-    direction = ("long_only", "short_only", "long_short")[trial_index % 3]
+    direction = "long_only" if family in CALENDAR_FAMILIES else ("long_only", "short_only", "long_short")[trial_index % 3]
     risk_scale = {"conservative": 0.7, "balanced": 1.0, "aggressive": 1.35}.get(risk_profile, 1.0)
-    return {
+    parameters: dict[str, float | int | str] = {
         "lookback": rng.choice(lookbacks),
         "threshold_bps": round(rng.choice(_threshold_choices(family)) * risk_scale, 2),
         "z_threshold": round(rng.uniform(0.65, 2.2), 3),
@@ -190,21 +206,51 @@ def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index:
         "stop_loss_bps": round(rng.choice((18, 25, 35, 50, 75, 110)) * risk_scale, 2),
         "take_profit_bps": round(rng.choice((20, 35, 55, 80, 130, 180)) * risk_scale, 2),
         "max_hold_bars": rng.choice(_max_hold_choices(family)),
-        "min_hold_bars": rng.choice((2, 3, 5, 8)),
+        "min_hold_bars": rng.choice((3, 5, 8, 12) if family in CALENDAR_FAMILIES else (2, 3, 5, 8)),
         "min_trade_spacing": rng.choice(_spacing_choices(family)),
-        "confidence_quantile": rng.choice((0.1, 0.15, 0.2, 0.25, 0.3, 0.4)),
+        "confidence_quantile": 1.0 if family in CALENDAR_FAMILIES else rng.choice((0.1, 0.15, 0.2, 0.25, 0.3, 0.4)),
         "regime_filter": rng.choice(("any", "trend", "volatile", "calm")),
         "false_breakout_filter": rng.choice((0, 1)),
         "position_size": round(rng.choice((0.5, 1.0, 1.5, 2.0)) * risk_scale, 2),
         "direction": direction,
     }
+    if family == "calendar_turnaround_tuesday":
+        parameters.update(
+            {
+                "lookback": 1,
+                "weekday": 1,
+                "previous_day_filter": rng.choice(("monday_down", "any_down")),
+                "confidence_quantile": 1.0,
+                "regime_filter": "any",
+                "false_breakout_filter": 0,
+                "research_recipe": "turnaround_tuesday_after_down_previous_session",
+                "known_edge_reference": "public-paper-style calendar anomaly; validate across markets before paper use",
+            }
+        )
+    elif family == "month_end_seasonality":
+        parameters.update(
+            {
+                "lookback": 1,
+                "month_end_window": rng.choice((1, 2, 3, 4, 5)),
+                "month_start_window": rng.choice((0, 1, 2)),
+                "confidence_quantile": 1.0,
+                "regime_filter": "any",
+                "false_breakout_filter": 0,
+                "research_recipe": "turn_of_month_long_bias",
+                "known_edge_reference": "end-of-month seasonality idea; validate across assets and history depth",
+            }
+        )
+    return parameters
 
 
 def _generate_signals(bars: list[OHLCBar], family: str, parameters: dict[str, float | int | str]) -> list[int]:
     closes = [bar.close for bar in bars]
     lookback = int(parameters["lookback"])
     threshold = float(parameters["threshold_bps"]) / 10_000
+    threshold_bps = float(parameters["threshold_bps"])
     z_threshold = float(parameters["z_threshold"])
+    previous_day_returns, previous_trading_dates = _previous_day_context(bars) if family == "calendar_turnaround_tuesday" else ({}, {})
+    month_positions = _month_position_by_date(bars) if family == "month_end_seasonality" else {}
     raw: list[int] = []
     confidences: list[float] = []
     for index, bar in enumerate(bars):
@@ -241,11 +287,62 @@ def _generate_signals(bars: list[OHLCBar], family: str, parameters: dict[str, fl
                 one_bar = (bar.close - bars[index - 1].close) / bars[index - 1].close
                 signal = -1 if one_bar > threshold else 1 if one_bar < -threshold else 0
                 confidence = abs(one_bar) / max(threshold, 1e-12)
+            elif family == "calendar_turnaround_tuesday":
+                current_date = bar.timestamp.date()
+                previous_return_bps = previous_day_returns.get(current_date)
+                previous_trading_date = previous_trading_dates.get(current_date)
+                previous_filter = str(parameters.get("previous_day_filter", "monday_down"))
+                weekday_match = bar.timestamp.weekday() == int(parameters.get("weekday", 1))
+                previous_day_match = previous_filter != "monday_down" or (previous_trading_date is not None and previous_trading_date.weekday() == 0)
+                if previous_return_bps is not None and weekday_match and previous_day_match and previous_return_bps <= -threshold_bps:
+                    signal = 1
+                    confidence = min(8.0, abs(previous_return_bps) / max(threshold_bps, 1e-12))
+            elif family == "month_end_seasonality":
+                month_position = month_positions.get(bar.timestamp.date())
+                if month_position is not None:
+                    days_from_month_start, days_to_month_end = month_position
+                    end_window = int(parameters.get("month_end_window", 3))
+                    start_window = int(parameters.get("month_start_window", 0))
+                    if days_to_month_end < end_window or days_from_month_start < start_window:
+                        signal = 1
+                        confidence = 1.0 + max(0.0, (end_window - days_to_month_end) / max(1, end_window))
             signal = _apply_regime_filter(bars, index, signal, parameters)
         raw.append(_apply_direction(signal, str(parameters["direction"])))
         confidences.append(confidence if signal else 0.0)
     raw = _apply_confidence_gate(raw, confidences, float(parameters.get("confidence_quantile", 1.0)))
     return _apply_risk_controls(bars, raw, parameters)
+
+
+def _previous_day_context(bars: list[OHLCBar]) -> tuple[dict[date, float], dict[date, date]]:
+    closes_by_date: dict[date, float] = {}
+    for bar in bars:
+        closes_by_date[bar.timestamp.date()] = bar.close
+    ordered_dates = sorted(closes_by_date)
+    previous_dates: dict[date, date] = {}
+    previous_returns: dict[date, float] = {}
+    for index in range(1, len(ordered_dates)):
+        current = ordered_dates[index]
+        previous = ordered_dates[index - 1]
+        previous_dates[current] = previous
+        if index < 2:
+            continue
+        prior = ordered_dates[index - 2]
+        prior_close = closes_by_date[prior]
+        if prior_close > 0:
+            previous_returns[current] = (closes_by_date[previous] - prior_close) / prior_close * 10_000
+    return previous_returns, previous_dates
+
+
+def _month_position_by_date(bars: list[OHLCBar]) -> dict[date, tuple[int, int]]:
+    month_dates: dict[tuple[int, int], list[date]] = {}
+    for current_date in sorted({bar.timestamp.date() for bar in bars}):
+        month_dates.setdefault((current_date.year, current_date.month), []).append(current_date)
+    positions: dict[date, tuple[int, int]] = {}
+    for dates in month_dates.values():
+        final_index = len(dates) - 1
+        for index, current_date in enumerate(dates):
+            positions[current_date] = (index, final_index - index)
+    return positions
 
 
 def _apply_risk_controls(bars: list[OHLCBar], raw: list[int], parameters: dict[str, float | int | str]) -> list[int]:
@@ -360,6 +457,10 @@ def _warnings(
         warnings.append("profits_not_consistent_across_folds")
     if family == "swing_trend" and backtest.funding_cost > max(1.0, backtest.gross_profit * 0.35):
         warnings.append("funding_eats_swing_edge")
+    if family in CALENDAR_FAMILIES and backtest.trade_count < 30:
+        warnings.append("calendar_effect_needs_longer_history")
+    if family in CALENDAR_FAMILIES and _positive_fold_rate(folds) < 0.65:
+        warnings.append("known_edge_needs_cross_market_validation")
     if cost_profile.confidence != "ig_live_epic_cost_profile":
         warnings.append("needs_ig_price_validation")
     return warnings
@@ -562,6 +663,9 @@ def _parameter_distance(left: dict[str, object], right: dict[str, object]) -> fl
         "min_trade_spacing",
         "confidence_quantile",
         "position_size",
+        "weekday",
+        "month_end_window",
+        "month_start_window",
     )
     distances: list[float] = []
     for key in numeric_keys:
