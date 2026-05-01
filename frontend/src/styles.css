@@ -137,6 +137,12 @@ p {
   font-size: 13px;
 }
 
+.compact-actions button {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
 .tab,
 .segment,
 .market-chip,
@@ -168,6 +174,28 @@ p {
   display: flex;
   align-items: stretch;
   gap: 6px;
+}
+
+.run-manager {
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.run-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  min-height: 40px;
+  border: 1px solid #d8e0e8;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.run-select input {
+  width: auto;
+  min-height: auto;
 }
 
 .run-item .run-pill {
@@ -379,6 +407,7 @@ button.ghost {
 .cost-card,
 .pareto-card,
 .candidate-card,
+.trial-card,
 .status,
 .plugin,
 .engine {
@@ -404,6 +433,67 @@ button.ghost {
   display: grid;
   gap: 3px;
   min-width: 0;
+}
+
+.trial-list {
+  display: grid;
+  gap: 10px;
+}
+
+.trial-card {
+  gap: 10px;
+}
+
+.trial-summary,
+.trial-metrics,
+.warning-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.trial-summary {
+  justify-content: space-between;
+}
+
+.trial-summary > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: min(560px, 100%);
+}
+
+.trial-summary span,
+.trial-net small {
+  color: #6b7480;
+  font-size: 13px;
+}
+
+.trial-net {
+  min-width: 110px;
+  text-align: right;
+}
+
+.trial-net strong {
+  font-size: 20px;
+}
+
+.trial-metrics .metric {
+  min-width: 112px;
+  flex: 1 1 112px;
+}
+
+.warning-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 3px 9px;
+  color: #5d4100;
+  background: #fff8e8;
+  border: 1px solid #f0d28a;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .plugin span,

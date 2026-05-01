@@ -492,10 +492,11 @@ class ResearchStore:
 
 
 def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
+    backtest = _normalized_backtest_payload(asdict(evaluation.backtest), evaluation.candidate.parameters)
     return {
         "candidate": _compact_candidate(asdict(evaluation.candidate)),
         "metrics": asdict(evaluation.metrics),
-        "backtest": _compact_backtest(asdict(evaluation.backtest)),
+        "backtest": _compact_backtest(backtest),
         "fold_results": [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results],
         "warnings": list(evaluation.warnings),
         "research_only": evaluation.research_only,
@@ -514,18 +515,20 @@ def _is_material_watchlist_lead(evaluation: CandidateEvaluation) -> bool:
     return (
         evaluation.robustness_score >= 25
         and backtest.trade_count >= 5
+        and backtest.sharpe_observations > 0
         and (backtest.net_profit > 0 or backtest.test_profit > 0 or backtest.daily_pnl_sharpe >= 1.0)
     )
 
 
 def _trial_should_surface_as_research_lead(trial: dict[str, object]) -> bool:
     tier = str(trial.get("promotion_tier") or "reject")
-    if tier in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate"}:
-        return True
     backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    if tier in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate"}:
+        return int(backtest.get("sharpe_observations") or 0) > 0 or float(backtest.get("daily_pnl_sharpe") or 0.0) != 0.0
     return (
         float(trial.get("robustness_score") or 0.0) >= 25
         and float(backtest.get("net_profit") or 0.0) > 0
+        and int(backtest.get("sharpe_observations") or 0) > 0
         and (float(backtest.get("test_profit") or 0.0) > 0 or float(backtest.get("daily_pnl_sharpe") or 0.0) >= 1.0)
         and int(backtest.get("trade_count") or 0) >= 5
     )
@@ -539,7 +542,17 @@ def _normalized_warnings(warnings: object, backtest: dict[str, object]) -> list[
     output = list(warnings or [])
     if "weak_sharpe" in output and _risk_adjusted_sharpe_from_payload(backtest) >= 0.55:
         output = [warning for warning in output if warning != "weak_sharpe"]
-    return output
+    if int(backtest.get("sharpe_observations") or 0) <= 0 and (
+        float(backtest.get("sharpe") or 0.0) != 0.0 or float(backtest.get("net_profit") or 0.0) != 0.0
+    ):
+        output.append("legacy_sharpe_diagnostics")
+    if (
+        float(backtest.get("estimated_spread_bps") or 0.0) <= 0.0
+        and float(backtest.get("estimated_slippage_bps") or 0.0) <= 0.0
+        and float(backtest.get("total_cost") or 0.0) > 0.0
+    ):
+        output.append("missing_cost_profile")
+    return list(dict.fromkeys(output))
 
 
 def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
@@ -579,7 +592,9 @@ def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
 
 
 def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
-    backtest = json.loads(row[10])
+    parameters = json.loads(row[9])
+    costs = json.loads(row[12])
+    backtest = _normalized_backtest_payload(json.loads(row[10]), parameters, costs)
     return {
         "id": row[0],
         "run_id": row[1],
@@ -590,10 +605,10 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
         "warnings": _normalized_warnings(json.loads(row[6]), backtest),
         "strategy_family": row[7],
         "style": row[8],
-        "parameters": json.loads(row[9]),
+        "parameters": parameters,
         "backtest": backtest,
         "folds": json.loads(row[11]),
-        "costs": json.loads(row[12]),
+        "costs": costs,
         "tags": json.loads(row[13]),
         "promotion_tier": row[14],
     }
@@ -601,12 +616,67 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
 
 def _compact_audit(audit: dict[str, object]) -> dict[str, object]:
     candidate = audit.get("candidate")
+    parameters: dict[str, object] = {}
     if isinstance(candidate, dict):
+        maybe_parameters = candidate.get("parameters")
+        if isinstance(maybe_parameters, dict):
+            parameters = maybe_parameters
         audit["candidate"] = _compact_candidate(candidate)
     backtest = audit.get("backtest")
     if isinstance(backtest, dict):
+        backtest = _normalized_backtest_payload(backtest, parameters)
+        audit["backtest"] = backtest
         audit["warnings"] = _normalized_warnings(audit.get("warnings") or [], backtest)
     return audit
+
+
+def _normalized_backtest_payload(
+    backtest: dict[str, object],
+    parameters: dict[str, object] | None = None,
+    costs: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload = dict(backtest)
+    parameters = parameters or {}
+    costs = costs or {}
+
+    def number(key: str) -> float:
+        try:
+            return float(payload.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    for key in ("estimated_spread_bps", "estimated_slippage_bps"):
+        if number(key) <= 0.0:
+            fallback = _first_positive_number(parameters.get(key), costs.get(key))
+            if fallback > 0.0:
+                payload[key] = fallback
+
+    net_profit = number("net_profit")
+    gross_profit = number("gross_profit")
+    total_cost = number("total_cost")
+    trade_count = int(number("trade_count"))
+    if trade_count > 0 and number("expectancy_per_trade") == 0.0 and net_profit != 0.0:
+        payload["expectancy_per_trade"] = net_profit / trade_count
+    if total_cost > 0.0 and number("net_cost_ratio") == 0.0 and net_profit != 0.0:
+        payload["net_cost_ratio"] = net_profit / total_cost
+    if total_cost > 0.0 and number("cost_to_gross_ratio") == 0.0 and gross_profit != 0.0:
+        payload["cost_to_gross_ratio"] = total_cost / abs(gross_profit)
+    if int(number("sharpe_observations")) <= 0:
+        daily_pnl_curve = payload.get("daily_pnl_curve")
+        if isinstance(daily_pnl_curve, list) and daily_pnl_curve:
+            payload["sharpe_observations"] = len(daily_pnl_curve)
+    return payload
+
+
+def _first_positive_number(*values: object) -> float:
+    for value in values:
+        try:
+            number = float(value or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if number > 0.0:
+            return number
+    return 0.0
 
 
 def _compact_candidate(candidate: dict[str, object]) -> dict[str, object]:
