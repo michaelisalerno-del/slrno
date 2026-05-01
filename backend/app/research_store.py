@@ -313,26 +313,7 @@ class ResearchStore:
         query += " ORDER BY robustness_score DESC, id"
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [
-            {
-                "id": row[0],
-                "run_id": row[1],
-                "strategy_name": row[2],
-                "passed": bool(row[3]),
-                "robustness_score": row[4],
-                "metrics": json.loads(row[5]),
-                "warnings": json.loads(row[6]),
-                "strategy_family": row[7],
-                "style": row[8],
-                "parameters": json.loads(row[9]),
-                "backtest": json.loads(row[10]),
-                "folds": json.loads(row[11]),
-                "costs": json.loads(row[12]),
-                "tags": json.loads(row[13]),
-                "promotion_tier": row[14],
-            }
-            for row in rows
-        ]
+        return [_trial_from_row(row) for row in rows]
 
     def list_pareto(self, run_id: int) -> list[dict[str, object]]:
         trials = self.list_trials(run_id)
@@ -549,11 +530,18 @@ def _risk_adjusted_sharpe_from_payload(backtest: dict[str, object]) -> float:
     return float(backtest.get("daily_pnl_sharpe") or backtest.get("sharpe") or 0.0)
 
 
+def _normalized_warnings(warnings: object, backtest: dict[str, object]) -> list[str]:
+    output = list(warnings or [])
+    if "weak_sharpe" in output and _risk_adjusted_sharpe_from_payload(backtest) >= 0.55:
+        output = [warning for warning in output if warning != "weak_sharpe"]
+    return output
+
+
 def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
     tier = str(trial.get("promotion_tier") or "reject")
     if tier == "reject":
         tier = "watchlist"
-    warnings = list(trial.get("warnings") or [])
+    warnings = _normalized_warnings(trial.get("warnings") or [], trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {})
     if str(trial.get("promotion_tier") or "reject") == "reject" and "not_paper_ready_research_lead" not in warnings:
         warnings.insert(0, "not_paper_ready_research_lead")
     audit = {
@@ -586,6 +574,7 @@ def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
 
 
 def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
+    backtest = json.loads(row[10])
     return {
         "id": row[0],
         "run_id": row[1],
@@ -593,11 +582,11 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
         "passed": bool(row[3]),
         "robustness_score": row[4],
         "metrics": json.loads(row[5]),
-        "warnings": json.loads(row[6]),
+        "warnings": _normalized_warnings(json.loads(row[6]), backtest),
         "strategy_family": row[7],
         "style": row[8],
         "parameters": json.loads(row[9]),
-        "backtest": json.loads(row[10]),
+        "backtest": backtest,
         "folds": json.loads(row[11]),
         "costs": json.loads(row[12]),
         "tags": json.loads(row[13]),
@@ -609,6 +598,9 @@ def _compact_audit(audit: dict[str, object]) -> dict[str, object]:
     candidate = audit.get("candidate")
     if isinstance(candidate, dict):
         audit["candidate"] = _compact_candidate(candidate)
+    backtest = audit.get("backtest")
+    if isinstance(backtest, dict):
+        audit["warnings"] = _normalized_warnings(audit.get("warnings") or [], backtest)
     return audit
 
 
