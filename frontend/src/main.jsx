@@ -30,6 +30,7 @@ import {
   getMarketPlugins,
   getMarkets,
   getPaperSummary,
+  getResearchCritique,
   getResearchSummary,
   getResearchRun,
   getRiskSummary,
@@ -173,6 +174,7 @@ function App() {
         const summary = await getResearchSummary();
         setCandidates(summary.candidates ?? []);
         setCritique(summary.critique ?? null);
+        getResearchCritique().then(setCritique).catch(() => undefined);
       } else if (moduleId === "backtests") {
         const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary] = await Promise.all([
           getStatus(),
