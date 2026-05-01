@@ -136,12 +136,12 @@ def cockpit_summary() -> dict[str, object]:
 
 
 @app.get("/research/summary")
-def research_summary(limit: int = Query(default=24, ge=1, le=80)) -> dict[str, object]:
+def research_summary(limit: int = Query(default=24, ge=1, le=80), include_critique: bool = False) -> dict[str, object]:
     candidates = [_candidate_summary_payload(_candidate_with_capital(candidate)) for candidate in research_store.list_candidates(limit=limit)]
     return {
         "queue": _candidate_queue_summary(candidates),
         "candidates": candidates,
-        "critique": critique_latest_research(),
+        "critique": critique_latest_research() if include_critique else None,
     }
 
 
