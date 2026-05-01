@@ -4,6 +4,7 @@ import {
   Activity,
   Archive,
   BarChart3,
+  BookOpen,
   Database,
   Download,
   Home,
@@ -92,6 +93,7 @@ const OBJECTIVES = [
 
 const MODULES = [
   ["cockpit", "Cockpit", Home],
+  ["guide", "Guide", BookOpen],
   ["research", "Research", Sparkles],
   ["backtests", "Backtests", BarChart3],
   ["paper", "Paper Trading", LineChart],
@@ -579,6 +581,8 @@ function App() {
 
       {activeModule === "cockpit" && <CockpitView summary={cockpit} setActiveModule={setActiveModule} />}
 
+      {activeModule === "guide" && <GuideView setActiveModule={setActiveModule} />}
+
       {activeModule === "research" && (
         <section className="lab-shell">
           <div className="lab-header">
@@ -904,6 +908,180 @@ function CockpitView({ summary, setActiveModule }) {
           ) : <span className="muted">No research runs yet.</span>}
         </Panel>
       </div>
+    </section>
+  );
+}
+
+function GuideView({ setActiveModule }) {
+  const workflow = [
+    ["1", "Set up providers", "Save EODHD for historical bars, then add IG demo details when you want broker-style cost and rule checks."],
+    ["2", "Check markets", "Confirm each market has the right EODHD symbol, IG name or EPIC, default timeframe, spread, slippage, and minimum bars."],
+    ["3", "Run a normal backtest", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
+    ["4", "Read the evidence", "Look at net profit after costs, out-of-sample profit, drawdown, trade count, cost drag, capital fit, and warnings."],
+    ["5", "Retest regimes", "If a lead still looks interesting, rerun with Thorough regime scan to check whether the edge survives regime splits."],
+    ["6", "Export the bundle", "Download the evidence ZIP so the bars, configs, costs, warnings, and regime files can be reviewed later."],
+    ["7", "Paper only", "Only candidates that pass freshness, cost, capital, out-of-sample, and regime gates should move toward paper review."],
+  ];
+  const glossary = [
+    ["Run", "One backtesting job over a market, timeframe, date range, engine, and search setup."],
+    ["Trial", "One strategy variant tested inside a run."],
+    ["Candidate", "A trial interesting enough to keep for further review."],
+    ["Paper candidate", "A candidate that passed the gates and is ready for demo or paper tracking."],
+    ["Regime", "A market condition such as trend up, trend down, range/chop, low volatility, high volatility, shock, or rebound."],
+    ["Evidence bundle", "A downloadable ZIP containing run data, trials, candidates, costs, warnings, bars, and regime diagnostics."],
+  ];
+  const cardMetrics = [
+    ["Net", "Total profit after costs. This matters more than gross profit."],
+    ["Daily Sharpe", "Annualized daily risk-adjusted return. Useful, but not enough on its own."],
+    ["Days", "Number of daily Sharpe observations. Short samples are fragile."],
+    ["DSR", "Deflated Sharpe probability, adjusted for multiple testing."],
+    ["Drawdown", "Worst equity drop during the backtest."],
+    ["Costs", "Estimated spread, slippage, funding, FX, and related trading costs."],
+    ["Expectancy", "Average net profit per trade."],
+    ["Net/cost", "How much net profit the strategy keeps per pound of cost."],
+    ["Cost/gross", "How much gross edge is eaten by trading friction."],
+    ["Gated net", "Profit after forcing the strategy to trade only in allowed regimes."],
+    ["Gated OOS", "Out-of-sample profit after the regime gate is applied."],
+  ];
+  const gates = [
+    "Fresh Sharpe days, normally at least 120 daily observations for promotion.",
+    "Realistic spread and slippage are present.",
+    "Costs are realistic and do not overwhelm the edge.",
+    "Net profit and out-of-sample profit are positive after costs.",
+    "Drawdown fits the account size and risk envelope.",
+    "The £500 scenario is feasible before thinking about a small live account.",
+    "Regime-gated retest is positive and not just a headline Sharpe artifact.",
+    "IG price validation is complete before anything gets close to live preparation.",
+  ];
+  const warnings = [
+    ["Single-month profit", "Most profit came from one month. Treat as fragile until retested."],
+    ["Single-regime profit", "One market condition produced most of the edge."],
+    ["Shock-regime dependency", "The result may depend on a rare selloff or rebound."],
+    ["Gated backtest negative", "The strategy did not survive when forced to trade only in allowed regimes."],
+    ["Gated OOS negative", "The regime-gated version lost money out of sample."],
+    ["Needs IG price validation", "Costs are not yet tied to a live IG EPIC/rule set."],
+    ["Costs overwhelm edge", "Trading friction consumes too much of the gross profit."],
+    ["Too few trades", "There is not enough evidence to trust the result."],
+  ];
+  return (
+    <section className="lab-shell guide-shell">
+      <div className="lab-header">
+        <div>
+          <h2><BookOpen size={20} /> Beginner Guide</h2>
+          <p>A practical map of the cockpit, research workflow, backtests, risk gates, and evidence exports.</p>
+        </div>
+        <div className="button-row">
+          <button type="button" className="secondary" onClick={() => setActiveModule("backtests")}><BarChart3 size={16} /> Backtests</button>
+          <button type="button" className="ghost" onClick={() => setActiveModule("research")}><Sparkles size={16} /> Research</button>
+        </div>
+      </div>
+
+      <section className="guide-band">
+        <h3>What This App Is</h3>
+        <p>
+          slrno is a research cockpit for building evidence before any trading decision. It pulls market data,
+          runs cost-aware backtests, checks capital feasibility, splits results by market regime, and keeps live
+          ordering locked while you work through paper-only validation.
+        </p>
+      </section>
+
+      <div className="guide-grid">
+        <section className="lab-section">
+          <h3>First Workflow</h3>
+          <div className="guide-steps">
+            {workflow.map(([number, title, detail]) => (
+              <div className="guide-step" key={title}>
+                <span>{number}</span>
+                <div>
+                  <strong>{title}</strong>
+                  <p>{detail}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="lab-section">
+          <h3>Core Vocabulary</h3>
+          <div className="guide-list">
+            {glossary.map(([term, detail]) => (
+              <div className="guide-row" key={term}>
+                <strong>{term}</strong>
+                <span>{detail}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <section className="lab-section span-2">
+        <h3>How To Read A Trial Or Candidate</h3>
+        <div className="guide-metric-grid">
+          {cardMetrics.map(([label, detail]) => (
+            <div className="guide-metric" key={label}>
+              <strong>{label}</strong>
+              <span>{detail}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <div className="guide-grid">
+        <section className="lab-section">
+          <h3>Promotion Gates</h3>
+          <div className="guide-checklist">
+            {gates.map((item) => (
+              <div className="guide-check" key={item}>
+                <ShieldCheck size={16} />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="lab-section">
+          <h3>Warnings To Respect</h3>
+          <div className="guide-list">
+            {warnings.map(([label, detail]) => (
+              <div className="guide-row" key={label}>
+                <strong>{label}</strong>
+                <span>{detail}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <section className="lab-section span-2">
+        <h3>Regime Evidence</h3>
+        <div className="guide-columns">
+          <div>
+            <strong>Normal backtest</strong>
+            <p>Tests the strategy across the full selected period and gives the headline result.</p>
+          </div>
+          <div>
+            <strong>Regime split</strong>
+            <p>Breaks the same result into trend, chop, volatility, shock, and rebound conditions.</p>
+          </div>
+          <div>
+            <strong>Regime-gated retest</strong>
+            <p>Forces the strategy flat outside allowed regimes, then reruns net profit, Sharpe, costs, drawdown, and OOS.</p>
+          </div>
+          <div>
+            <strong>Thorough regime scan</strong>
+            <p>Optional extra search for regime specialists. Use it after a normal run finds something worth investigating.</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="lab-section span-2">
+        <h3>Simple Decision Rule</h3>
+        <p className="guide-rule">
+          Prefer candidates with positive out-of-sample net profit after realistic costs, tolerable drawdown,
+          feasible £500 sizing, enough trades, fresh Sharpe days, and regime evidence that survives the gated retest.
+          Treat headline Sharpe as supporting evidence, not permission to trade.
+        </p>
+      </section>
     </section>
   );
 }

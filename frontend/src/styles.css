@@ -144,6 +144,107 @@ p {
   grid-column: span 2;
 }
 
+.guide-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.guide-band {
+  padding: 16px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.guide-grid,
+.guide-columns,
+.guide-metric-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.guide-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.guide-columns {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.guide-steps,
+.guide-list,
+.guide-checklist {
+  display: grid;
+  gap: 10px;
+}
+
+.guide-step {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.guide-step > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: #ffffff;
+  background: #1f6feb;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.guide-row,
+.guide-metric,
+.guide-check,
+.guide-columns > div {
+  padding: 12px;
+  border: 1px solid #e1e7ee;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.guide-row,
+.guide-metric {
+  display: grid;
+  gap: 4px;
+}
+
+.guide-metric-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.guide-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.guide-check svg {
+  flex: 0 0 auto;
+  color: #135f44;
+  margin-top: 1px;
+}
+
+.guide-row span,
+.guide-metric span,
+.guide-check span,
+.guide-step p,
+.guide-columns p,
+.guide-rule {
+  color: #5f6875;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.guide-rule {
+  max-width: 960px;
+}
+
 .tabs,
 .segmented,
 .market-picker,
@@ -694,6 +795,9 @@ th {
   .lab-header,
   .grid.two,
   .lab-grid,
+  .guide-grid,
+  .guide-columns,
+  .guide-metric-grid,
   .cost-grid,
   .pareto-grid,
   .candidate-grid,
