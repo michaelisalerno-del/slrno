@@ -121,11 +121,69 @@ def test_research_store_normalizes_stale_weak_sharpe_warning(tmp_path):
     assert "needs_ig_price_validation" in candidate["audit"]["warnings"]
 
 
+def test_research_store_repairs_legacy_candidate_cost_ratios_and_flags_missing_sharpe_sample(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("BRENT", {"interval": "1day"}, status="finished")
+    evaluation = CandidateEvaluation(
+        candidate=ProbabilityCandidate(
+            "legacy_brent",
+            ("fixture",),
+            {"market_id": "BRENT", "estimated_spread_bps": 3.5, "estimated_slippage_bps": 2.0},
+            [0.1, 0.9],
+        ),
+        metrics=ClassificationMetrics(1.0, 1.0, 0.01, 0.1, 1.0, 0.5, 2),
+        backtest=BacktestResult(
+            net_profit=1_814,
+            sharpe=0.87,
+            max_drawdown=100,
+            win_rate=0.51,
+            trade_count=6_939,
+            exposure=0.5,
+            turnover=6_939,
+            train_profit=900,
+            test_profit=914,
+            gross_profit=2_462,
+            total_cost=648,
+        ),
+        fold_results=(),
+        robustness_score=65,
+        passed=False,
+        warnings=("needs_ig_price_validation",),
+        promotion_tier="research_candidate",
+    )
+
+    store.save_candidate(run_id, "BRENT", evaluation)
+
+    [candidate] = store.list_candidates(run_id)
+    backtest = candidate["audit"]["backtest"]
+    assert backtest["estimated_spread_bps"] == 3.5
+    assert backtest["estimated_slippage_bps"] == 2.0
+    assert round(backtest["net_cost_ratio"], 2) == 2.8
+    assert round(backtest["expectancy_per_trade"], 2) == 0.26
+    assert "legacy_sharpe_diagnostics" in candidate["audit"]["warnings"]
+
+
 def _evaluation(name: str, passed: bool, promotion_tier: str = "reject", robustness_score: float = 75.0) -> CandidateEvaluation:
     return CandidateEvaluation(
         candidate=ProbabilityCandidate(name, ("fixture",), {}, [0.1, 0.9]),
         metrics=ClassificationMetrics(1.0, 1.0, 0.01, 0.1, 1.0, 0.5, 2),
-        backtest=BacktestResult(100, 1.0, 10, 0.6, 20, 0.3, 2, 60, 40),
+        backtest=BacktestResult(
+            100,
+            1.0,
+            10,
+            0.6,
+            20,
+            0.3,
+            2,
+            60,
+            40,
+            gross_profit=150,
+            total_cost=50,
+            daily_pnl_sharpe=1.0,
+            sharpe_observations=20,
+            estimated_spread_bps=2.0,
+            estimated_slippage_bps=1.0,
+        ),
         fold_results=(BacktestResult(10, 0.8, 1, 0.6, 5, 0.2, 1, 6, 4),),
         robustness_score=robustness_score,
         passed=passed,

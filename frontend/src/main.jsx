@@ -316,6 +316,29 @@ function App() {
     await refresh();
   }
 
+  async function deleteRuns(runs) {
+    const deletable = runs.filter((run) => !["created", "running"].includes(run.status));
+    if (deletable.length === 0) {
+      setMessage("No finished runs selected for deletion.");
+      return;
+    }
+    if (!window.confirm(`Delete ${deletable.length} finished runs and all of their saved trials/candidates?`)) {
+      return;
+    }
+    let deletedTrials = 0;
+    let deletedCandidates = 0;
+    for (const run of deletable) {
+      const result = await deleteResearchRun(run.id);
+      deletedTrials += Number(result.deleted_trials ?? 0);
+      deletedCandidates += Number(result.deleted_candidates ?? 0);
+    }
+    if (runDetail && deletable.some((run) => run.id === runDetail.id)) {
+      setRunDetail(null);
+    }
+    setMessage(`Deleted ${deletable.length} runs: ${deletedTrials} trials and ${deletedCandidates} candidates removed.`);
+    await refresh();
+  }
+
   function toggleMarket(marketId) {
     setActiveMarketIds((current) => {
       if (current.includes(marketId)) {
@@ -471,6 +494,7 @@ function App() {
             researchRuns={researchRuns}
             loadRun={async (id) => setRunDetail(await getResearchRun(id))}
             deleteRun={deleteRun}
+            deleteRuns={deleteRuns}
           />
         )}
 
@@ -575,24 +599,73 @@ function App() {
   );
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
   const marketFailures = runDetail?.config?.market_failures ?? [];
   const [trialTierFilter, setTrialTierFilter] = React.useState("active");
+  const [showAllRuns, setShowAllRuns] = React.useState(false);
+  const [selectedRunIds, setSelectedRunIds] = React.useState([]);
   const qualitySummary = runQualitySummary(trials);
   const filteredTrials = trials.filter((trial) => tierMatchesFilter(trial.promotion_tier, trialTierFilter));
+  const visibleRuns = showAllRuns ? researchRuns : researchRuns.slice(0, 18);
+  const selectedRuns = researchRuns.filter((run) => selectedRunIds.includes(run.id));
+  const visibleDeletableRuns = visibleRuns.filter((run) => !["created", "running"].includes(run.status));
+  const visibleTrials = filteredTrials.slice(0, 20);
+
+  React.useEffect(() => {
+    setSelectedRunIds((current) => current.filter((id) => researchRuns.some((run) => run.id === id)));
+  }, [researchRuns]);
+
+  function toggleSelectedRun(runId) {
+    setSelectedRunIds((current) => (
+      current.includes(runId) ? current.filter((id) => id !== runId) : [...current, runId]
+    ));
+  }
+
+  function selectVisibleRuns() {
+    setSelectedRunIds((current) => {
+      const next = new Set(current);
+      for (const run of visibleDeletableRuns) {
+        next.add(run.id);
+      }
+      return [...next];
+    });
+  }
+
   return (
     <div className="lab-grid">
       <section className="lab-section span-2">
-        <h3>Recent Runs</h3>
-        <div className="run-list">
-          {researchRuns.slice(0, 6).map((run) => (
+        <div className="label-row table-heading">
+          <h3>Recent Runs</h3>
+          <div className="button-row compact-actions">
+            <button type="button" className="ghost" onClick={selectVisibleRuns} disabled={visibleDeletableRuns.length === 0}>Select visible</button>
+            <button type="button" className="ghost" onClick={() => setSelectedRunIds([])} disabled={selectedRunIds.length === 0}>Clear</button>
+            <button type="button" className="secondary" onClick={() => deleteRuns(selectedRuns)} disabled={selectedRuns.length === 0}>
+              Delete selected ({selectedRuns.length})
+            </button>
+            {researchRuns.length > 18 && (
+              <button type="button" className="ghost" onClick={() => setShowAllRuns((current) => !current)}>
+                {showAllRuns ? "Show recent" : `Show all ${researchRuns.length}`}
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="run-list run-manager">
+          {visibleRuns.map((run) => (
             <div className="run-item" key={run.id}>
+              <label className="run-select" title={`Select Run ${run.id}`}>
+                <input
+                  type="checkbox"
+                  checked={selectedRunIds.includes(run.id)}
+                  onChange={() => toggleSelectedRun(run.id)}
+                  disabled={["created", "running"].includes(run.status)}
+                />
+              </label>
               <button className="run-pill" type="button" onClick={() => loadRun(run.id)}>
                 <strong>Run {run.id}</strong>
-                <span>{run.market_id} · {run.trial_count} trials · best {round(run.best_score)}</span>
+                <span>{run.market_id} · {run.status} · {run.trial_count} trials · best {round(run.best_score)}</span>
               </button>
               <button
                 className="icon-button danger"
@@ -606,6 +679,9 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
             </div>
           ))}
           {researchRuns.length === 0 && <span className="muted">No runs yet.</span>}
+          {!showAllRuns && researchRuns.length > visibleRuns.length && (
+            <span className="muted">Showing {visibleRuns.length} of {researchRuns.length} runs.</span>
+          )}
         </div>
       </section>
       {(marketStatuses.length > 0 || marketFailures.length > 0 || runDetail?.error) && (
@@ -679,39 +755,54 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
             ))}
           </div>
         </div>
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr><th>Strategy</th><th>Tier</th><th>Style</th><th>Score</th><th>Daily Sharpe (ann.)</th><th>Sharpe days</th><th>Bar Sharpe</th><th>DSR</th><th>Net</th><th>Expectancy</th><th>Net/cost</th><th>Cost/gross</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
-            </thead>
-            <tbody>
-              {filteredTrials.slice(0, 12).map((trial) => (
-                <tr key={trial.id}>
-                  <td>{trial.strategy_name}</td>
-                  <td><span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span></td>
-                  <td>{strategyFamilyLabel(trial.strategy_family || trial.style)}</td>
-                  <td>{round(trial.robustness_score)}</td>
-                  <td>{round(trial.backtest?.daily_pnl_sharpe)}</td>
-                  <td>{trial.backtest?.sharpe_observations ?? 0}</td>
-                  <td>{round(trial.backtest?.sharpe)}</td>
-                  <td>{percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)}</td>
-                  <td>{formatMoney(trial.backtest?.net_profit)}</td>
-                  <td>{formatMoney(trial.backtest?.expectancy_per_trade)}</td>
-                  <td>{formatRatio(trial.backtest?.net_cost_ratio)}</td>
-                  <td>{percent(trial.backtest?.cost_to_gross_ratio)}</td>
-                  <td>{round(trial.backtest?.estimated_spread_bps)} / {round(trial.backtest?.estimated_slippage_bps)} bps</td>
-                  <td>{trial.backtest?.trade_count ?? 0}</td>
-                  <td>{humanWarnings(trial.warnings).join(", ") || "Clear"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="trial-list">
+          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} />)}
         </div>
         {filteredTrials.length === 0 && trials.length > 0 && (
           <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
         )}
+        {filteredTrials.length > visibleTrials.length && (
+          <span className="muted">Showing top {visibleTrials.length} of {filteredTrials.length} trials in this filter.</span>
+        )}
       </section>
     </div>
+  );
+}
+
+function TrialCard({ trial }) {
+  const backtest = trial.backtest ?? {};
+  const warnings = humanWarnings(trial.warnings);
+  return (
+    <article className="trial-card">
+      <div className="trial-summary">
+        <div>
+          <div className="label-row">
+            <strong>{trial.strategy_name}</strong>
+            <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
+          </div>
+          <span>{strategyFamilyLabel(trial.strategy_family || trial.style)} · score {round(trial.robustness_score)}</span>
+        </div>
+        <div className="trial-net">
+          <small>Net</small>
+          <strong>{formatMoney(backtest.net_profit)}</strong>
+        </div>
+      </div>
+      <div className="trial-metrics">
+        <Metric label="Daily Sharpe" value={round(backtest.daily_pnl_sharpe)} />
+        <Metric label="Days" value={backtest.sharpe_observations ?? 0} />
+        <Metric label="DSR" value={percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
+        <Metric label="Drawdown" value={formatMoney(backtest.max_drawdown)} />
+        <Metric label="Costs" value={formatMoney(backtest.total_cost)} />
+        <Metric label="Expectancy" value={formatMoney(backtest.expectancy_per_trade)} />
+        <Metric label="Net/cost" value={formatRatio(backtest.net_cost_ratio)} />
+        <Metric label="Cost/gross" value={percent(backtest.cost_to_gross_ratio)} />
+        <Metric label="Spread/slip" value={`${round(backtest.estimated_spread_bps)} / ${round(backtest.estimated_slippage_bps)} bps`} />
+        <Metric label="Trades" value={backtest.trade_count ?? 0} />
+      </div>
+      <div className="warning-row">
+        {warnings.length ? warnings.slice(0, 8).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>) : <span className="muted">Clear</span>}
+      </div>
+    </article>
   );
 }
 
@@ -740,12 +831,37 @@ function ParetoCard({ item }) {
 }
 
 function CandidateView({ candidates, critique }) {
+  const visibleCandidates = candidates.slice(0, 24);
+  const queue = candidateQueueSummary(candidates);
   return (
     <div className="lab-grid">
       <section className="lab-section span-2">
+        <h3>Strategy Testing Queue</h3>
+        <div className="metrics four">
+          <Metric label="Watchlist" value={queue.watchlist} />
+          <Metric label="Needs fresh run" value={queue.needsFreshRun} />
+          <Metric label="Needs IG validation" value={queue.needsIgValidation} />
+          <Metric label="Paper-ready" value={queue.paperReady} />
+        </div>
+        <div className="status-list">
+          <div className="status compact-status">
+            <strong>1 · Clear noisy history</strong>
+            <span>Delete stale runs before comparing candidates.</span>
+          </div>
+          <div className="status compact-status">
+            <strong>2 · Rerun shortlist markets</strong>
+            <span>Fresh runs should show Sharpe days, daily Sharpe, spread/slippage, and DSR.</span>
+          </div>
+          <div className="status compact-status">
+            <strong>3 · Paper test only after validation</strong>
+            <span>Use IG price validation and 30-day live-paper tracking before promotion.</span>
+          </div>
+        </div>
+      </section>
+      <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {candidates.slice(0, 8).map((candidate) => (
+          {visibleCandidates.map((candidate) => (
             <div className="candidate-card" key={candidate.id}>
               <div className="label-row">
                 <span className="badge muted-badge">Research only</span>
@@ -775,6 +891,9 @@ function CandidateView({ candidates, critique }) {
             </div>
           ))}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
+          {candidates.length > visibleCandidates.length && (
+            <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
+          )}
         </div>
       </section>
       <section className="lab-section span-2">
@@ -1061,6 +1180,30 @@ function runQualitySummary(trials = []) {
   return { paperReady, researchWatch, rejected, costFragile, topWarnings };
 }
 
+function candidateQueueSummary(candidates = []) {
+  let watchlist = 0;
+  let needsFreshRun = 0;
+  let needsIgValidation = 0;
+  let paperReady = 0;
+  for (const candidate of candidates) {
+    const tier = candidate.promotion_tier || candidate.audit?.promotion_tier;
+    const warnings = candidate.audit?.warnings ?? [];
+    if (tier === "watchlist" || tier === "research_candidate") {
+      watchlist += 1;
+    }
+    if (tier === "paper_candidate" || tier === "validated_candidate") {
+      paperReady += 1;
+    }
+    if (warnings.includes("needs_ig_price_validation")) {
+      needsIgValidation += 1;
+    }
+    if (warnings.some((warning) => ["legacy_sharpe_diagnostics", "missing_cost_profile", "short_sharpe_sample", "limited_sharpe_sample"].includes(warning))) {
+      needsFreshRun += 1;
+    }
+  }
+  return { watchlist, needsFreshRun, needsIgValidation, paperReady };
+}
+
 function humanWarnings(warnings = []) {
   const labels = {
     too_few_trades: "Too few trades",
@@ -1072,6 +1215,8 @@ function humanWarnings(warnings = []) {
     weak_sharpe: "Weak Sharpe",
     short_sharpe_sample: "Short Sharpe sample",
     limited_sharpe_sample: "Limited Sharpe sample",
+    legacy_sharpe_diagnostics: "Needs fresh Sharpe run",
+    missing_cost_profile: "Missing cost profile",
     drawdown_too_high: "Drawdown too high",
     fails_higher_slippage: "Fails higher slippage",
     profits_not_consistent_across_folds: "Fragile folds",
@@ -1123,7 +1268,9 @@ function labelForKind(kind) {
 function formatMoney(value) {
   const number = Number(value ?? 0);
   const prefix = number < 0 ? "-£" : "£";
-  return `${prefix}${Math.abs(number).toFixed(0)}`;
+  const absolute = Math.abs(number);
+  const decimals = absolute > 0 && absolute < 10 ? 2 : 0;
+  return `${prefix}${absolute.toFixed(decimals)}`;
 }
 
 function formatRatio(value) {
