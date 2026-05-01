@@ -412,7 +412,7 @@ class ResearchStore:
 
     def get_candidate(self, candidate_id: int) -> dict[str, object] | None:
         if candidate_id < 0:
-            trial = next((item for item in self.list_trials() if int(item["id"]) == abs(candidate_id)), None)
+            trial = self._get_trial(abs(candidate_id))
             if trial is None or not _trial_should_surface_as_research_lead(trial):
                 return None
             return _candidate_from_trial_lead(trial)
@@ -442,7 +442,7 @@ class ResearchStore:
         existing = {(int(candidate["run_id"]), str(candidate["strategy_name"])) for candidate in candidates}
         limit = 12 if run_id is not None else 24
         added = 0
-        for trial in self.list_trials(run_id):
+        for trial in self._list_candidate_lead_trials(run_id, limit * 4):
             key = (int(trial["run_id"]), str(trial["strategy_name"]))
             if key in existing or not _trial_should_surface_as_research_lead(trial):
                 continue
@@ -452,6 +452,46 @@ class ResearchStore:
             if added >= limit:
                 break
         return sorted(candidates, key=lambda item: (float(item["robustness_score"]), int(item["id"])), reverse=True)
+
+    def _get_trial(self, trial_id: int) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
+                       strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json,
+                       promotion_tier
+                FROM strategy_trials WHERE id = ?
+                """,
+                (trial_id,),
+            ).fetchone()
+        return _trial_from_row(row) if row is not None else None
+
+    def _list_candidate_lead_trials(self, run_id: int | None, limit: int) -> list[dict[str, object]]:
+        where = """
+            WHERE (
+              promotion_tier IN ('watchlist', 'research_candidate', 'paper_candidate', 'validated_candidate')
+              OR robustness_score >= 25
+            )
+        """
+        params: list[object] = []
+        if run_id is not None:
+            where += " AND run_id = ?"
+            params.append(run_id)
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
+                       strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json,
+                       promotion_tier
+                FROM strategy_trials
+                {where}
+                ORDER BY robustness_score DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [_trial_from_row(row) for row in rows]
 
     def save_schedule(self, name: str, cadence: str, enabled: bool, config: dict[str, object]) -> int:
         with self._connect() as conn:
@@ -538,6 +578,26 @@ def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
         "created_at": "",
         "promotion_tier": tier,
         "source": "trial_research_lead",
+    }
+
+
+def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
+    return {
+        "id": row[0],
+        "run_id": row[1],
+        "strategy_name": row[2],
+        "passed": bool(row[3]),
+        "robustness_score": row[4],
+        "metrics": json.loads(row[5]),
+        "warnings": json.loads(row[6]),
+        "strategy_family": row[7],
+        "style": row[8],
+        "parameters": json.loads(row[9]),
+        "backtest": json.loads(row[10]),
+        "folds": json.loads(row[11]),
+        "costs": json.loads(row[12]),
+        "tags": json.loads(row[13]),
+        "promotion_tier": row[14],
     }
 
 
