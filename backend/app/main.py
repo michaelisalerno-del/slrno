@@ -136,8 +136,8 @@ def cockpit_summary() -> dict[str, object]:
 
 
 @app.get("/research/summary")
-def research_summary(limit: int = Query(default=80, ge=1, le=200)) -> dict[str, object]:
-    candidates = [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(limit=limit)]
+def research_summary(limit: int = Query(default=24, ge=1, le=80)) -> dict[str, object]:
+    candidates = [_candidate_summary_payload(_candidate_with_capital(candidate)) for candidate in research_store.list_candidates(limit=limit)]
     return {
         "queue": _candidate_queue_summary(candidates),
         "candidates": candidates,
@@ -762,6 +762,45 @@ def _candidate_with_capital(candidate: dict[str, object]) -> dict[str, object]:
     profile = research_store.get_cost_profile(market_id) if market_id else None
     scenarios = capital_scenarios(backtest, parameters, profile)
     return {**candidate, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
+
+
+def _candidate_summary_payload(candidate: dict[str, object]) -> dict[str, object]:
+    payload = dict(candidate)
+    audit = dict(payload.get("audit") if isinstance(payload.get("audit"), dict) else {})
+    candidate_payload = dict(audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {})
+    candidate_payload.pop("probability_sample", None)
+    candidate_payload.pop("probabilities", None)
+    audit["candidate"] = candidate_payload
+    audit["backtest"] = _summary_backtest(audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {})
+    audit.pop("fold_results", None)
+    audit.pop("metrics", None)
+    payload["audit"] = audit
+    return payload
+
+
+def _summary_backtest(backtest: dict[str, object]) -> dict[str, object]:
+    keep = {
+        "cost_confidence",
+        "cost_to_gross_ratio",
+        "daily_pnl_sample_sharpe",
+        "daily_pnl_sharpe",
+        "estimated_slippage_bps",
+        "estimated_spread_bps",
+        "expectancy_per_trade",
+        "gross_profit",
+        "max_drawdown",
+        "net_cost_ratio",
+        "net_profit",
+        "sample_calendar_days",
+        "sample_trading_days",
+        "sharpe",
+        "sharpe_annualization_note",
+        "sharpe_observations",
+        "test_profit",
+        "total_cost",
+        "trade_count",
+    }
+    return {key: value for key, value in backtest.items() if key in keep}
 
 
 def _risk_summary() -> dict[str, object]:

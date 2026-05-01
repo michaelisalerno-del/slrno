@@ -28,7 +28,7 @@ export function getCockpitSummary() {
   return request("/cockpit/summary");
 }
 
-export function getResearchSummary(limit = 80) {
+export function getResearchSummary(limit = 24) {
   return request(`/research/summary?limit=${limit}`);
 }
 
