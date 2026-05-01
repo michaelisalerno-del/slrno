@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from zipfile import ZipFile
 
 from app.backtesting import BacktestResult
 from app.evidence_export import build_research_export_zip
 from app.ig_costs import IGCostProfile
+from app.market_data_cache import MarketDataCache
 from app.providers.base import OHLCBar
 from app.research_lab import CandidateEvaluation
 from app.research_metrics import ClassificationMetrics
@@ -78,6 +80,104 @@ def test_export_marks_old_runs_without_exact_bars(tmp_path):
         manifest = json.loads(archive.read("manifest.json"))
         assert "bars/README.md" in archive.namelist()
     assert manifest["data_completeness"]["exact_run_bars_available"] is False
+    assert manifest["data_completeness"]["cached_bars_exported"] is False
+
+
+def test_export_includes_best_available_cached_bars_for_old_runs(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    cache = MarketDataCache(tmp_path / "cache.sqlite3")
+    run_id = store.create_run(
+        "NAS100",
+        {
+            "start": "2025-01-01",
+            "end": "2025-01-03",
+            "interval": "5min",
+            "market_statuses": [
+                {
+                    "market_id": "NAS100",
+                    "eodhd_symbol": "NDX.INDX",
+                    "interval": "5min",
+                    "bar_count": 3,
+                }
+            ],
+        },
+        status="finished",
+    )
+    cache.set_json(
+        "historical_bars",
+        "https://eodhd.com/api/intraday/NDX.INDX",
+        {"interval": "5m", "from": 1735689600, "to": 1735948799},
+        [
+            {"datetime": "2025-01-02 14:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-02 14:35:00", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 11},
+            {"datetime": "2025-01-02 14:40:00", "open": 101, "high": 103, "low": 100, "close": 102, "volume": 12},
+        ],
+        60,
+    )
+
+    payload = build_research_export_zip(store, run_id, include_bars=True, cache=cache)
+
+    archive_path = tmp_path / "cached.zip"
+    archive_path.write_bytes(payload)
+    with ZipFile(archive_path) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        bars_csv = archive.read("bars/NAS100_5min_cached_not_exact.csv").decode()
+        bars_readme = archive.read("bars/README.md").decode()
+
+    assert manifest["data_completeness"]["exact_run_bars_available"] is False
+    assert manifest["data_completeness"]["cached_bars_exported"] is True
+    assert manifest["best_available_bars"][0]["not_guaranteed_exact"] is True
+    assert "2025-01-02T14:30:00" in bars_csv
+    assert "not guaranteed" in bars_readme
+
+
+def test_export_can_use_single_legacy_cache_match_when_request_metadata_is_missing(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    cache = MarketDataCache(tmp_path / "cache.sqlite3")
+    run_id = store.create_run(
+        "NAS100",
+        {
+            "start": "2025-01-01",
+            "end": "2025-01-03",
+            "interval": "5min",
+            "market_statuses": [
+                {
+                    "market_id": "NAS100",
+                    "eodhd_symbol": "NDX.INDX",
+                    "interval": "5min",
+                    "bar_count": 2,
+                }
+            ],
+        },
+        status="finished",
+    )
+    legacy_payload = json.dumps(
+        [
+            {"datetime": "2025-01-02 14:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-02 14:35:00", "open": 100, "high": 102, "low": 99, "close": 101, "volume": 11},
+        ]
+    )
+    with sqlite3.connect(cache.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO market_data_cache(
+              cache_key, namespace, created_at, expires_at, payload_json,
+              base_url, params_json, metadata_json, last_accessed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("legacy", "historical_bars", "2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00", legacy_payload, "", "{}", "{}", ""),
+        )
+
+    payload = build_research_export_zip(store, run_id, include_bars=True, cache=cache)
+
+    archive_path = tmp_path / "legacy.zip"
+    archive_path.write_bytes(payload)
+    with ZipFile(archive_path) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+
+    assert manifest["data_completeness"]["cached_bars_exported"] is True
+    assert manifest["best_available_bars"][0]["cache_match"] == "legacy_bar_count_and_date_range"
 
 
 def _evaluation(name: str) -> CandidateEvaluation:

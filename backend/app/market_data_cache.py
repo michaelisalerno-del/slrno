@@ -209,6 +209,34 @@ class MarketDataCache:
             for row in rows
         ]
 
+    def payload_entries(self, namespace: str, limit: int = 20) -> list[dict[str, object]]:
+        limit = min(max(1, int(limit)), 100)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT namespace, created_at, expires_at, last_accessed_at,
+                       base_url, params_json, metadata_json, payload_json
+                FROM market_data_cache
+                WHERE namespace = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (namespace, limit),
+            ).fetchall()
+        return [
+            {
+                "namespace": row[0],
+                "created_at": row[1],
+                "expires_at": row[2],
+                "last_accessed_at": row[3] or None,
+                "request_url": row[4],
+                "params": _loads_json_object(row[5]),
+                "metadata": _loads_json_object(row[6]),
+                "payload": _loads_json(row[7]),
+            }
+            for row in rows
+        ]
+
     def prune_expired(self) -> int:
         with self._connect() as conn:
             cursor = conn.execute("DELETE FROM market_data_cache WHERE expires_at <= ?", (_now().isoformat(),))
@@ -237,6 +265,15 @@ def _loads_json_object(value: str | None) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _loads_json(value: str | None) -> Any:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
 
 
 def _now() -> datetime:
