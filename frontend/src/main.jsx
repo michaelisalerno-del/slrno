@@ -4,6 +4,7 @@ import {
   Activity,
   Archive,
   BarChart3,
+  BookOpen,
   Database,
   Download,
   Home,
@@ -95,6 +96,7 @@ const OBJECTIVES = [
 
 const MODULES = [
   ["cockpit", "Cockpit", Home],
+  ["guide", "Guide", BookOpen],
   ["research", "Research", Sparkles],
   ["backtests", "Backtests", BarChart3],
   ["paper", "Paper Trading", LineChart],
@@ -643,6 +645,7 @@ function App() {
       {loadingModule && <div className="notice loading">Loading {moduleLabel(loadingModule)}...</div>}
 
       {activeModule === "cockpit" && <CockpitView summary={cockpit} setActiveModule={setActiveModule} />}
+      {activeModule === "guide" && <GuideView setActiveModule={setActiveModule} />}
 
       {activeModule === "research" && (
         <section className="lab-shell">
@@ -1009,6 +1012,180 @@ function CockpitView({ summary, setActiveModule }) {
           ) : <span className="muted">No research runs yet.</span>}
         </Panel>
       </div>
+    </section>
+  );
+}
+
+function GuideView({ setActiveModule }) {
+  const workflow = [
+    ["1", "Connect providers", "Use Settings for EODHD bars and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
+    ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
+    ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
+    ["4", "Read evidence first", "Focus on net profit after costs, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
+    ["5", "Use repair actions", "Click Refine on a trial or candidate, then use the suggested repair buttons to stage the correct retest."],
+    ["6", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
+    ["7", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, and regime gates are clear."],
+  ];
+  const modules = [
+    ["Cockpit", "The home view for system status, provider health, current mode, and next actions."],
+    ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
+    ["Backtests", "Run builder, run history, trial cards, regime evidence, repair workflow, archives, and exports."],
+    ["Broker", "Order previews only. Live order placement remains disabled."],
+    ["Risk", "Capital scenarios, £2k working account size, 1% planned risk, and 5% daily loss envelope."],
+  ];
+  const metrics = [
+    ["Net", "Profit after spread, slippage, funding, FX, and other modelled costs."],
+    ["Daily Sharpe", "Annualized daily Sharpe. Useful, but only after sample size and robustness checks."],
+    ["Days", "Daily observations used for Sharpe. Promotion normally needs at least 120."],
+    ["DSR", "Deflated Sharpe probability, adjusted for repeated scans."],
+    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £2,000 working account scenario."],
+    ["OOS net", "Walk-forward out-of-sample net profit after costs."],
+    ["Fold win", "Share of walk-forward folds that made money."],
+    ["Fold share", "How much positive fold profit came from the best fold. High values mean fragility."],
+    ["Gated net", "Profit after forcing the strategy flat outside allowed regimes."],
+    ["Gated OOS", "Out-of-sample profit after the regime gate is applied."],
+    ["Cost/gross", "How much gross edge is consumed by trading friction."],
+    ["Net/cost", "How much net profit remains for each pound of cost."],
+  ];
+  const repairs = [
+    ["Too few trades", "Use More trades or Longer history to collect more evidence before trusting the result."],
+    ["Fragile folds", "Use Longer history and Evidence first. The result needs to work across several walk-forward folds."],
+    ["Single-month profit", "Use Exclude month. The run removes the dominant month from saved bars and retests."],
+    ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
+    ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
+    ["Missing IG validation", "Use Sync costs, then rerun. Do not promote stale or generic cost evidence."],
+    ["Multiple-testing haircut", "Use Evidence first and Cross-market. A lucky scan must survive stricter retests."],
+    ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
+  ];
+  const gates = [
+    "Fresh Sharpe days and no stale-data warnings.",
+    "Realistic IG/EODHD costs, spread, slippage, and minimum stake assumptions.",
+    "Positive net profit after costs and positive out-of-sample net.",
+    "Enough trades and enough walk-forward evidence.",
+    "No one fold, month, or rare regime carries the whole result.",
+    "Regime-gated retest remains positive.",
+    "£2,000 capital scenario is feasible under margin, stop, and drawdown checks.",
+    "Live trading remains locked; good candidates go to paper/demo review first.",
+  ];
+  return (
+    <section className="lab-shell guide-shell">
+      <div className="lab-header">
+        <div>
+          <h2><BookOpen size={20} /> Beginner Guide</h2>
+          <p>A practical map of the trading cockpit, research workflow, robustness gates, and evidence exports.</p>
+        </div>
+        <div className="button-row">
+          <button type="button" className="secondary" onClick={() => setActiveModule("backtests")}><BarChart3 size={16} /> Backtests</button>
+          <button type="button" className="ghost" onClick={() => setActiveModule("research")}><Sparkles size={16} /> Research</button>
+        </div>
+      </div>
+
+      <section className="guide-band">
+        <h3>What This App Is</h3>
+        <p>
+          slrno is a research and preparation system. It runs cost-aware backtests, checks capital feasibility,
+          splits results by market regime, exports evidence bundles, and keeps live order placement disabled while
+          strategies are still being researched.
+        </p>
+      </section>
+
+      <div className="guide-grid">
+        <section className="lab-section">
+          <h3>First Workflow</h3>
+          <div className="guide-steps">
+            {workflow.map(([number, title, detail]) => (
+              <div className="guide-step" key={title}>
+                <span>{number}</span>
+                <div>
+                  <strong>{title}</strong>
+                  <p>{detail}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="lab-section">
+          <h3>Main Areas</h3>
+          <div className="guide-list">
+            {modules.map(([term, detail]) => (
+              <div className="guide-row" key={term}>
+                <strong>{term}</strong>
+                <span>{detail}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <section className="lab-section">
+        <h3>How To Read A Card</h3>
+        <div className="guide-metric-grid">
+          {metrics.map(([label, detail]) => (
+            <div className="guide-metric" key={label}>
+              <strong>{label}</strong>
+              <span>{detail}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <div className="guide-grid">
+        <section className="lab-section">
+          <h3>Repair Actions</h3>
+          <div className="guide-list">
+            {repairs.map(([label, detail]) => (
+              <div className="guide-row" key={label}>
+                <strong>{label}</strong>
+                <span>{detail}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="lab-section">
+          <h3>Promotion Gates</h3>
+          <div className="guide-checklist">
+            {gates.map((item) => (
+              <div className="guide-check" key={item}>
+                <ShieldCheck size={16} />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      <section className="lab-section">
+        <h3>Regime Evidence</h3>
+        <div className="guide-columns">
+          <div>
+            <strong>Full-period backtest</strong>
+            <p>Shows the normal headline result over the selected date range.</p>
+          </div>
+          <div>
+            <strong>Regime split</strong>
+            <p>Shows which market conditions produced or damaged the result.</p>
+          </div>
+          <div>
+            <strong>Regime-gated retest</strong>
+            <p>Reruns the strategy while flat outside allowed regimes.</p>
+          </div>
+          <div>
+            <strong>Specialist scan</strong>
+            <p>Optional capped search for regime-specific research leads.</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="lab-section">
+        <h3>Simple Decision Rule</h3>
+        <p className="guide-rule">
+          Prefer candidates with positive out-of-sample net profit after realistic costs, feasible £2,000 sizing,
+          enough trades, fresh Sharpe days, stable folds, tolerable drawdown, and regime evidence that survives the
+          gated retest. Treat headline Sharpe as supporting evidence, not permission to trade.
+        </p>
+      </section>
     </section>
   );
 }
