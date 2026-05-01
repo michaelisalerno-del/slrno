@@ -155,7 +155,7 @@ def candidate_warnings(
         warnings.append("weak_pr_auc")
     if metrics.precision_at_top_quantile < baseline + gate.min_top_precision_lift:
         warnings.append("weak_top_precision")
-    if backtest.sharpe < gate.min_oos_sharpe:
+    if _risk_adjusted_sharpe(backtest) < gate.min_oos_sharpe:
         warnings.append("weak_sharpe")
     if backtest.net_profit <= 0:
         warnings.append("negative_profit")
@@ -170,6 +170,12 @@ def candidate_warnings(
     else:
         warnings.append("no_walk_forward_folds")
     return warnings
+
+
+def _risk_adjusted_sharpe(backtest: BacktestResult) -> float:
+    if backtest.sharpe_observations >= 3 or backtest.daily_pnl_sharpe != 0:
+        return backtest.daily_pnl_sharpe
+    return backtest.sharpe
 
 
 def candidate_promotion_tier(

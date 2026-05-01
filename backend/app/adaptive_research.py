@@ -447,7 +447,7 @@ def _warnings(
         warnings.append("weak_net_cost_efficiency")
     if backtest.trade_count > 180 and backtest.total_cost > max(1.0, abs(backtest.net_profit)):
         warnings.append("high_turnover_cost_drag")
-    if backtest.sharpe < 0.55:
+    if _risk_adjusted_sharpe(backtest) < 0.55:
         warnings.append("weak_sharpe")
     if backtest.max_drawdown > config.starting_cash * 0.35:
         warnings.append("drawdown_too_high")
@@ -562,7 +562,7 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
         viable_research_lead
     ):
         return "research_candidate"
-    if backtest.gross_profit > 0 or backtest.sharpe > 0.5:
+    if backtest.gross_profit > 0 or _risk_adjusted_sharpe(backtest) > 0.5:
         return "watchlist"
     return "reject"
 
@@ -804,7 +804,7 @@ def _pareto(evaluations: tuple[CandidateEvaluation, ...]) -> tuple[dict[str, obj
         return ()
     selections = (
         ("best_balanced", max(evaluations, key=lambda item: item.robustness_score)),
-        ("highest_sharpe", max(evaluations, key=lambda item: item.backtest.sharpe)),
+        ("highest_sharpe", max(evaluations, key=lambda item: _risk_adjusted_sharpe(item.backtest))),
         ("highest_profit", max(evaluations, key=lambda item: item.backtest.net_profit)),
     )
     seen: set[str] = set()
@@ -852,6 +852,12 @@ def _positive_fold_rate(folds: tuple[BacktestResult, ...]) -> float:
     if not folds:
         return 0.0
     return sum(1 for fold in folds if fold.net_profit > 0) / len(folds)
+
+
+def _risk_adjusted_sharpe(backtest: BacktestResult) -> float:
+    if backtest.sharpe_observations >= 3 or backtest.daily_pnl_sharpe != 0:
+        return backtest.daily_pnl_sharpe
+    return backtest.sharpe
 
 
 def _expectancy_efficiency(backtest: BacktestResult) -> float:
