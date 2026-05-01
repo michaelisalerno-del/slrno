@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.adaptive_research import AdaptiveSearchConfig, _generate_signals, _promotion_tier, balanced_score, run_adaptive_search
+from app.adaptive_research import AdaptiveSearchConfig, _generate_signals, _promotion_tier, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -180,6 +180,62 @@ def test_high_drawdown_profitable_lead_remains_research_candidate():
     )
 
     assert _promotion_tier(evaluation, stability=0.2, cost_profile=profile) == "research_candidate"
+
+
+def test_weak_sharpe_warning_uses_daily_pnl_sharpe_for_intraday_results():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = public_ig_cost_profile(market)
+    backtest = BacktestResult(
+        net_profit=1_000,
+        sharpe=0.1,
+        max_drawdown=200,
+        win_rate=0.55,
+        trade_count=40,
+        exposure=0.3,
+        turnover=40,
+        train_profit=500,
+        test_profit=500,
+        gross_profit=1_200,
+        total_cost=200,
+        daily_pnl_sharpe=1.4,
+        sharpe_observations=30,
+        expectancy_per_trade=25,
+        average_cost_per_trade=5,
+        net_cost_ratio=5,
+        cost_to_gross_ratio=0.1667,
+    )
+
+    warnings = _warnings(backtest, (backtest,), backtest, BacktestConfig(), "mean_reversion", profile)
+
+    assert "weak_sharpe" not in warnings
+
+
+def test_weak_sharpe_warning_still_flags_low_daily_pnl_sharpe():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = public_ig_cost_profile(market)
+    backtest = BacktestResult(
+        net_profit=1_000,
+        sharpe=1.5,
+        max_drawdown=200,
+        win_rate=0.55,
+        trade_count=40,
+        exposure=0.3,
+        turnover=40,
+        train_profit=500,
+        test_profit=500,
+        gross_profit=1_200,
+        total_cost=200,
+        daily_pnl_sharpe=0.2,
+        sharpe_observations=30,
+        expectancy_per_trade=25,
+        average_cost_per_trade=5,
+        net_cost_ratio=5,
+        cost_to_gross_ratio=0.1667,
+    )
+
+    warnings = _warnings(backtest, (backtest,), backtest, BacktestConfig(), "mean_reversion", profile)
+
+    assert "weak_sharpe" in warnings
 
 
 def test_turnaround_tuesday_signals_after_down_monday():

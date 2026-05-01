@@ -340,7 +340,7 @@ class ResearchStore:
             return []
         choices = [
             ("best_balanced", max(trials, key=lambda item: float(item["robustness_score"]))),
-            ("highest_sharpe", max(trials, key=lambda item: float(item["backtest"].get("sharpe") or 0))),
+            ("highest_sharpe", max(trials, key=lambda item: _risk_adjusted_sharpe_from_payload(item["backtest"]))),
             ("highest_profit", max(trials, key=lambda item: float(item["backtest"].get("net_profit") or 0))),
         ]
         seen: set[int] = set()
@@ -543,6 +543,10 @@ def _trial_should_surface_as_research_lead(trial: dict[str, object]) -> bool:
         and (float(backtest.get("test_profit") or 0.0) > 0 or float(backtest.get("daily_pnl_sharpe") or 0.0) >= 1.0)
         and int(backtest.get("trade_count") or 0) >= 5
     )
+
+
+def _risk_adjusted_sharpe_from_payload(backtest: dict[str, object]) -> float:
+    return float(backtest.get("daily_pnl_sharpe") or backtest.get("sharpe") or 0.0)
 
 
 def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:

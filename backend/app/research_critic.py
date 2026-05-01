@@ -244,7 +244,7 @@ def _metric_findings(strategy_name: str, metrics: dict[str, object]) -> list[Cri
 def _backtest_findings(strategy_name: str, backtest: dict[str, object], folds: list[dict[str, object]]) -> list[CriticFinding]:
     findings: list[CriticFinding] = []
     trade_count = int(backtest.get("trade_count") or 0)
-    sharpe = float(backtest.get("sharpe") or 0.0)
+    sharpe = float(backtest.get("daily_pnl_sharpe") or backtest.get("sharpe") or 0.0)
     net_profit = float(backtest.get("net_profit") or 0.0)
     turnover = float(backtest.get("turnover") or 0.0)
     net_cost_ratio = float(backtest.get("net_cost_ratio") or 0.0)
@@ -266,7 +266,7 @@ def _backtest_findings(strategy_name: str, backtest: dict[str, object], folds: l
                 "warning",
                 "weak_oos_economics",
                 "The candidate does not clear the minimum out-of-sample economics after costs.",
-                {"strategy_name": strategy_name, "sharpe": sharpe, "net_profit": net_profit},
+                {"strategy_name": strategy_name, "risk_adjusted_sharpe": sharpe, "net_profit": net_profit},
             )
         )
     if turnover > max(100.0, trade_count * 5):

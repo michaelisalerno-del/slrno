@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.backtesting import BacktestConfig
+from app.backtesting import BacktestConfig, BacktestResult
 from app.providers.base import OHLCBar
-from app.research_lab import CandidateGate, WalkForwardConfig, evaluate_candidate, top_probability_signals, walk_forward_splits
+from app.research_lab import CandidateGate, WalkForwardConfig, candidate_warnings, evaluate_candidate, top_probability_signals, walk_forward_splits
+from app.research_metrics import ClassificationMetrics
 from app.research_strategies import ProbabilityCandidate
 
 
@@ -46,6 +47,30 @@ def test_evaluate_candidate_keeps_auc_and_backtest_gates_modular():
     assert evaluation.metrics.roc_auc == 1.0
     assert evaluation.research_only is True
     assert "weak_roc_auc" not in evaluation.warnings
+
+
+def test_candidate_gate_uses_daily_pnl_sharpe_for_sharpe_warning():
+    warnings = candidate_warnings(
+        ClassificationMetrics(0.8, 0.8, 0.01, 0.2, 0.8, 0.5, 20),
+        BacktestResult(
+            net_profit=500,
+            sharpe=0.1,
+            max_drawdown=100,
+            win_rate=0.55,
+            trade_count=40,
+            exposure=0.2,
+            turnover=40,
+            train_profit=250,
+            test_profit=250,
+            daily_pnl_sharpe=1.1,
+            sharpe_observations=20,
+        ),
+        (),
+        CandidateGate(min_total_trades=10, min_oos_sharpe=0.7, max_drawdown_fraction=0.5),
+        BacktestConfig(),
+    )
+
+    assert "weak_sharpe" not in warnings
 
 
 def _bars(count: int) -> list[OHLCBar]:
