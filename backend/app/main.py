@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import re
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .adaptive_research import AdaptiveSearchConfig, available_research_engines, run_adaptive_search
+from .broker_preview import broker_order_preview
+from .capital import CAPITAL_SCENARIOS_GBP, DAILY_LOSS_FRACTION, RISK_PER_TRADE_FRACTION, capital_scenarios, capital_summary
 from .config import allowed_origins
+from .evidence_export import build_research_export_zip
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile
 from .ig_spread_bet_engines import list_spread_bet_engines
 from .market_data_cache import MarketDataCache
@@ -97,9 +100,109 @@ class IGCostSyncPayload(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
 
 
+class BrokerOrderPreviewPayload(BaseModel):
+    market_id: str
+    side: str = "BUY"
+    stake: float = Field(default=1.0, gt=0)
+    account_size: float = Field(default=500.0, gt=0)
+    entry_price: float | None = Field(default=None, gt=0)
+    stop: float | None = Field(default=None, gt=0)
+    limit: float | None = Field(default=None, gt=0)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "mode": "paper"}
+
+
+@app.get("/cockpit/summary")
+def cockpit_summary() -> dict[str, object]:
+    runs = research_store.list_runs()
+    running = [run for run in runs if run["status"] in {"created", "running"}]
+    latest = runs[0] if runs else None
+    return {
+        "mode": "paper",
+        "live_ordering_enabled": False,
+        "providers": [status.__dict__ for status in settings.statuses()],
+        "runs": {
+            "total_visible": len(runs),
+            "running": len(running),
+            "latest": latest,
+            "recent": runs[:5],
+        },
+        "risk": _risk_summary(),
+        "next_actions": _cockpit_next_actions(runs),
+    }
+
+
+@app.get("/research/summary")
+def research_summary(limit: int = Query(default=80, ge=1, le=200)) -> dict[str, object]:
+    candidates = [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(limit=limit)]
+    return {
+        "queue": _candidate_queue_summary(candidates),
+        "candidates": candidates,
+        "critique": critique_latest_research(),
+    }
+
+
+@app.get("/backtests/summary")
+def backtests_summary(include_archived: bool = False) -> dict[str, object]:
+    return {
+        "runs": research_store.list_runs(include_archived=include_archived),
+        "engines": available_research_engines(),
+        "spread_bet_engines": list_spread_bet_engines(),
+    }
+
+
+@app.get("/paper/summary")
+def paper_summary() -> dict[str, object]:
+    return {
+        "status": "not_started",
+        "live_ordering_enabled": False,
+        "protocol": "30-day paper review before any live trading work",
+        "tracked_candidates": [],
+    }
+
+
+@app.get("/broker/summary")
+def broker_summary() -> dict[str, object]:
+    return {
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "providers": [status.__dict__ for status in settings.statuses()],
+        "mode": "demo_read_only",
+        "preview_policy": {
+            "enabled": True,
+            "places_orders": False,
+            "default_account_size": 500,
+            "capital_scenarios": list(CAPITAL_SCENARIOS_GBP),
+            "checks": [
+                "IG minimum deal size",
+                "margin estimate",
+                "stop/limit distance",
+                "1% planned risk per trade",
+                "5% daily loss envelope",
+            ],
+        },
+    }
+
+
+@app.get("/risk/summary")
+def risk_summary() -> dict[str, object]:
+    return _risk_summary()
+
+
+@app.get("/settings/summary")
+def settings_summary() -> dict[str, object]:
+    cache = MarketDataCache()
+    return {
+        "providers": [status.__dict__ for status in settings.statuses()],
+        "cache": {
+            "stats": cache.stats().as_dict(),
+            "namespaces": cache.namespace_stats(),
+            "recent_entries": cache.recent_entries(limit=10),
+        },
+    }
 
 
 @app.get("/settings/status")
@@ -256,6 +359,26 @@ def get_ig_cost_profile(market_id: str) -> dict[str, object]:
     return profile.as_dict()
 
 
+@app.post("/broker/order-preview")
+def preview_broker_order(payload: BrokerOrderPreviewPayload) -> dict[str, object]:
+    market = markets.get(payload.market_id)
+    if market is None:
+        raise HTTPException(status_code=404, detail="Market not found")
+    profile = research_store.get_cost_profile(market.market_id)
+    if profile is None:
+        profile = public_ig_cost_profile(market).as_dict()
+    return broker_order_preview(
+        _market_response(market),
+        profile,
+        payload.side,
+        payload.stake,
+        payload.account_size,
+        entry_price=payload.entry_price,
+        stop=payload.stop,
+        limit=payload.limit,
+    )
+
+
 @app.post("/research/runs")
 async def create_research_run(payload: ResearchRunPayload, background_tasks: BackgroundTasks) -> dict[str, object]:
     engine_ids = {engine["id"] for engine in available_research_engines()}
@@ -343,7 +466,17 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             )
             persist_status()
             continue
+        snapshot = research_store.save_bar_snapshot(
+            run_id,
+            market.market_id,
+            interval,
+            "eodhd_primary_symbol",
+            payload.start,
+            payload.end,
+            bars,
+        )
         market_status.update({"status": "evaluating", "bar_count": len(bars)})
+        market_status["bar_snapshot"] = snapshot
         persist_status()
         cost_profile = _cost_profile_for_market(market)
         try:
@@ -396,8 +529,8 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
 
 
 @app.get("/research/runs")
-def list_research_runs() -> list[dict[str, object]]:
-    return research_store.list_runs()
+def list_research_runs(include_archived: bool = False) -> list[dict[str, object]]:
+    return research_store.list_runs(include_archived=include_archived)
 
 
 @app.get("/research/runs/{run_id}")
@@ -407,17 +540,18 @@ def get_research_run(run_id: int) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="Research run not found")
     return {
         **run,
-        "trials": research_store.list_trials(run_id, limit=25),
-        "candidates": research_store.list_candidates(run_id),
+        "trials": [_trial_with_capital(trial) for trial in research_store.list_trials(run_id, limit=25)],
+        "candidates": [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(run_id, limit=24)],
         "pareto": research_store.list_pareto(run_id),
+        "bar_snapshots": research_store.list_bar_snapshots(run_id, include_payload=False),
     }
 
 
 @app.get("/research/runs/{run_id}/trials")
-def list_research_trials(run_id: int) -> list[dict[str, object]]:
+def list_research_trials(run_id: int, limit: int = Query(default=100, ge=1, le=1000)) -> list[dict[str, object]]:
     if research_store.get_run(run_id) is None:
         raise HTTPException(status_code=404, detail="Research run not found")
-    return research_store.list_trials(run_id)
+    return [_trial_with_capital(trial) for trial in research_store.list_trials(run_id, limit=limit)]
 
 
 @app.get("/research/runs/{run_id}/pareto")
@@ -438,6 +572,34 @@ def delete_research_run(run_id: int) -> dict[str, object]:
     if result is None:
         raise HTTPException(status_code=404, detail="Research run not found")
     return {"status": "deleted", **result}
+
+
+@app.post("/research/runs/{run_id}/archive")
+def archive_research_run(run_id: int) -> dict[str, object]:
+    run = research_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    if run["status"] in {"created", "running"}:
+        raise HTTPException(status_code=409, detail="Running research runs cannot be archived")
+    result = research_store.archive_run(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return {"status": "archived", **result}
+
+
+@app.get("/research/runs/{run_id}/export")
+def export_research_run(run_id: int, include_bars: bool = True) -> Response:
+    if research_store.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    try:
+        payload = build_research_export_zip(research_store, run_id, include_bars=include_bars)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="slrno-run-{run_id}-evidence.zip"'},
+    )
 
 
 @app.get("/research/critique")
@@ -480,7 +642,7 @@ def _critique_research_run(run: dict[str, object] | None):
 
 @app.get("/research/candidates")
 def list_research_candidates(limit: int | None = Query(default=None, ge=1, le=500)) -> list[dict[str, object]]:
-    return research_store.list_candidates(limit=limit)
+    return [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(limit=limit)]
 
 
 @app.get("/research/candidates/{candidate_id}")
@@ -580,6 +742,68 @@ def _cost_profile_for_market(market: MarketMapping) -> IGCostProfile:
     profile = public_ig_cost_profile(market)
     research_store.save_cost_profile(profile)
     return profile
+
+
+def _trial_with_capital(trial: dict[str, object]) -> dict[str, object]:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    market_id = str(parameters.get("market_id") or "")
+    profile = research_store.get_cost_profile(market_id) if market_id else None
+    scenarios = capital_scenarios(backtest, parameters, profile)
+    return {**trial, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
+
+
+def _candidate_with_capital(candidate: dict[str, object]) -> dict[str, object]:
+    audit = candidate.get("audit") if isinstance(candidate.get("audit"), dict) else {}
+    candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+    parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+    backtest = audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
+    market_id = str(candidate.get("market_id") or parameters.get("market_id") or "")
+    profile = research_store.get_cost_profile(market_id) if market_id else None
+    scenarios = capital_scenarios(backtest, parameters, profile)
+    return {**candidate, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
+
+
+def _risk_summary() -> dict[str, object]:
+    return {
+        "capital_scenarios": list(CAPITAL_SCENARIOS_GBP),
+        "risk_per_trade_fraction": RISK_PER_TRADE_FRACTION,
+        "daily_loss_fraction": DAILY_LOSS_FRACTION,
+        "live_ordering_enabled": False,
+        "kill_switch_enabled": True,
+        "policy": "paper/demo only; live order placement disabled",
+    }
+
+
+def _candidate_queue_summary(candidates: list[dict[str, object]]) -> dict[str, int]:
+    summary = {"blocked": 0, "needs_fresh_run": 0, "needs_ig_validation": 0, "paper_ready": 0, "capital_infeasible": 0}
+    for candidate in candidates:
+        audit = candidate.get("audit") if isinstance(candidate.get("audit"), dict) else {}
+        readiness = audit.get("promotion_readiness") if isinstance(audit.get("promotion_readiness"), dict) else {}
+        status = str(readiness.get("status") or "blocked")
+        blockers = list(readiness.get("blockers") or [])
+        if status == "ready_for_paper":
+            summary["paper_ready"] += 1
+        elif status == "needs_ig_validation":
+            summary["needs_ig_validation"] += 1
+        else:
+            summary["blocked"] += 1
+        if any(warning in blockers for warning in ("legacy_sharpe_diagnostics", "missing_cost_profile", "missing_spread_slippage", "short_sharpe_sample", "limited_sharpe_sample")):
+            summary["needs_fresh_run"] += 1
+        capital = candidate.get("capital_summary") if isinstance(candidate.get("capital_summary"), dict) else {}
+        if 500.0 in (capital.get("blocked_accounts") or []):
+            summary["capital_infeasible"] += 1
+    return summary
+
+
+def _cockpit_next_actions(runs: list[dict[str, object]]) -> list[dict[str, str]]:
+    actions: list[dict[str, str]] = []
+    if any(run["status"] in {"created", "running"} for run in runs):
+        actions.append({"kind": "run_active", "label": "Research run active", "detail": "Check Backtests for progress before starting another run."})
+    if not runs:
+        actions.append({"kind": "no_runs", "label": "No research runs", "detail": "Start in Backtests when ready to generate evidence."})
+    actions.append({"kind": "live_disabled", "label": "Live trading locked", "detail": "Order placement remains disabled; use paper/demo review only."})
+    return actions
 
 
 def _ig_provider_from_settings() -> IGDemoProvider | None:

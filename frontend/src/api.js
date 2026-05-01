@@ -24,6 +24,41 @@ export function getStatus() {
   return request("/settings/status");
 }
 
+export function getCockpitSummary() {
+  return request("/cockpit/summary");
+}
+
+export function getResearchSummary(limit = 80) {
+  return request(`/research/summary?limit=${limit}`);
+}
+
+export function getBacktestsSummary(includeArchived = false) {
+  return request(`/backtests/summary?include_archived=${includeArchived}`);
+}
+
+export function getPaperSummary() {
+  return request("/paper/summary");
+}
+
+export function getBrokerSummary() {
+  return request("/broker/summary");
+}
+
+export function previewBrokerOrder(payload) {
+  return request("/broker/order-preview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getRiskSummary() {
+  return request("/risk/summary");
+}
+
+export function getSettingsSummary() {
+  return request("/settings/summary");
+}
+
 export function saveEodhd(apiToken) {
   return request("/settings/eodhd", {
     method: "POST",
@@ -114,6 +149,16 @@ export function deleteResearchRun(runId) {
   return request(`/research/runs/${runId}`, {
     method: "DELETE",
   });
+}
+
+export function archiveResearchRun(runId) {
+  return request(`/research/runs/${runId}/archive`, {
+    method: "POST",
+  });
+}
+
+export function researchRunExportUrl(runId, includeBars = true) {
+  return `${API_BASE_URL}/research/runs/${runId}/export?include_bars=${includeBars}`;
 }
 
 export function getResearchTrials(runId) {

@@ -74,6 +74,21 @@ def test_research_store_deletes_run_trials_and_candidates(tmp_path):
     assert store.delete_run(999_999) is None
 
 
+def test_research_store_archives_runs_without_deleting_evidence(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")
+    accepted = _evaluation("accepted", passed=True)
+    store.save_trial(run_id, accepted)
+
+    result = store.archive_run(run_id)
+
+    assert result == {"run_id": run_id, "archived": 1}
+    assert store.list_runs() == []
+    [archived] = store.list_runs(include_archived=True)
+    assert archived["archived"] is True
+    assert len(store.list_trials(run_id)) == 1
+
+
 def test_research_store_limits_trial_and_candidate_reads(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")

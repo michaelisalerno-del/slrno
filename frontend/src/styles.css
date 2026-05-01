@@ -28,6 +28,33 @@ main {
   margin-bottom: 18px;
 }
 
+.app-topbar {
+  margin-bottom: 12px;
+}
+
+.module-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.module-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  color: #27313d;
+  background: #ffffff;
+  border: 1px solid #d8e0e8;
+}
+
+.module-tab.active {
+  color: #ffffff;
+  background: #1f6feb;
+  border-color: #1f6feb;
+}
+
 h1, h2, h3, p {
   margin: 0;
 }
@@ -76,6 +103,11 @@ p {
   margin-bottom: 16px;
   color: #135f44;
   background: #effaf5;
+}
+
+.notice.loading {
+  color: #344054;
+  background: #f6f8fa;
 }
 
 .grid,
@@ -207,10 +239,13 @@ p {
   align-items: center;
   justify-content: center;
   width: 40px;
+  min-height: 40px;
   padding: 0;
   color: #27313d;
   background: #ffffff;
   border: 1px solid #d8e0e8;
+  border-radius: 7px;
+  text-decoration: none;
 }
 
 .icon-button.danger {
@@ -354,6 +389,36 @@ button.ghost {
 .check input {
   width: auto;
   min-height: auto;
+}
+
+.compact-check {
+  min-height: 36px;
+  padding: 0 8px;
+  border: 1px solid #d8e0e8;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.action-status {
+  width: 100%;
+  min-height: auto;
+  padding: 12px;
+  text-align: left;
+  color: #20242a;
+  background: #ffffff;
+  border: 1px solid #e5eaf0;
+}
+
+.download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border-radius: 7px;
+  color: #ffffff;
+  text-decoration: none;
+  background: #334155;
 }
 
 .run-state {

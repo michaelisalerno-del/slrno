@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import gzip
+import hashlib
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +11,7 @@ from pathlib import Path
 from .config import app_home
 from .ig_costs import IGCostProfile
 from .promotion_readiness import MOVE_FORWARD_TIERS, gate_promotion_tier, promotion_readiness, readiness_warnings
+from .providers.base import OHLCBar
 from .research_lab import CandidateEvaluation
 
 
@@ -40,6 +43,7 @@ class ResearchStore:
                 """
             )
             self._add_column(conn, "research_runs", "error", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "research_runs", "archived", "INTEGER NOT NULL DEFAULT 0")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS strategy_trials (
@@ -89,6 +93,25 @@ class ResearchStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS research_run_bars (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id INTEGER NOT NULL,
+                  market_id TEXT NOT NULL,
+                  interval TEXT NOT NULL,
+                  source TEXT NOT NULL,
+                  start TEXT NOT NULL,
+                  end TEXT NOT NULL,
+                  bar_count INTEGER NOT NULL,
+                  sha256 TEXT NOT NULL,
+                  payload_blob BLOB NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(run_id) REFERENCES research_runs(id)
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_research_run_bars_run_id ON research_run_bars(run_id)")
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS research_schedules (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   name TEXT NOT NULL,
@@ -130,10 +153,19 @@ class ResearchStore:
                 return None
             trial_count = int(conn.execute("SELECT COUNT(*) FROM strategy_trials WHERE run_id = ?", (run_id,)).fetchone()[0] or 0)
             candidate_count = int(conn.execute("SELECT COUNT(*) FROM candidates WHERE run_id = ?", (run_id,)).fetchone()[0] or 0)
+            conn.execute("DELETE FROM research_run_bars WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM candidates WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM strategy_trials WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM research_runs WHERE id = ?", (run_id,))
         return {"run_id": run_id, "deleted_trials": trial_count, "deleted_candidates": candidate_count}
+
+    def archive_run(self, run_id: int) -> dict[str, int] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM research_runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                return None
+            conn.execute("UPDATE research_runs SET archived = 1 WHERE id = ?", (run_id,))
+        return {"run_id": run_id, "archived": 1}
 
     def save_trial(self, run_id: int, evaluation: CandidateEvaluation) -> None:
         parameters = dict(evaluation.candidate.parameters)
@@ -229,6 +261,68 @@ class ResearchStore:
                 (str(payload["market_id"]), _now(), json.dumps(payload, sort_keys=True)),
             )
 
+    def save_bar_snapshot(
+        self,
+        run_id: int,
+        market_id: str,
+        interval: str,
+        source: str,
+        start: str,
+        end: str,
+        bars: list[OHLCBar],
+    ) -> dict[str, object]:
+        payload = [_bar_snapshot_row(bar) for bar in bars]
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        compressed = gzip.compress(raw)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM research_run_bars
+                WHERE run_id = ? AND market_id = ? AND interval = ? AND source = ?
+                """,
+                (run_id, market_id, interval, source),
+            )
+            conn.execute(
+                """
+                INSERT INTO research_run_bars(
+                  run_id, market_id, interval, source, start, end, bar_count, sha256, payload_blob, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, market_id, interval, source, start, end, len(payload), digest, compressed, _now()),
+            )
+        return {"market_id": market_id, "interval": interval, "bar_count": len(payload), "sha256": digest, "exact": True}
+
+    def list_bar_snapshots(self, run_id: int, include_payload: bool = True) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT market_id, interval, source, start, end, bar_count, sha256, payload_blob, created_at
+                FROM research_run_bars
+                WHERE run_id = ?
+                ORDER BY market_id, interval, id
+                """,
+                (run_id,),
+            ).fetchall()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            item: dict[str, object] = {
+                "market_id": row[0],
+                "interval": row[1],
+                "source": row[2],
+                "start": row[3],
+                "end": row[4],
+                "bar_count": int(row[5] or 0),
+                "sha256": row[6],
+                "created_at": row[8],
+                "exact": True,
+            }
+            if include_payload:
+                item["bars"] = json.loads(gzip.decompress(row[7]).decode("utf-8"))
+            output.append(item)
+        return output
+
     def get_cost_profile(self, market_id: str) -> dict[str, object] | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -241,16 +335,19 @@ class ResearchStore:
         payload["updated_at"] = row[1]
         return payload
 
-    def list_runs(self) -> list[dict[str, object]]:
+    def list_runs(self, include_archived: bool = False) -> list[dict[str, object]]:
+        where = "" if include_archived else "WHERE run.archived = 0"
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT run.id, run.created_at, run.status, run.market_id, run.data_source, run.error,
+                       run.archived,
                        COUNT(trial.id) AS trial_count,
                        COALESCE(SUM(trial.passed), 0) AS passed_count,
                        MAX(trial.robustness_score) AS best_score
                 FROM research_runs run
                 LEFT JOIN strategy_trials trial ON trial.run_id = run.id
+                {where}
                 GROUP BY run.id
                 ORDER BY run.id DESC
                 """
@@ -263,9 +360,10 @@ class ResearchStore:
                 "market_id": row[3],
                 "data_source": row[4],
                 "error": row[5],
-                "trial_count": row[6],
-                "passed_count": row[7],
-                "best_score": row[8] or 0,
+                "archived": bool(row[6]),
+                "trial_count": row[7],
+                "passed_count": row[8],
+                "best_score": row[9] or 0,
             }
             for row in rows
         ]
@@ -275,7 +373,7 @@ class ResearchStore:
             row = conn.execute(
                 """
                 SELECT run.id, run.created_at, run.status, run.market_id, run.data_source,
-                       run.config_json, run.error,
+                       run.config_json, run.error, run.archived,
                        COUNT(trial.id) AS trial_count,
                        COALESCE(SUM(trial.passed), 0) AS passed_count,
                        MAX(trial.robustness_score) AS best_score
@@ -296,9 +394,10 @@ class ResearchStore:
             "data_source": row[4],
             "config": json.loads(row[5]),
             "error": row[6],
-            "trial_count": row[7],
-            "passed_count": row[8],
-            "best_score": row[9] or 0,
+            "archived": bool(row[7]),
+            "trial_count": row[8],
+            "passed_count": row[9],
+            "best_score": row[10] or 0,
         }
 
     def list_trials(self, run_id: int | None = None, limit: int | None = None) -> list[dict[str, object]]:
@@ -321,7 +420,7 @@ class ResearchStore:
         return [_trial_from_row(row) for row in rows]
 
     def list_pareto(self, run_id: int) -> list[dict[str, object]]:
-        trials = self.list_trials(run_id)
+        trials = self._pareto_source_trials(run_id)
         if not trials:
             return []
         choices = [
@@ -370,6 +469,51 @@ class ResearchStore:
                 }
             )
         return output
+
+    def _pareto_source_trials(self, run_id: int) -> list[dict[str, object]]:
+        choices: list[dict[str, object]] = []
+        for order_key in (
+            "robustness_score",
+            "daily_pnl_sharpe",
+            "net_profit",
+        ):
+            trial = self._top_trial(run_id, order_key)
+            if trial is not None and all(int(item["id"]) != int(trial["id"]) for item in choices):
+                choices.append(trial)
+        return choices
+
+    def _top_trial(self, run_id: int, order_key: str) -> dict[str, object] | None:
+        order_sql = {
+            "robustness_score": "robustness_score",
+            "daily_pnl_sharpe": "CAST(json_extract(backtest_json, '$.daily_pnl_sharpe') AS REAL)",
+            "net_profit": "CAST(json_extract(backtest_json, '$.net_profit') AS REAL)",
+        }[order_key]
+        with self._connect() as conn:
+            try:
+                row = conn.execute(
+                    f"""
+                    SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
+                           strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json,
+                           promotion_tier
+                    FROM strategy_trials
+                    WHERE run_id = ?
+                    ORDER BY {order_sql} DESC, robustness_score DESC, id
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+        if row is not None:
+            return _trial_from_row(row)
+        fallback = self.list_trials(run_id, limit=250)
+        if not fallback:
+            return None
+        if order_key == "daily_pnl_sharpe":
+            return max(fallback, key=lambda item: _risk_adjusted_sharpe_from_payload(item["backtest"]))
+        if order_key == "net_profit":
+            return max(fallback, key=lambda item: float(item["backtest"].get("net_profit") or 0))
+        return fallback[0]
 
     def list_candidates(self, run_id: int | None = None, limit: int | None = None) -> list[dict[str, object]]:
         params: list[object] = []
@@ -642,6 +786,18 @@ def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
         "created_at": "",
         "promotion_tier": tier,
         "source": "trial_research_lead",
+    }
+
+
+def _bar_snapshot_row(bar: OHLCBar) -> dict[str, object]:
+    return {
+        "symbol": bar.symbol,
+        "timestamp": bar.timestamp.isoformat(),
+        "open": bar.open,
+        "high": bar.high,
+        "low": bar.low,
+        "close": bar.close,
+        "volume": bar.volume,
     }
 
 

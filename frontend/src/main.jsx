@@ -2,32 +2,43 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
+  Archive,
   BarChart3,
   Database,
+  Download,
+  Home,
   KeyRound,
+  LineChart,
+  LockKeyhole,
   Plug,
   RefreshCw,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  Wallet,
 } from "lucide-react";
 import {
+  archiveResearchRun,
   createResearchRun,
   deleteResearchRun,
+  getBacktestsSummary,
+  getBrokerSummary,
+  getCockpitSummary,
   getIgCostProfile,
-  getIgSpreadBetEngines,
   getMarketDataCacheStatus,
   getMarketPlugins,
   getMarkets,
-  getResearchCandidates,
-  getResearchCritique,
-  getResearchEngines,
+  getPaperSummary,
+  getResearchSummary,
   getResearchRun,
-  getResearchRuns,
+  getRiskSummary,
+  getSettingsSummary,
   getStatus,
   installMarketPlugin,
+  previewBrokerOrder,
   pruneMarketDataCache,
+  researchRunExportUrl,
   saveEodhd,
   saveIg,
   saveMarket,
@@ -78,6 +89,16 @@ const OBJECTIVES = [
   { id: "profit_first", label: "Profit first" },
 ];
 
+const MODULES = [
+  ["cockpit", "Cockpit", Home],
+  ["research", "Research", Sparkles],
+  ["backtests", "Backtests", BarChart3],
+  ["paper", "Paper Trading", LineChart],
+  ["broker", "Broker", Wallet],
+  ["risk", "Risk", LockKeyhole],
+  ["settings", "Settings", SlidersHorizontal],
+];
+
 function App() {
   const [status, setStatus] = React.useState([]);
   const [markets, setMarkets] = React.useState([]);
@@ -94,6 +115,14 @@ function App() {
   const [message, setMessage] = React.useState("");
   const [eodhdKey, setEodhdKey] = React.useState("");
   const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "", accountId: "" });
+  const [activeModule, setActiveModule] = React.useState("cockpit");
+  const [loadingModule, setLoadingModule] = React.useState("");
+  const [cockpit, setCockpit] = React.useState(null);
+  const [paper, setPaper] = React.useState(null);
+  const [broker, setBroker] = React.useState(null);
+  const [risk, setRisk] = React.useState(null);
+  const [includeArchivedRuns, setIncludeArchivedRuns] = React.useState(false);
+  const [exportIncludeBars, setExportIncludeBars] = React.useState(true);
   const [market, setMarket] = React.useState({
     market_id: "GBPUSD",
     name: "GBP/USD",
@@ -133,32 +162,60 @@ function App() {
   const selectedEngine = engines.find((engine) => engine.id === researchRun.engine) ?? engines[0] ?? FALLBACK_ENGINES[0];
   const selectedPreset = SEARCH_PRESETS.find((preset) => preset.id === researchRun.search_preset) ?? SEARCH_PRESETS[1];
 
-  const refresh = React.useCallback(async () => {
-    const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, nextEngines, nextSpreadBetEngines, nextRuns, nextCandidates, nextCritique] = await Promise.all([
-      getStatus(),
-      getMarkets(),
-      getMarketPlugins(),
-      getMarketDataCacheStatus().catch(() => null),
-      getResearchEngines().catch(() => FALLBACK_ENGINES),
-      getIgSpreadBetEngines().catch(() => []),
-      getResearchRuns(),
-      getResearchCandidates(),
-      getResearchCritique(),
-    ]);
-    setStatus(nextStatus);
-    setMarkets(nextMarkets);
-    setPlugins(nextPlugins);
-    setCacheStatus(nextCacheStatus);
-    setEngines(nextEngines.length ? nextEngines : FALLBACK_ENGINES);
-    setSpreadBetEngines(nextSpreadBetEngines);
-    setResearchRuns(nextRuns);
-    setCandidates(nextCandidates);
-    setCritique(nextCritique);
-  }, []);
+  const loadModule = React.useCallback(async (moduleId = activeModule) => {
+    setLoadingModule(moduleId);
+    try {
+      if (moduleId === "cockpit") {
+        const summary = await getCockpitSummary();
+        setCockpit(summary);
+        setStatus(summary.providers ?? []);
+      } else if (moduleId === "research") {
+        const summary = await getResearchSummary();
+        setCandidates(summary.candidates ?? []);
+        setCritique(summary.critique ?? null);
+      } else if (moduleId === "backtests") {
+        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary] = await Promise.all([
+          getStatus(),
+          getMarkets(),
+          getMarketPlugins(),
+          getMarketDataCacheStatus().catch(() => null),
+          getBacktestsSummary(includeArchivedRuns),
+        ]);
+        setStatus(nextStatus);
+        setMarkets(nextMarkets);
+        setPlugins(nextPlugins);
+        setCacheStatus(nextCacheStatus);
+        setEngines((summary.engines ?? []).length ? summary.engines : FALLBACK_ENGINES);
+        setSpreadBetEngines(summary.spread_bet_engines ?? []);
+        setResearchRuns(summary.runs ?? []);
+      } else if (moduleId === "paper") {
+        setPaper(await getPaperSummary());
+      } else if (moduleId === "broker") {
+        const [summary, nextMarkets] = await Promise.all([getBrokerSummary(), getMarkets()]);
+        setBroker(summary);
+        setStatus(summary.providers ?? []);
+        setMarkets(nextMarkets);
+      } else if (moduleId === "risk") {
+        setRisk(await getRiskSummary());
+      } else if (moduleId === "settings") {
+        const summary = await getSettingsSummary();
+        setStatus(summary.providers ?? []);
+        setCacheStatus(summary.cache ?? null);
+      }
+    } finally {
+      setLoadingModule("");
+    }
+  }, [activeModule, includeArchivedRuns]);
 
   React.useEffect(() => {
-    refresh().catch((error) => setMessage(error.message));
-  }, [refresh]);
+    loadModule(activeModule).catch((error) => setMessage(error.message));
+  }, [activeModule, includeArchivedRuns, loadModule]);
+
+  React.useEffect(() => {
+    if (activeModule === "backtests" && !["builder", "results"].includes(activeTab)) {
+      setActiveTab("builder");
+    }
+  }, [activeModule, activeTab]);
 
   React.useEffect(() => {
     if (enabledMarkets.length > 0 && activeMarketIds.length === 0) {
@@ -179,10 +236,10 @@ function App() {
       await saveEodhd(eodhdKey);
       setEodhdKey("");
       setMessage("EODHD connected.");
-      await refresh();
+      await loadModule(activeModule);
     } catch (error) {
       setMessage(error.message);
-      await refresh().catch(() => undefined);
+      await loadModule(activeModule).catch(() => undefined);
     }
   }
 
@@ -193,10 +250,10 @@ function App() {
       const result = await saveIg(ig);
       setIg({ apiKey: "", username: "", password: "", accountId: "" });
       setMessage(`IG demo connected${result.account_id ? `: ${result.account_id}` : "."}`);
-      await refresh();
+      await loadModule(activeModule);
     } catch (error) {
       setMessage(error.message);
-      await refresh().catch(() => undefined);
+      await loadModule(activeModule).catch(() => undefined);
     }
   }
 
@@ -204,13 +261,13 @@ function App() {
     event.preventDefault();
     await saveMarket(market);
     setMessage("Market mapping saved.");
-    await refresh();
+    await loadModule("backtests");
   }
 
   async function installPlugin(pluginId) {
     await installMarketPlugin(pluginId);
     setMessage("Market plugin installed.");
-    await refresh();
+    await loadModule("backtests");
   }
 
   async function syncCosts() {
@@ -256,11 +313,11 @@ function App() {
         detail: runStateDetail(detail, plannedTrials),
       });
       setMessage(runCompletionMessage(result.run_id, detail));
-      await refresh();
+      await loadModule("backtests");
     } catch (error) {
       setResearchState({ status: "error", detail: error.message });
       setMessage(error.message);
-      await refresh().catch(() => undefined);
+      await loadModule("backtests").catch(() => undefined);
     }
   }
 
@@ -412,7 +469,7 @@ function App() {
     const result = await pruneMarketDataCache();
     setCacheStatus({ stats: result.stats, namespaces: cacheStatus?.namespaces ?? [], policy: cacheStatus?.policy ?? {} });
     setMessage(`Pruned ${result.deleted} expired cache entries.`);
-    await refresh().catch(() => undefined);
+    await loadModule(activeModule).catch(() => undefined);
   }
 
   async function deleteRun(run) {
@@ -428,7 +485,36 @@ function App() {
       setRunDetail(null);
     }
     setMessage(`Deleted Run ${run.id}: ${result.deleted_trials} trials and ${result.deleted_candidates} candidates removed.`);
-    await refresh();
+    await loadModule("backtests");
+  }
+
+  async function archiveRun(run) {
+    if (["created", "running"].includes(run.status)) {
+      setMessage(`Run ${run.id} is still ${run.status}; archive it after it finishes.`);
+      return;
+    }
+    const result = await archiveResearchRun(run.id);
+    if (runDetail?.id === run.id) {
+      setRunDetail(null);
+    }
+    setMessage(`Archived Run ${result.run_id}.`);
+    await loadModule("backtests");
+  }
+
+  async function archiveRuns(runs) {
+    const archivable = runs.filter((run) => !["created", "running"].includes(run.status) && !run.archived);
+    if (archivable.length === 0) {
+      setMessage("No finished unarchived runs selected.");
+      return;
+    }
+    for (const run of archivable) {
+      await archiveResearchRun(run.id);
+    }
+    if (runDetail && archivable.some((run) => run.id === runDetail.id)) {
+      setRunDetail(null);
+    }
+    setMessage(`Archived ${archivable.length} runs.`);
+    await loadModule("backtests");
   }
 
   async function deleteRuns(runs) {
@@ -451,7 +537,7 @@ function App() {
       setRunDetail(null);
     }
     setMessage(`Deleted ${deletable.length} runs: ${deletedTrials} trials and ${deletedCandidates} candidates removed.`);
-    await refresh();
+    await loadModule("backtests");
   }
 
   function toggleMarket(marketId) {
@@ -466,205 +552,270 @@ function App() {
 
   return (
     <main>
-      <header className="topbar">
+      <header className="topbar app-topbar">
         <div>
           <h1>slrno</h1>
-          <p>Adaptive research, IG-aware costs, and paper-only validation.</p>
+          <p>Trading cockpit, research evidence, and paper-only validation.</p>
         </div>
-        <div className="mode"><ShieldCheck size={18} /> Demo / paper only</div>
+        <div className="mode"><ShieldCheck size={18} /> Live orders locked</div>
       </header>
 
+      <nav className="module-nav" aria-label="Primary">
+        {MODULES.map(([id, label, Icon]) => (
+          <button className={activeModule === id ? "module-tab active" : "module-tab"} key={id} type="button" onClick={() => setActiveModule(id)}>
+            <Icon size={16} /> {label}
+          </button>
+        ))}
+      </nav>
+
       {message && <div className="notice">{message}</div>}
+      {loadingModule && <div className="notice loading">Loading {moduleLabel(loadingModule)}...</div>}
 
-      <section className="lab-shell">
-        <div className="lab-header">
-          <div>
-            <h2><Sparkles size={20} /> Backtesting Lab</h2>
-            <p>Optimizes strategy and risk settings, then ranks results after spread, slippage, funding, and FX assumptions.</p>
-          </div>
-          <div className={`run-state ${researchState.status}`}>
-            <strong>{researchState.status.toUpperCase()}</strong>
-            <span>{researchState.detail}</span>
-          </div>
-        </div>
-        <div className="tabs">
-          {[
-            ["builder", "New Test"],
-            ["results", "Results"],
-            ["candidates", "Candidates"],
-            ["settings", "Settings"],
-          ].map(([id, label]) => (
-            <button className={activeTab === id ? "tab active" : "tab"} key={id} type="button" onClick={() => setActiveTab(id)}>
-              {label}
-            </button>
-          ))}
-        </div>
+      {activeModule === "cockpit" && <CockpitView summary={cockpit} setActiveModule={setActiveModule} />}
 
-        {activeTab === "builder" && (
-          <form onSubmit={submitResearchRun} className="lab-grid">
-            {refinementTemplate && (
-              <section className="lab-section span-2 refinement-panel">
-                <div className="label-row table-heading">
-                  <h3>Template Refinement</h3>
-                  <button type="button" className="ghost" onClick={clearRefinementTemplate}>Clear</button>
-                </div>
-                <div className="status-list">
-                  <div className="status">
-                    <strong>{refinementTemplate.name}</strong>
-                    <span>
-                      {refinementTemplate.market_id} · {strategyFamilyLabel(refinementTemplate.family)} · {normalizeInterval(refinementTemplate.interval)}
-                    </span>
-                    {refinementTemplate.recipe && <small>{refinementTemplate.recipe}</small>}
+      {activeModule === "research" && (
+        <section className="lab-shell">
+          <div className="lab-header">
+            <div>
+              <h2><Sparkles size={20} /> Research Pipeline</h2>
+              <p>Candidate readiness, capital feasibility, validation blockers, and next actions.</p>
+            </div>
+            <button type="button" className="secondary" onClick={() => loadModule("research")}><RefreshCw size={16} /> Refresh</button>
+          </div>
+          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} />
+        </section>
+      )}
+
+      {activeModule === "backtests" && (
+        <>
+          <section className="lab-shell">
+            <div className="lab-header">
+              <div>
+                <h2><BarChart3 size={20} /> Backtests</h2>
+                <p>Build runs, inspect evidence, archive noise, and export bundles for analysis.</p>
+              </div>
+              <div className={`run-state ${researchState.status}`}>
+                <strong>{researchState.status.toUpperCase()}</strong>
+                <span>{researchState.detail}</span>
+              </div>
+            </div>
+            <div className="tabs">
+              {[
+                ["builder", "New Test"],
+                ["results", "Runs"],
+              ].map(([id, label]) => (
+                <button className={activeTab === id ? "tab active" : "tab"} key={id} type="button" onClick={() => setActiveTab(id)}>
+                  {label}
+                </button>
+              ))}
+              <label className="check compact-check">
+                <input type="checkbox" checked={includeArchivedRuns} onChange={(event) => setIncludeArchivedRuns(event.target.checked)} />
+                Include archived
+              </label>
+              <label className="check compact-check">
+                <input type="checkbox" checked={exportIncludeBars} onChange={(event) => setExportIncludeBars(event.target.checked)} />
+                Export bars
+              </label>
+            </div>
+
+            {activeTab === "builder" && (
+              <form onSubmit={submitResearchRun} className="lab-grid">
+                {refinementTemplate && (
+                  <section className="lab-section span-2 refinement-panel">
+                    <div className="label-row table-heading">
+                      <h3>Template Refinement</h3>
+                      <button type="button" className="ghost" onClick={clearRefinementTemplate}>Clear</button>
+                    </div>
+                    <div className="status-list">
+                      <div className="status">
+                        <strong>{refinementTemplate.name}</strong>
+                        <span>{refinementTemplate.market_id} · {strategyFamilyLabel(refinementTemplate.family)} · {normalizeInterval(refinementTemplate.interval)}</span>
+                        {refinementTemplate.recipe && <small>{refinementTemplate.recipe}</small>}
+                      </div>
+                    </div>
+                    <div className="mini-metrics refinement-metrics">
+                      <Metric label="Lookback" value={refinementTemplate.parameters.lookback ?? "-"} />
+                      <Metric label="Threshold" value={`${round(refinementTemplate.parameters.threshold_bps)} bps`} />
+                      <Metric label="Stop" value={`${round(refinementTemplate.parameters.stop_loss_bps)} bps`} />
+                      <Metric label="Take profit" value={`${round(refinementTemplate.parameters.take_profit_bps)} bps`} />
+                      <Metric label="Hold bars" value={refinementTemplate.parameters.max_hold_bars ?? "-"} />
+                      <Metric label="Direction" value={refinementTemplate.parameters.direction ?? "-"} />
+                    </div>
+                    <div className="button-row robustness-actions">
+                      <button type="button" className="secondary" onClick={() => applyRobustnessPreset("focused")}><RefreshCw size={16} /> Same market</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("higher_costs")}>Higher costs</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Cross-market</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("longer_history")}>Longer history</button>
+                    </div>
+                  </section>
+                )}
+                <section className="lab-section span-2">
+                  <h3>Search Mode</h3>
+                  <div className="segmented">
+                    {SEARCH_PRESETS.map((preset) => (
+                      <button type="button" className={researchRun.search_preset === preset.id ? "segment active" : "segment"} key={preset.id} onClick={() => setResearchRun({ ...researchRun, search_preset: preset.id, search_budget: "" })}>
+                        {preset.label}
+                      </button>
+                    ))}
                   </div>
-                </div>
-                <div className="mini-metrics refinement-metrics">
-                  <Metric label="Lookback" value={refinementTemplate.parameters.lookback ?? "-"} />
-                  <Metric label="Threshold" value={`${round(refinementTemplate.parameters.threshold_bps)} bps`} />
-                  <Metric label="Stop" value={`${round(refinementTemplate.parameters.stop_loss_bps)} bps`} />
-                  <Metric label="Take profit" value={`${round(refinementTemplate.parameters.take_profit_bps)} bps`} />
-                  <Metric label="Hold bars" value={refinementTemplate.parameters.max_hold_bars ?? "-"} />
-                  <Metric label="Direction" value={refinementTemplate.parameters.direction ?? "-"} />
-                </div>
-                <div className="button-row robustness-actions">
-                  <button type="button" className="secondary" onClick={() => applyRobustnessPreset("focused")}>
-                    <RefreshCw size={16} /> Same market
-                  </button>
-                  <button type="button" className="ghost" onClick={() => applyRobustnessPreset("higher_costs")}>Higher costs</button>
-                  <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Cross-market</button>
-                  <button type="button" className="ghost" onClick={() => applyRobustnessPreset("longer_history")}>Longer history</button>
-                </div>
-              </section>
+                  <div className="segmented wrap">
+                    {STYLE_OPTIONS.map((style) => (
+                      <button type="button" className={researchRun.trading_style === style.id ? "segment active" : "segment"} key={style.id} onClick={() => setResearchRun({ ...researchRun, trading_style: style.id })}>
+                        {style.label}
+                      </button>
+                    ))}
+                  </div>
+                  {refinementTemplate?.family && (
+                    <div className="refinement-lock">
+                      <span className="badge base">Family locked</span>
+                      <strong>{strategyFamilyLabel(refinementTemplate.family)}</strong>
+                    </div>
+                  )}
+                </section>
+
+                <section className="lab-section span-2">
+                  <h3>Markets</h3>
+                  <div className="market-picker">
+                    {enabledMarkets.map((item) => (
+                      <button type="button" className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"} key={item.market_id} onClick={() => toggleMarket(item.market_id)}>
+                        <strong>{item.market_id}</strong>
+                        <span>{item.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="lab-section">
+                  <h3>Inputs</h3>
+                  <label>Engine</label>
+                  <select value={researchRun.engine} onChange={(event) => setResearchRun({ ...researchRun, engine: event.target.value })}>
+                    {engines.map((engine) => <option value={engine.id} key={engine.id}>{engine.label}</option>)}
+                  </select>
+                  <label>Candle timeframe</label>
+                  <select value={researchRun.interval} onChange={(event) => setResearchRun({ ...researchRun, interval: event.target.value })}>
+                    {CANDLE_INTERVALS.map((interval) => <option value={interval.value} key={interval.value}>{interval.label}</option>)}
+                  </select>
+                  <label>Objective</label>
+                  <select value={researchRun.objective} onChange={(event) => setResearchRun({ ...researchRun, objective: event.target.value })}>
+                    {OBJECTIVES.map((objective) => <option value={objective.id} key={objective.id}>{objective.label}</option>)}
+                  </select>
+                  <label>Risk profile</label>
+                  <select value={researchRun.risk_profile} onChange={(event) => setResearchRun({ ...researchRun, risk_profile: event.target.value })}>
+                    <option value="conservative">Conservative</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="aggressive">Aggressive</option>
+                  </select>
+                  <label>Cost stress</label>
+                  <input value={researchRun.cost_stress_multiplier} onChange={(event) => setResearchRun({ ...researchRun, cost_stress_multiplier: Number(event.target.value) })} type="number" min="1" max="5" step="0.25" />
+                </section>
+
+                <section className="lab-section">
+                  <h3>Window</h3>
+                  <label>Start</label>
+                  <input value={researchRun.start} onChange={(event) => setResearchRun({ ...researchRun, start: event.target.value })} required />
+                  <label>End</label>
+                  <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} required />
+                  <label>Strategy trials / market</label>
+                  <input value={researchRun.search_budget} onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })} placeholder={`${selectedPreset.budget}`} type="number" min="6" max="500" />
+                  <div className="button-row">
+                    <button type="button" className="secondary" onClick={syncCosts}><RefreshCw size={16} /> Sync costs</button>
+                    <button disabled={researchState.status === "running" || activeMarketIds.length === 0}>{researchState.status === "running" ? "Running..." : "Run search"}</button>
+                  </div>
+                  <button type="button" className="ghost" onClick={scheduleResearch}>Save nightly schedule</button>
+                </section>
+
+                <section className="lab-section span-2">
+                  <h3>Cost Profiles</h3>
+                  <div className="cost-grid">
+                    {selectedMarkets.map((item) => <CostProfile key={item.market_id} market={item} profile={costProfiles[item.market_id]} onLoad={() => loadCostProfile(item.market_id)} />)}
+                    {selectedMarkets.length === 0 && <span className="muted">Choose at least one market.</span>}
+                  </div>
+                </section>
+              </form>
             )}
-            <section className="lab-section span-2">
-              <h3>Search Mode</h3>
-              <div className="segmented">
-                {SEARCH_PRESETS.map((preset) => (
-                  <button
-                    type="button"
-                    className={researchRun.search_preset === preset.id ? "segment active" : "segment"}
-                    key={preset.id}
-                    onClick={() => setResearchRun({ ...researchRun, search_preset: preset.id, search_budget: "" })}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-              <div className="segmented wrap">
-                {STYLE_OPTIONS.map((style) => (
-                  <button
-                    type="button"
-                    className={researchRun.trading_style === style.id ? "segment active" : "segment"}
-                    key={style.id}
-                    onClick={() => setResearchRun({ ...researchRun, trading_style: style.id })}
-                  >
-                    {style.label}
-                  </button>
-                ))}
-              </div>
-              {refinementTemplate?.family && (
-                <div className="refinement-lock">
-                  <span className="badge base">Family locked</span>
-                  <strong>{strategyFamilyLabel(refinementTemplate.family)}</strong>
-                </div>
-              )}
-            </section>
 
-            <section className="lab-section span-2">
-              <h3>Markets</h3>
-              <div className="market-picker">
-                {enabledMarkets.map((item) => (
-                  <button
-                    type="button"
-                    className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"}
-                    key={item.market_id}
-                    onClick={() => toggleMarket(item.market_id)}
-                  >
-                    <strong>{item.market_id}</strong>
-                    <span>{item.name}</span>
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            <section className="lab-section">
-              <h3>Inputs</h3>
-              <label>Engine</label>
-              <select value={researchRun.engine} onChange={(event) => setResearchRun({ ...researchRun, engine: event.target.value })}>
-                {engines.map((engine) => <option value={engine.id} key={engine.id}>{engine.label}</option>)}
-              </select>
-              <label>Candle timeframe</label>
-              <select value={researchRun.interval} onChange={(event) => setResearchRun({ ...researchRun, interval: event.target.value })}>
-                {CANDLE_INTERVALS.map((interval) => <option value={interval.value} key={interval.value}>{interval.label}</option>)}
-              </select>
-              <label>Objective</label>
-              <select value={researchRun.objective} onChange={(event) => setResearchRun({ ...researchRun, objective: event.target.value })}>
-                {OBJECTIVES.map((objective) => <option value={objective.id} key={objective.id}>{objective.label}</option>)}
-              </select>
-              <label>Risk profile</label>
-              <select value={researchRun.risk_profile} onChange={(event) => setResearchRun({ ...researchRun, risk_profile: event.target.value })}>
-                <option value="conservative">Conservative</option>
-                <option value="balanced">Balanced</option>
-                <option value="aggressive">Aggressive</option>
-              </select>
-              <label>Cost stress</label>
-              <input
-                value={researchRun.cost_stress_multiplier}
-                onChange={(event) => setResearchRun({ ...researchRun, cost_stress_multiplier: Number(event.target.value) })}
-                type="number"
-                min="1"
-                max="5"
-                step="0.25"
+            {activeTab === "results" && (
+              <ResultsView
+                runDetail={runDetail}
+                researchRuns={researchRuns}
+                loadRun={async (id) => setRunDetail(await getResearchRun(id))}
+                deleteRun={deleteRun}
+                archiveRun={archiveRun}
+                archiveRuns={archiveRuns}
+                deleteRuns={deleteRuns}
+                onRefineTemplate={refineTemplate}
+                exportIncludeBars={exportIncludeBars}
               />
-            </section>
+            )}
+          </section>
 
-            <section className="lab-section">
-              <h3>Window</h3>
-              <label>Start</label>
-              <input value={researchRun.start} onChange={(event) => setResearchRun({ ...researchRun, start: event.target.value })} required />
-              <label>End</label>
-              <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} required />
-              <label>Strategy trials / market</label>
-              <input
-                value={researchRun.search_budget}
-                onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })}
-                placeholder={`${selectedPreset.budget}`}
-                type="number"
-                min="6"
-                max="500"
-              />
-              <div className="button-row">
-                <button type="button" className="secondary" onClick={syncCosts}><RefreshCw size={16} /> Sync costs</button>
-                <button disabled={researchState.status === "running" || activeMarketIds.length === 0}>{researchState.status === "running" ? "Running..." : "Run search"}</button>
-              </div>
-              <button type="button" className="ghost" onClick={scheduleResearch}>Save nightly schedule</button>
-            </section>
-
-            <section className="lab-section span-2">
-              <h3>Cost Profiles</h3>
-              <div className="cost-grid">
-                {selectedMarkets.map((item) => (
-                  <CostProfile key={item.market_id} market={item} profile={costProfiles[item.market_id]} onLoad={() => loadCostProfile(item.market_id)} />
+          <section className="grid two lower-grid">
+            <Panel icon={<Plug />} title="Market Plugins">
+              <div className="plugin-list">
+                {plugins.slice(0, 8).map((plugin) => (
+                  <div className="plugin" key={plugin.plugin_id}>
+                    <div>
+                      <strong>{plugin.name}</strong>
+                      <span>{plugin.ig_name} · {plugin.asset_class}</span>
+                      <small>{plugin.ig_search_terms.join(", ")} · est {round(plugin.estimated_spread_bps)} / {round(plugin.estimated_slippage_bps)} bps</small>
+                    </div>
+                    <button type="button" onClick={() => installPlugin(plugin.plugin_id)}>Install</button>
+                  </div>
                 ))}
-                {selectedMarkets.length === 0 && <span className="muted">Choose at least one market.</span>}
               </div>
-            </section>
-          </form>
-        )}
+            </Panel>
 
-        {activeTab === "results" && (
-          <ResultsView
-            runDetail={runDetail}
-            researchRuns={researchRuns}
-            loadRun={async (id) => setRunDetail(await getResearchRun(id))}
-            deleteRun={deleteRun}
-            deleteRuns={deleteRuns}
-            onRefineTemplate={refineTemplate}
-          />
-        )}
+            <Panel icon={<Database />} title="Market Registry">
+              <form onSubmit={submitMarket} className="compact">
+                <input value={market.market_id} onChange={(event) => setMarket({ ...market, market_id: event.target.value })} placeholder="Market ID" required />
+                <input value={market.name} onChange={(event) => setMarket({ ...market, name: event.target.value })} placeholder="Name" required />
+                <input value={market.asset_class} onChange={(event) => setMarket({ ...market, asset_class: event.target.value })} placeholder="Asset class" required />
+                <input value={market.eodhd_symbol} onChange={(event) => setMarket({ ...market, eodhd_symbol: event.target.value })} placeholder="EODHD symbol" required />
+                <input value={market.ig_epic} onChange={(event) => setMarket({ ...market, ig_epic: event.target.value })} placeholder="IG EPIC" />
+                <input value={market.ig_name} onChange={(event) => setMarket({ ...market, ig_name: event.target.value })} placeholder="IG market name" />
+                <input value={market.ig_search_terms} onChange={(event) => setMarket({ ...market, ig_search_terms: event.target.value })} placeholder="IG search terms" />
+                <input value={market.default_timeframe} onChange={(event) => setMarket({ ...market, default_timeframe: event.target.value })} placeholder="Default timeframe" />
+                <input value={market.spread_bps} onChange={(event) => setMarket({ ...market, spread_bps: Number(event.target.value) })} type="number" min="0" step="0.1" placeholder="Spread bps" />
+                <input value={market.slippage_bps} onChange={(event) => setMarket({ ...market, slippage_bps: Number(event.target.value) })} type="number" min="0" step="0.1" placeholder="Slippage bps" />
+                <input value={market.min_backtest_bars} onChange={(event) => setMarket({ ...market, min_backtest_bars: Number(event.target.value) })} type="number" min="2" step="1" placeholder="Min bars" />
+                <label className="check"><input type="checkbox" checked={market.enabled} onChange={(event) => setMarket({ ...market, enabled: event.target.checked })} />Enabled</label>
+                <button>Save market</button>
+              </form>
+            </Panel>
 
-        {activeTab === "candidates" && <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} />}
+            <Panel icon={<BarChart3 />} title="IG Spread Betting Engines">
+              <div className="engine-list">
+                {spreadBetEngines.map((engine) => (
+                  <div className="engine" key={engine.engine_id}>
+                    <div>
+                      <strong>{engine.label}</strong>
+                      <span>{engine.instrument_types.join(", ")}</span>
+                      <small>{engine.notes}</small>
+                    </div>
+                    <span className={`badge ${engine.eligible_for_adaptive_backtest ? "good" : "base"}`}>{engine.eligible_for_adaptive_backtest ? "Backtest-ready" : "Needs product model"}</span>
+                  </div>
+                ))}
+                {spreadBetEngines.length === 0 && <span className="muted">Engine registry unavailable.</span>}
+              </div>
+            </Panel>
+          </section>
 
-        {activeTab === "settings" && (
+          <MarketTable markets={markets} />
+        </>
+      )}
+
+      {activeModule === "paper" && <PaperView summary={paper} />}
+      {activeModule === "broker" && <BrokerView summary={broker} markets={markets} />}
+      {activeModule === "risk" && <RiskView summary={risk} />}
+
+      {activeModule === "settings" && (
+        <section className="lab-shell">
+          <div className="lab-header">
+            <div>
+              <h2><SlidersHorizontal size={20} /> Settings</h2>
+              <p>Provider credentials, connection state, and cache maintenance.</p>
+            </div>
+          </div>
           <SettingsView
             status={status}
             eodhdKey={eodhdKey}
@@ -678,92 +829,242 @@ function App() {
             cacheStatus={cacheStatus}
             pruneCache={pruneCache}
           />
-        )}
-      </section>
-
-      <section className="grid two lower-grid">
-        <Panel icon={<Plug />} title="Market Plugins">
-          <div className="plugin-list">
-            {plugins.slice(0, 8).map((plugin) => (
-              <div className="plugin" key={plugin.plugin_id}>
-                <div>
-                  <strong>{plugin.name}</strong>
-                  <span>{plugin.ig_name} · {plugin.asset_class}</span>
-                  <small>{plugin.ig_search_terms.join(", ")} · est {round(plugin.estimated_spread_bps)} / {round(plugin.estimated_slippage_bps)} bps</small>
-                </div>
-                <button type="button" onClick={() => installPlugin(plugin.plugin_id)}>Install</button>
-              </div>
-            ))}
-          </div>
-        </Panel>
-
-        <Panel icon={<Database />} title="Market Registry">
-          <form onSubmit={submitMarket} className="compact">
-            <input value={market.market_id} onChange={(event) => setMarket({ ...market, market_id: event.target.value })} placeholder="Market ID" required />
-            <input value={market.name} onChange={(event) => setMarket({ ...market, name: event.target.value })} placeholder="Name" required />
-            <input value={market.asset_class} onChange={(event) => setMarket({ ...market, asset_class: event.target.value })} placeholder="Asset class" required />
-            <input value={market.eodhd_symbol} onChange={(event) => setMarket({ ...market, eodhd_symbol: event.target.value })} placeholder="EODHD symbol" required />
-            <input value={market.ig_epic} onChange={(event) => setMarket({ ...market, ig_epic: event.target.value })} placeholder="IG EPIC" />
-            <input value={market.ig_name} onChange={(event) => setMarket({ ...market, ig_name: event.target.value })} placeholder="IG market name" />
-            <input value={market.ig_search_terms} onChange={(event) => setMarket({ ...market, ig_search_terms: event.target.value })} placeholder="IG search terms" />
-            <input value={market.default_timeframe} onChange={(event) => setMarket({ ...market, default_timeframe: event.target.value })} placeholder="Default timeframe" />
-            <input value={market.spread_bps} onChange={(event) => setMarket({ ...market, spread_bps: Number(event.target.value) })} type="number" min="0" step="0.1" placeholder="Spread bps" />
-            <input value={market.slippage_bps} onChange={(event) => setMarket({ ...market, slippage_bps: Number(event.target.value) })} type="number" min="0" step="0.1" placeholder="Slippage bps" />
-            <input value={market.min_backtest_bars} onChange={(event) => setMarket({ ...market, min_backtest_bars: Number(event.target.value) })} type="number" min="2" step="1" placeholder="Min bars" />
-            <label className="check">
-              <input type="checkbox" checked={market.enabled} onChange={(event) => setMarket({ ...market, enabled: event.target.checked })} />
-              Enabled
-            </label>
-            <button>Save market</button>
-          </form>
-        </Panel>
-
-        <Panel icon={<BarChart3 />} title="IG Spread Betting Engines">
-          <div className="engine-list">
-            {spreadBetEngines.map((engine) => (
-              <div className="engine" key={engine.engine_id}>
-                <div>
-                  <strong>{engine.label}</strong>
-                  <span>{engine.instrument_types.join(", ")}</span>
-                  <small>{engine.notes}</small>
-                </div>
-                <span className={`badge ${engine.eligible_for_adaptive_backtest ? "good" : "base"}`}>
-                  {engine.eligible_for_adaptive_backtest ? "Backtest-ready" : "Needs product model"}
-                </span>
-              </div>
-            ))}
-            {spreadBetEngines.length === 0 && <span className="muted">Engine registry unavailable.</span>}
-          </div>
-        </Panel>
-      </section>
-
-      <section className="market-table">
-        <h2><SlidersHorizontal size={20} /> Markets</h2>
-        <table>
-          <thead>
-            <tr><th>ID</th><th>Name</th><th>Class</th><th>EODHD</th><th>IG market</th><th>EPIC</th><th>Costs</th><th>Enabled</th></tr>
-          </thead>
-          <tbody>
-            {markets.map((item) => (
-              <tr key={item.market_id}>
-                <td>{item.market_id}</td>
-                <td>{item.name}</td>
-                <td>{item.asset_class}</td>
-                <td>{item.eodhd_symbol}</td>
-                <td>{item.ig_name || "search required"}</td>
-                <td>{item.ig_epic || "manual"}</td>
-                <td>{normalizeInterval(item.default_timeframe)} · est {round(item.estimated_spread_bps ?? item.spread_bps)} / {round(item.estimated_slippage_bps ?? item.slippage_bps)} bps</td>
-                <td>{item.enabled ? "Yes" : "No"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+        </section>
+      )}
     </main>
   );
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns, onRefineTemplate }) {
+function CockpitView({ summary, setActiveModule }) {
+  const runs = summary?.runs ?? {};
+  const latest = runs.latest;
+  const risk = summary?.risk ?? {};
+  return (
+    <section className="lab-shell cockpit">
+      <div className="lab-header">
+        <div>
+          <h2><Home size={20} /> Trading Cockpit</h2>
+          <p>Account mode, system health, research state, and risk locks.</p>
+        </div>
+        <span className="mode"><LockKeyhole size={16} /> {summary?.live_ordering_enabled ? "Live enabled" : "Live disabled"}</span>
+      </div>
+      <div className="metrics four">
+        <Metric label="Mode" value={summary?.mode ?? "paper"} />
+        <Metric label="Visible runs" value={runs.total_visible ?? 0} />
+        <Metric label="Running" value={runs.running ?? 0} />
+        <Metric label="Risk/trade" value={percent(risk.risk_per_trade_fraction)} />
+      </div>
+      <div className="grid two lower-grid">
+        <Panel icon={<Activity />} title="Next Actions">
+          <div className="status-list">
+            {(summary?.next_actions ?? []).map((item) => (
+              <button className="status action-status" type="button" key={item.kind} onClick={() => setActiveModule(item.kind === "no_runs" ? "backtests" : "research")}>
+                <strong>{item.label}</strong>
+                <span>{item.detail}</span>
+              </button>
+            ))}
+          </div>
+        </Panel>
+        <Panel icon={<ShieldCheck />} title="Latest Research">
+          {latest ? (
+            <div className="status-list">
+              <div className="status">
+                <strong>Run {latest.id} · {latest.status}</strong>
+                <span>{latest.market_id} · {latest.trial_count} trials · best {round(latest.best_score)}</span>
+              </div>
+              <button className="secondary" type="button" onClick={() => setActiveModule("backtests")}>Open Backtests</button>
+            </div>
+          ) : <span className="muted">No research runs yet.</span>}
+        </Panel>
+      </div>
+    </section>
+  );
+}
+
+function PaperView({ summary }) {
+  return (
+    <section className="lab-shell">
+      <div className="lab-header">
+        <div>
+          <h2><LineChart size={20} /> Paper Trading</h2>
+          <p>Approved candidates will land here for 30-day paper review.</p>
+        </div>
+        <span className="mode"><ShieldCheck size={16} /> {summary?.status ?? "not started"}</span>
+      </div>
+      <div className="metrics four">
+        <Metric label="Tracked" value={(summary?.tracked_candidates ?? []).length} />
+        <Metric label="Order mode" value={summary?.live_ordering_enabled ? "live" : "disabled"} />
+        <Metric label="Protocol" value="30 days" />
+        <Metric label="Review" value="paper only" />
+      </div>
+    </section>
+  );
+}
+
+function BrokerView({ summary, markets }) {
+  const defaultMarket = markets[0]?.market_id ?? "NAS100";
+  const [previewForm, setPreviewForm] = React.useState({
+    market_id: defaultMarket,
+    side: "BUY",
+    stake: "1",
+    account_size: "500",
+    entry_price: "",
+    stop: "",
+    limit: "",
+  });
+  const [preview, setPreview] = React.useState(null);
+  const [previewError, setPreviewError] = React.useState("");
+
+  React.useEffect(() => {
+    if (!previewForm.market_id && defaultMarket) {
+      setPreviewForm((current) => ({ ...current, market_id: defaultMarket }));
+    }
+  }, [defaultMarket, previewForm.market_id]);
+
+  async function submitPreview(event) {
+    event.preventDefault();
+    setPreviewError("");
+    try {
+      const payload = {
+        ...previewForm,
+        stake: Number(previewForm.stake),
+        account_size: Number(previewForm.account_size),
+        entry_price: optionalNumber(previewForm.entry_price),
+        stop: optionalNumber(previewForm.stop),
+        limit: optionalNumber(previewForm.limit),
+      };
+      setPreview(await previewBrokerOrder(payload));
+    } catch (error) {
+      setPreviewError(error.message);
+    }
+  }
+
+  return (
+    <section className="lab-shell">
+      <div className="lab-header">
+        <div>
+          <h2><Wallet size={20} /> Broker</h2>
+          <p>IG demo connectivity, market rules, and read-only broker state.</p>
+        </div>
+        <span className="mode"><LockKeyhole size={16} /> {summary?.order_placement ?? "disabled"}</span>
+      </div>
+      <div className="grid two">
+        <Panel icon={<Activity />} title="Connection">
+          <div className="status-list">
+            {(summary?.providers ?? []).map((item) => (
+              <div className="status" key={item.provider}>
+                <strong>{item.provider.toUpperCase()}</strong>
+                <span>{item.configured ? "saved" : "not saved"} · {item.last_status}</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+        <Panel icon={<Database />} title="Rules Coverage">
+          <div className="metrics four">
+            <Metric label="Markets" value={markets.length} />
+            <Metric label="EPICs" value={markets.filter((item) => item.ig_epic).length} />
+            <Metric label="Enabled" value={markets.filter((item) => item.enabled).length} />
+            <Metric label="Execution" value="off" />
+          </div>
+        </Panel>
+      </div>
+      <div className="grid two lower-grid">
+        <Panel icon={<Wallet />} title="Safe Order Preview">
+          <form onSubmit={submitPreview} className="compact">
+            <select value={previewForm.market_id} onChange={(event) => setPreviewForm({ ...previewForm, market_id: event.target.value })}>
+              {markets.map((item) => <option key={item.market_id} value={item.market_id}>{item.market_id} · {item.name}</option>)}
+            </select>
+            <select value={previewForm.side} onChange={(event) => setPreviewForm({ ...previewForm, side: event.target.value })}>
+              <option value="BUY">Buy</option>
+              <option value="SELL">Sell</option>
+            </select>
+            <input value={previewForm.stake} onChange={(event) => setPreviewForm({ ...previewForm, stake: event.target.value })} type="number" min="0.01" step="0.01" placeholder="Stake" />
+            <input value={previewForm.account_size} onChange={(event) => setPreviewForm({ ...previewForm, account_size: event.target.value })} type="number" min="1" step="1" placeholder="Account size" />
+            <input value={previewForm.entry_price} onChange={(event) => setPreviewForm({ ...previewForm, entry_price: event.target.value })} type="number" min="0" step="0.0001" placeholder="Entry price optional" />
+            <input value={previewForm.stop} onChange={(event) => setPreviewForm({ ...previewForm, stop: event.target.value })} type="number" min="0" step="0.0001" placeholder="Stop" />
+            <input value={previewForm.limit} onChange={(event) => setPreviewForm({ ...previewForm, limit: event.target.value })} type="number" min="0" step="0.0001" placeholder="Limit optional" />
+            <button>Preview only</button>
+          </form>
+          {previewError && <span className="muted">{previewError}</span>}
+        </Panel>
+        <Panel icon={<LockKeyhole />} title="Preview Result">
+          {preview ? (
+            <>
+              <div className="metrics four">
+                <Metric label="Stake" value={preview.effective_stake} />
+                <Metric label="Entry" value={preview.entry_price} />
+                <Metric label="Margin" value={formatMoney(preview.estimated_margin)} />
+                <Metric label="Risk" value={formatMoney(preview.planned_risk)} />
+              </div>
+              <div className="warning-row">
+                {(preview.rule_violations ?? []).length
+                  ? preview.rule_violations.map((warning) => <span className="warning-chip" key={warning}>{humanWarnings([warning])[0]}</span>)
+                  : <span className="badge good">Preview clear</span>}
+              </div>
+              <small className="muted">Live order placement is disabled for this preview.</small>
+            </>
+          ) : (
+            <span className="muted">Create a preview to check min stake, margin, stop distance, and risk before paper review.</span>
+          )}
+        </Panel>
+      </div>
+      <MarketTable markets={markets} />
+    </section>
+  );
+}
+
+function RiskView({ summary }) {
+  return (
+    <section className="lab-shell">
+      <div className="lab-header">
+        <div>
+          <h2><LockKeyhole size={20} /> Risk</h2>
+          <p>Capital scenarios, loss limits, and hard execution locks.</p>
+        </div>
+        <span className="mode"><ShieldCheck size={16} /> Kill switch on</span>
+      </div>
+      <div className="metrics four">
+        <Metric label="Scenarios" value={(summary?.capital_scenarios ?? []).map(formatMoney).join(" / ")} />
+        <Metric label="Risk/trade" value={percent(summary?.risk_per_trade_fraction)} />
+        <Metric label="Daily stop" value={percent(summary?.daily_loss_fraction)} />
+        <Metric label="Live orders" value={summary?.live_ordering_enabled ? "on" : "off"} />
+      </div>
+    </section>
+  );
+}
+
+function MarketTable({ markets }) {
+  return (
+    <section className="market-table">
+      <h2><SlidersHorizontal size={20} /> Markets</h2>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Name</th><th>Class</th><th>EODHD</th><th>IG market</th><th>EPIC</th><th>Costs</th><th>Enabled</th></tr>
+        </thead>
+        <tbody>
+          {markets.map((item) => (
+            <tr key={item.market_id}>
+              <td>{item.market_id}</td>
+              <td>{item.name}</td>
+              <td>{item.asset_class}</td>
+              <td>{item.eodhd_symbol}</td>
+              <td>{item.ig_name || "search required"}</td>
+              <td>{item.ig_epic || "manual"}</td>
+              <td>{normalizeInterval(item.default_timeframe)} · est {round(item.estimated_spread_bps ?? item.spread_bps)} / {round(item.estimated_slippage_bps ?? item.slippage_bps)} bps</td>
+              <td>{item.enabled ? "Yes" : "No"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+function moduleLabel(id) {
+  return MODULES.find((item) => item[0] === id)?.[1] ?? id;
+}
+
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, exportIncludeBars }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
@@ -818,7 +1119,10 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns, 
             <button type="button" className="ghost" onClick={selectVisibleRuns} disabled={visibleDeletableRuns.length === 0}>Select visible</button>
             <button type="button" className="ghost" onClick={selectNoisyRuns} disabled={visibleNoisyRuns.length === 0}>Select noisy</button>
             <button type="button" className="ghost" onClick={() => setSelectedRunIds([])} disabled={selectedRunIds.length === 0}>Clear</button>
-            <button type="button" className="secondary" onClick={() => deleteRuns(selectedRuns)} disabled={selectedRuns.length === 0}>
+            <button type="button" className="secondary" onClick={() => archiveRuns(selectedRuns)} disabled={selectedRuns.length === 0}>
+              Archive selected ({selectedRuns.length})
+            </button>
+            <button type="button" className="ghost" onClick={() => deleteRuns(selectedRuns)} disabled={selectedRuns.length === 0}>
               Delete selected ({selectedRuns.length})
             </button>
             {researchRuns.length > 18 && (
@@ -852,6 +1156,22 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns, 
               >
                 <Trash2 size={16} />
               </button>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => archiveRun(run)}
+                disabled={["created", "running"].includes(run.status) || run.archived}
+                title={`Archive Run ${run.id}`}
+              >
+                <Archive size={16} />
+              </button>
+              <a
+                className="icon-button"
+                href={researchRunExportUrl(run.id, exportIncludeBars)}
+                title={`Download evidence bundle for Run ${run.id}`}
+              >
+                <Download size={16} />
+              </a>
             </div>
           ))}
           {researchRuns.length === 0 && <span className="muted">No runs yet.</span>}
@@ -879,6 +1199,25 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns, 
               </div>
             ))}
             {marketStatuses.length === 0 && runDetail?.error && <span className="muted">{runDetail.error}</span>}
+          </div>
+        </section>
+      )}
+      {runDetail && (
+        <section className="lab-section span-2">
+          <div className="label-row table-heading">
+            <h3>Evidence Bundle</h3>
+            <a className="secondary download-link" href={researchRunExportUrl(runDetail.id, exportIncludeBars)}>
+              <Download size={16} /> Download Run {runDetail.id}
+            </a>
+          </div>
+          <div className="status-list">
+            {(runDetail.bar_snapshots ?? []).map((snapshot) => (
+              <div className="status compact-status" key={`${snapshot.market_id}-${snapshot.interval}`}>
+                <strong>{snapshot.market_id} · {snapshot.interval}</strong>
+                <span>{snapshot.bar_count} exact bars · {String(snapshot.sha256).slice(0, 12)}</span>
+              </div>
+            ))}
+            {(runDetail.bar_snapshots ?? []).length === 0 && <span className="muted">This older run has no exact saved bar snapshot.</span>}
           </div>
         </section>
       )}
@@ -948,6 +1287,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns, 
 function TrialCard({ trial, onRefineTemplate }) {
   const backtest = trial.backtest ?? {};
   const warnings = humanWarnings(trial.warnings);
+  const capital = accountFeasibility(trial.capital_scenarios, 500);
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -969,6 +1309,7 @@ function TrialCard({ trial, onRefineTemplate }) {
         </div>
       </div>
       <div className="trial-metrics">
+        <Metric label="£500 fit" value={capital} />
         <Metric label="Daily Sharpe" value={round(backtest.daily_pnl_sharpe)} />
         <Metric label="Days" value={backtest.sharpe_observations ?? 0} />
         <Metric label="DSR" value={percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
@@ -1084,6 +1425,7 @@ function CandidateView({ candidates, critique, onRefineTemplate }) {
 function CandidateCard({ candidate, onRefineTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssues(readiness);
+  const capital = accountFeasibility(candidate.capital_scenarios, 500);
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -1110,6 +1452,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         </button>
       </div>
       <div className="mini-metrics">
+        <Metric label="£500 fit" value={capital} />
         <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
         <Metric label="Sharpe days" value={candidate.audit?.backtest?.sharpe_observations ?? 0} />
         <Metric label="Bar Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
@@ -1460,6 +1803,22 @@ function nextActionLabel(action) {
   }[action] ?? "Next: research review.";
 }
 
+function accountFeasibility(scenarios = [], accountSize = 500) {
+  const scenario = (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
+  if (!scenario) {
+    return "Unknown";
+  }
+  return scenario.feasible ? "OK" : "Blocked";
+}
+
+function optionalNumber(value) {
+  if (value === "" || value === null || value === undefined) {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 function humanWarnings(warnings = []) {
   const labels = {
     too_few_trades: "Too few trades",
@@ -1488,6 +1847,20 @@ function humanWarnings(warnings = []) {
     isolated_parameter_peak: "Isolated parameter peak",
     costs_small_vs_turnover: "Costs small vs turnover",
     multiple_testing_haircut: "Multiple-testing haircut",
+    below_ig_min_deal_size: "Below IG min stake",
+    risk_budget_exceeded: "Risk budget exceeded",
+    margin_too_large: "Margin too large",
+    insufficient_account_for_margin: "Insufficient margin",
+    stop_required_for_risk_preview: "Stop required",
+    stop_not_below_entry: "Stop must be below entry",
+    stop_not_above_entry: "Stop must be above entry",
+    stop_distance_below_ig_minimum: "Stop below IG minimum",
+    limit_not_above_entry: "Limit must be above entry",
+    limit_not_below_entry: "Limit must be below entry",
+    limit_distance_below_ig_minimum: "Limit below IG minimum",
+    stake_must_be_positive: "Stake must be positive",
+    missing_price_or_stake: "Missing price or stake",
+    invalid_side: "Invalid side",
   };
   return (warnings ?? []).map((warning) => labels[warning] ?? warning);
 }
