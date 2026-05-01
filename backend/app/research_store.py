@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import app_home
 from .ig_costs import IGCostProfile
+from .promotion_readiness import MOVE_FORWARD_TIERS, gate_promotion_tier, promotion_readiness, readiness_warnings
 from .research_lab import CandidateEvaluation
 
 
@@ -138,6 +139,7 @@ class ResearchStore:
         parameters = dict(evaluation.candidate.parameters)
         backtest = _compact_backtest(asdict(evaluation.backtest))
         folds = [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results]
+        promotion_tier = _evaluation_tier(evaluation)
         costs = {
             "cost_confidence": evaluation.backtest.cost_confidence,
             "estimated_spread_bps": evaluation.backtest.estimated_spread_bps,
@@ -174,7 +176,7 @@ class ResearchStore:
                 (
                     run_id,
                     evaluation.candidate.name,
-                    int(evaluation.passed),
+                    int(promotion_tier in MOVE_FORWARD_TIERS),
                     evaluation.robustness_score,
                     json.dumps(asdict(evaluation.metrics), sort_keys=True),
                     json.dumps(list(evaluation.warnings), sort_keys=True),
@@ -185,7 +187,7 @@ class ResearchStore:
                     json.dumps(folds, sort_keys=True),
                     json.dumps(costs, sort_keys=True),
                     json.dumps(list(evaluation.candidate.module_stack), sort_keys=True),
-                    _evaluation_tier(evaluation),
+                    promotion_tier,
                 ),
             )
 
@@ -380,20 +382,22 @@ class ResearchStore:
                 """,
                 params,
             ).fetchall()
-        candidates = [
-            {
-                "id": row[0],
-                "run_id": row[1],
-                "strategy_name": row[2],
-                "market_id": row[3],
-                "robustness_score": row[4],
-                "research_only": bool(row[5]),
-                "audit": _compact_audit(json.loads(row[6])),
-                "created_at": row[7],
-                "promotion_tier": row[8],
-            }
-            for row in rows
-        ]
+        candidates = []
+        for row in rows:
+            audit = _compact_audit(json.loads(row[6]))
+            candidates.append(
+                {
+                    "id": row[0],
+                    "run_id": row[1],
+                    "strategy_name": row[2],
+                    "market_id": row[3],
+                    "robustness_score": row[4],
+                    "research_only": bool(row[5]),
+                    "audit": audit,
+                    "created_at": row[7],
+                    "promotion_tier": str(audit.get("promotion_tier") or row[8]),
+                }
+            )
         return self._include_trial_research_leads(candidates, run_id)
 
     def get_candidate(self, candidate_id: int) -> dict[str, object] | None:
@@ -412,6 +416,7 @@ class ResearchStore:
             ).fetchone()
         if row is None:
             return None
+        audit = _compact_audit(json.loads(row[6]))
         return {
             "id": row[0],
             "run_id": row[1],
@@ -419,9 +424,9 @@ class ResearchStore:
             "market_id": row[3],
             "robustness_score": row[4],
             "research_only": bool(row[5]),
-            "audit": _compact_audit(json.loads(row[6])),
+            "audit": audit,
             "created_at": row[7],
-            "promotion_tier": row[8],
+            "promotion_tier": str(audit.get("promotion_tier") or row[8]),
         }
 
     def _include_trial_research_leads(self, candidates: list[dict[str, object]], run_id: int | None) -> list[dict[str, object]]:
@@ -492,22 +497,34 @@ class ResearchStore:
 
 
 def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
+    parameters = evaluation.candidate.parameters
     backtest = _normalized_backtest_payload(asdict(evaluation.backtest), evaluation.candidate.parameters)
+    warnings = _readiness_augmented_warnings(backtest, evaluation.warnings, parameters)
+    readiness = promotion_readiness(backtest, warnings, parameters)
+    promotion_tier = gate_promotion_tier(_raw_evaluation_tier(evaluation), readiness)
     return {
         "candidate": _compact_candidate(asdict(evaluation.candidate)),
         "metrics": asdict(evaluation.metrics),
         "backtest": _compact_backtest(backtest),
         "fold_results": [_compact_backtest(asdict(fold)) for fold in evaluation.fold_results],
-        "warnings": list(evaluation.warnings),
+        "warnings": warnings,
         "research_only": evaluation.research_only,
-        "promotion_tier": _evaluation_tier(evaluation),
+        "promotion_tier": promotion_tier,
+        "promotion_readiness": readiness,
     }
 
 
-def _evaluation_tier(evaluation: CandidateEvaluation) -> str:
+def _raw_evaluation_tier(evaluation: CandidateEvaluation) -> str:
     if evaluation.promotion_tier != "reject" or not evaluation.passed:
         return evaluation.promotion_tier
     return "paper_candidate"
+
+
+def _evaluation_tier(evaluation: CandidateEvaluation) -> str:
+    parameters = evaluation.candidate.parameters
+    backtest = _normalized_backtest_payload(asdict(evaluation.backtest), parameters)
+    warnings = _readiness_augmented_warnings(backtest, evaluation.warnings, parameters)
+    return gate_promotion_tier(_raw_evaluation_tier(evaluation), promotion_readiness(backtest, warnings, parameters))
 
 
 def _is_material_watchlist_lead(evaluation: CandidateEvaluation) -> bool:
@@ -555,6 +572,16 @@ def _normalized_warnings(warnings: object, backtest: dict[str, object]) -> list[
     return list(dict.fromkeys(output))
 
 
+def _readiness_augmented_warnings(
+    backtest: dict[str, object],
+    warnings: object,
+    parameters: dict[str, object] | None = None,
+) -> list[str]:
+    normalized = _normalized_warnings(warnings, backtest)
+    readiness = promotion_readiness(backtest, normalized, parameters or {})
+    return list(dict.fromkeys(normalized + readiness_warnings(readiness)))
+
+
 def _candidate_from_trial_lead(trial: dict[str, object]) -> dict[str, object]:
     tier = str(trial.get("promotion_tier") or "reject")
     if tier == "reject":
@@ -595,6 +622,8 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
     parameters = json.loads(row[9])
     costs = json.loads(row[12])
     backtest = _normalized_backtest_payload(json.loads(row[10]), parameters, costs)
+    warnings = _readiness_augmented_warnings(backtest, json.loads(row[6]), parameters)
+    readiness = promotion_readiness(backtest, warnings, parameters)
     return {
         "id": row[0],
         "run_id": row[1],
@@ -602,7 +631,7 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
         "passed": bool(row[3]),
         "robustness_score": row[4],
         "metrics": json.loads(row[5]),
-        "warnings": _normalized_warnings(json.loads(row[6]), backtest),
+        "warnings": warnings,
         "strategy_family": row[7],
         "style": row[8],
         "parameters": parameters,
@@ -610,7 +639,8 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
         "folds": json.loads(row[11]),
         "costs": costs,
         "tags": json.loads(row[13]),
-        "promotion_tier": row[14],
+        "promotion_tier": gate_promotion_tier(str(row[14]), readiness),
+        "promotion_readiness": readiness,
     }
 
 
@@ -626,7 +656,11 @@ def _compact_audit(audit: dict[str, object]) -> dict[str, object]:
     if isinstance(backtest, dict):
         backtest = _normalized_backtest_payload(backtest, parameters)
         audit["backtest"] = backtest
-        audit["warnings"] = _normalized_warnings(audit.get("warnings") or [], backtest)
+        warnings = _readiness_augmented_warnings(backtest, audit.get("warnings") or [], parameters)
+        readiness = promotion_readiness(backtest, warnings, parameters)
+        audit["warnings"] = warnings
+        audit["promotion_readiness"] = readiness
+        audit["promotion_tier"] = gate_promotion_tier(str(audit.get("promotion_tier") or "reject"), readiness)
     return audit
 
 
@@ -650,6 +684,10 @@ def _normalized_backtest_payload(
             fallback = _first_positive_number(parameters.get(key), costs.get(key))
             if fallback > 0.0:
                 payload[key] = fallback
+    if not payload.get("cost_confidence"):
+        fallback_confidence = costs.get("cost_confidence") or parameters.get("cost_confidence")
+        if fallback_confidence:
+            payload["cost_confidence"] = str(fallback_confidence)
 
     net_profit = number("net_profit")
     gross_profit = number("gross_profit")

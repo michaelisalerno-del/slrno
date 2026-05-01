@@ -36,8 +36,10 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     assert "expectancy_per_trade" in trials[0]["costs"]
     assert "estimated_slippage_bps" in trials[0]["backtest"]
     assert trials[1]["promotion_tier"] == "paper_candidate"
+    assert trials[1]["promotion_readiness"]["status"] == "ready_for_paper"
     assert candidate["strategy_name"] == "accepted"
     assert candidate["promotion_tier"] == "paper_candidate"
+    assert candidate["audit"]["promotion_readiness"]["status"] == "ready_for_paper"
     assert candidate["research_only"] is True
     assert [item["strategy_name"] for item in candidates] == ["accepted", "rejected"]
     assert candidates[1]["promotion_tier"] == "watchlist"
@@ -161,6 +163,43 @@ def test_research_store_repairs_legacy_candidate_cost_ratios_and_flags_missing_s
     assert round(backtest["net_cost_ratio"], 2) == 2.8
     assert round(backtest["expectancy_per_trade"], 2) == 0.26
     assert "legacy_sharpe_diagnostics" in candidate["audit"]["warnings"]
+    assert candidate["audit"]["promotion_readiness"]["status"] == "blocked"
+
+
+def test_research_store_demotes_stale_paper_candidate_on_read(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("BRENT", {"interval": "1day"}, status="finished")
+    stale = CandidateEvaluation(
+        candidate=ProbabilityCandidate("stale_paper", ("fixture",), {}, [0.1, 0.9]),
+        metrics=ClassificationMetrics(1.0, 1.0, 0.01, 0.1, 1.0, 0.5, 2),
+        backtest=BacktestResult(
+            net_profit=1_000,
+            sharpe=1.2,
+            max_drawdown=100,
+            win_rate=0.55,
+            trade_count=20,
+            exposure=0.4,
+            turnover=20,
+            train_profit=500,
+            test_profit=500,
+            gross_profit=1_200,
+            total_cost=200,
+            estimated_spread_bps=2,
+            estimated_slippage_bps=1,
+            cost_confidence="ig_live_epic_cost_profile",
+        ),
+        fold_results=(),
+        robustness_score=60,
+        passed=True,
+        warnings=(),
+        promotion_tier="paper_candidate",
+    )
+
+    store.save_candidate(run_id, "BRENT", stale)
+
+    [candidate] = store.list_candidates(run_id)
+    assert candidate["promotion_tier"] == "research_candidate"
+    assert "legacy_sharpe_diagnostics" in candidate["audit"]["promotion_readiness"]["blockers"]
 
 
 def _evaluation(name: str, passed: bool, promotion_tier: str = "reject", robustness_score: float = 75.0) -> CandidateEvaluation:
@@ -180,9 +219,10 @@ def _evaluation(name: str, passed: bool, promotion_tier: str = "reject", robustn
             gross_profit=150,
             total_cost=50,
             daily_pnl_sharpe=1.0,
-            sharpe_observations=20,
+            sharpe_observations=140,
             estimated_spread_bps=2.0,
             estimated_slippage_bps=1.0,
+            cost_confidence="ig_live_epic_cost_profile",
         ),
         fold_results=(BacktestResult(10, 0.8, 1, 0.6, 5, 0.2, 1, 6, 4),),
         robustness_score=robustness_score,

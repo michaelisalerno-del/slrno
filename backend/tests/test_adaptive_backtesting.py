@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from app.adaptive_research import AdaptiveSearchConfig, _generate_signals, _promotion_tier, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
-from app.ig_costs import public_ig_cost_profile
+from app.ig_costs import IGCostProfile, public_ig_cost_profile
 from app.market_registry import MarketMapping
 from app.providers.base import OHLCBar
 from app.research_lab import CandidateEvaluation
@@ -180,6 +180,59 @@ def test_high_drawdown_profitable_lead_remains_research_candidate():
     )
 
     assert _promotion_tier(evaluation, stability=0.2, cost_profile=profile) == "research_candidate"
+
+
+def test_promotion_tier_requires_fresh_sharpe_days_and_live_ig_costs():
+    public_profile = public_ig_cost_profile(MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1))
+    live_profile = IGCostProfile(
+        market_id="TEST",
+        spread_bps=2,
+        slippage_bps=1,
+        confidence="ig_live_epic_cost_profile",
+    )
+    backtest = BacktestResult(
+        net_profit=1_000,
+        sharpe=1.5,
+        max_drawdown=200,
+        win_rate=0.55,
+        trade_count=40,
+        exposure=0.4,
+        turnover=40,
+        train_profit=500,
+        test_profit=500,
+        gross_profit=1_400,
+        total_cost=200,
+        daily_pnl_sharpe=1.6,
+        sharpe_observations=140,
+        expectancy_per_trade=25,
+        average_cost_per_trade=5,
+        net_cost_ratio=5,
+        cost_to_gross_ratio=0.1428,
+        estimated_spread_bps=2,
+        estimated_slippage_bps=1,
+    )
+    evaluation = CandidateEvaluation(
+        candidate=ProbabilityCandidate("ready_fixture", ("adaptive_ig_v1",), {"stress_net_profit": 500}, [0.5, 0.6]),
+        metrics=ClassificationMetrics(0.6, 0.6, 0.2, 0.6, 0.6, 0.5, 2),
+        backtest=backtest,
+        fold_results=(backtest, backtest),
+        robustness_score=80,
+        passed=True,
+        warnings=(),
+    )
+    short_sample = CandidateEvaluation(
+        candidate=evaluation.candidate,
+        metrics=evaluation.metrics,
+        backtest=BacktestResult(**{**backtest.__dict__, "sharpe_observations": 40}),
+        fold_results=evaluation.fold_results,
+        robustness_score=evaluation.robustness_score,
+        passed=True,
+        warnings=(),
+    )
+
+    assert _promotion_tier(evaluation, stability=0.7, cost_profile=public_profile) == "research_candidate"
+    assert _promotion_tier(short_sample, stability=0.7, cost_profile=live_profile) == "research_candidate"
+    assert _promotion_tier(evaluation, stability=0.7, cost_profile=live_profile) == "validated_candidate"
 
 
 def test_weak_sharpe_warning_uses_daily_pnl_sharpe_for_intraday_results():

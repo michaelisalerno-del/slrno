@@ -116,8 +116,8 @@ function App() {
     end: "2026-04-01",
     interval: "5min",
     search_preset: "balanced",
-    trading_style: "find_anything_robust",
-    objective: "balanced",
+    trading_style: "research_ideas",
+    objective: "profit_first",
     search_budget: "",
     risk_profile: "balanced",
   });
@@ -612,6 +612,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }
   const visibleRuns = showAllRuns ? researchRuns : researchRuns.slice(0, 18);
   const selectedRuns = researchRuns.filter((run) => selectedRunIds.includes(run.id));
   const visibleDeletableRuns = visibleRuns.filter((run) => !["created", "running"].includes(run.status));
+  const visibleNoisyRuns = visibleDeletableRuns.filter(isNoisyRun);
   const visibleTrials = filteredTrials.slice(0, 20);
 
   React.useEffect(() => {
@@ -634,6 +635,16 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }
     });
   }
 
+  function selectNoisyRuns() {
+    setSelectedRunIds((current) => {
+      const next = new Set(current);
+      for (const run of visibleNoisyRuns) {
+        next.add(run.id);
+      }
+      return [...next];
+    });
+  }
+
   return (
     <div className="lab-grid">
       <section className="lab-section span-2">
@@ -641,6 +652,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }
           <h3>Recent Runs</h3>
           <div className="button-row compact-actions">
             <button type="button" className="ghost" onClick={selectVisibleRuns} disabled={visibleDeletableRuns.length === 0}>Select visible</button>
+            <button type="button" className="ghost" onClick={selectNoisyRuns} disabled={visibleNoisyRuns.length === 0}>Select noisy</button>
             <button type="button" className="ghost" onClick={() => setSelectedRunIds([])} disabled={selectedRunIds.length === 0}>Clear</button>
             <button type="button" className="secondary" onClick={() => deleteRuns(selectedRuns)} disabled={selectedRuns.length === 0}>
               Delete selected ({selectedRuns.length})
@@ -838,7 +850,7 @@ function CandidateView({ candidates, critique }) {
       <section className="lab-section span-2">
         <h3>Strategy Testing Queue</h3>
         <div className="metrics four">
-          <Metric label="Watchlist" value={queue.watchlist} />
+          <Metric label="Blocked" value={queue.blocked} />
           <Metric label="Needs fresh run" value={queue.needsFreshRun} />
           <Metric label="Needs IG validation" value={queue.needsIgValidation} />
           <Metric label="Paper-ready" value={queue.paperReady} />
@@ -849,47 +861,23 @@ function CandidateView({ candidates, critique }) {
             <span>Delete stale runs before comparing candidates.</span>
           </div>
           <div className="status compact-status">
-            <strong>2 · Rerun shortlist markets</strong>
-            <span>Fresh runs should show Sharpe days, daily Sharpe, spread/slippage, and DSR.</span>
+            <strong>2 · Test known ideas</strong>
+            <span>Use profit-first known research ideas after realistic IG/EODHD costs.</span>
           </div>
           <div className="status compact-status">
-            <strong>3 · Paper test only after validation</strong>
-            <span>Use IG price validation and 30-day live-paper tracking before promotion.</span>
+            <strong>3 · Gate promotion</strong>
+            <span>Require fresh Sharpe days, spread/slippage, validation warnings, and no stale blockers.</span>
+          </div>
+          <div className="status compact-status">
+            <strong>4 · Paper track</strong>
+            <span>Only clear candidates move to 30-day live-paper review.</span>
           </div>
         </div>
       </section>
       <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {visibleCandidates.map((candidate) => (
-            <div className="candidate-card" key={candidate.id}>
-              <div className="label-row">
-                <span className="badge muted-badge">Research only</span>
-                <span className={`badge ${tierBadgeClass(candidate.promotion_tier || candidate.audit?.promotion_tier)}`}>
-                  {tierLabel(candidate.promotion_tier || candidate.audit?.promotion_tier)}
-                </span>
-              </div>
-              <strong>{candidate.strategy_name}</strong>
-              <span>{candidate.market_id} · score {round(candidate.robustness_score)}</span>
-              {researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe) && (
-                <small>{researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe)}</small>
-              )}
-              <small>{humanWarnings(candidate.audit?.warnings).join(" · ") || "Passed current research gates"}</small>
-              <div className="mini-metrics">
-                <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
-                <Metric label="Sharpe days" value={candidate.audit?.backtest?.sharpe_observations ?? 0} />
-                <Metric label="Bar Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
-                <Metric label="DSR" value={percent(candidate.audit?.candidate?.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
-                <Metric label="Stability" value={percent(candidate.audit?.candidate?.parameters?.parameter_stability_score)} />
-                <Metric label="Net" value={formatMoney(candidate.audit?.backtest?.net_profit)} />
-                <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
-                <Metric label="Expectancy" value={formatMoney(candidate.audit?.backtest?.expectancy_per_trade)} />
-                <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
-                <Metric label="Spread/slip" value={`${round(candidate.audit?.backtest?.estimated_spread_bps)} / ${round(candidate.audit?.backtest?.estimated_slippage_bps)} bps`} />
-                <Metric label="Trades" value={candidate.audit?.backtest?.trade_count ?? 0} />
-              </div>
-            </div>
-          ))}
+          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} />)}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
           {candidates.length > visibleCandidates.length && (
             <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
@@ -917,6 +905,46 @@ function CandidateView({ candidates, critique }) {
           </>
         ) : <span className="muted">No critique available yet.</span>}
       </section>
+    </div>
+  );
+}
+
+function CandidateCard({ candidate }) {
+  const readiness = candidateReadiness(candidate);
+  const issues = readinessIssues(readiness);
+  return (
+    <div className="candidate-card">
+      <div className="label-row">
+        <span className="badge muted-badge">Research only</span>
+        <span className={`badge ${tierBadgeClass(candidate.promotion_tier || candidate.audit?.promotion_tier)}`}>
+          {tierLabel(candidate.promotion_tier || candidate.audit?.promotion_tier)}
+        </span>
+      </div>
+      <div className="label-row">
+        <strong>{candidate.strategy_name}</strong>
+        <span className={`badge ${readinessBadgeClass(readiness.status)}`}>{readinessLabel(readiness.status)}</span>
+      </div>
+      <span>{candidate.market_id} · score {round(candidate.robustness_score)}</span>
+      {researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe) && (
+        <small>{researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe)}</small>
+      )}
+      <small>{nextActionLabel(readiness.next_action)}</small>
+      <div className="warning-row">
+        {issues.length ? issues.slice(0, 8).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>) : <span className="muted">Gate clear</span>}
+      </div>
+      <div className="mini-metrics">
+        <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
+        <Metric label="Sharpe days" value={candidate.audit?.backtest?.sharpe_observations ?? 0} />
+        <Metric label="Bar Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
+        <Metric label="DSR" value={percent(candidate.audit?.candidate?.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
+        <Metric label="Stability" value={percent(candidate.audit?.candidate?.parameters?.parameter_stability_score)} />
+        <Metric label="Net" value={formatMoney(candidate.audit?.backtest?.net_profit)} />
+        <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
+        <Metric label="Expectancy" value={formatMoney(candidate.audit?.backtest?.expectancy_per_trade)} />
+        <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
+        <Metric label="Spread/slip" value={`${round(candidate.audit?.backtest?.estimated_spread_bps)} / ${round(candidate.audit?.backtest?.estimated_slippage_bps)} bps`} />
+        <Metric label="Trades" value={candidate.audit?.backtest?.trade_count ?? 0} />
+      </div>
     </div>
   );
 }
@@ -1124,6 +1152,24 @@ function tierBadgeClass(tier) {
   return "muted-badge";
 }
 
+function readinessBadgeClass(status) {
+  if (status === "ready_for_paper") {
+    return "good";
+  }
+  if (status === "needs_ig_validation") {
+    return "warn";
+  }
+  return "base";
+}
+
+function readinessLabel(status) {
+  return {
+    ready_for_paper: "Gate clear",
+    needs_ig_validation: "Validate IG",
+    blocked: "Blocked",
+  }[status] ?? "Blocked";
+}
+
 function tierLabel(tier) {
   return {
     validated_candidate: "IG validated",
@@ -1132,6 +1178,16 @@ function tierLabel(tier) {
     watchlist: "Watchlist",
     reject: "Reject",
   }[tier] ?? "Research";
+}
+
+function isNoisyRun(run) {
+  if (run.status === "error" || run.status === "finished_with_warnings") {
+    return true;
+  }
+  if (Number(run.trial_count ?? 0) === 0) {
+    return true;
+  }
+  return Number(run.passed_count ?? 0) === 0 && Number(run.best_score ?? 0) < 25;
 }
 
 function tierMatchesFilter(tier, filter) {
@@ -1181,27 +1237,50 @@ function runQualitySummary(trials = []) {
 }
 
 function candidateQueueSummary(candidates = []) {
-  let watchlist = 0;
+  let blocked = 0;
   let needsFreshRun = 0;
   let needsIgValidation = 0;
   let paperReady = 0;
   for (const candidate of candidates) {
-    const tier = candidate.promotion_tier || candidate.audit?.promotion_tier;
-    const warnings = candidate.audit?.warnings ?? [];
-    if (tier === "watchlist" || tier === "research_candidate") {
-      watchlist += 1;
-    }
-    if (tier === "paper_candidate" || tier === "validated_candidate") {
+    const readiness = candidateReadiness(candidate);
+    const blockers = readiness.blockers ?? [];
+    if (readiness.status === "ready_for_paper") {
       paperReady += 1;
     }
-    if (warnings.includes("needs_ig_price_validation")) {
+    if (readiness.status === "needs_ig_validation") {
       needsIgValidation += 1;
     }
-    if (warnings.some((warning) => ["legacy_sharpe_diagnostics", "missing_cost_profile", "short_sharpe_sample", "limited_sharpe_sample"].includes(warning))) {
+    if (readiness.status === "blocked") {
+      blocked += 1;
+    }
+    if (blockers.some((warning) => ["legacy_sharpe_diagnostics", "missing_cost_profile", "missing_spread_slippage", "short_sharpe_sample", "limited_sharpe_sample"].includes(warning))) {
       needsFreshRun += 1;
     }
   }
-  return { watchlist, needsFreshRun, needsIgValidation, paperReady };
+  return { blocked, needsFreshRun, needsIgValidation, paperReady };
+}
+
+function candidateReadiness(candidate) {
+  return candidate.audit?.promotion_readiness ?? {
+    status: "blocked",
+    blockers: candidate.audit?.warnings ?? [],
+    validation_warnings: [],
+    next_action: "rerun_with_fresh_diagnostics",
+  };
+}
+
+function readinessIssues(readiness) {
+  return humanWarnings([...(readiness.blockers ?? []), ...(readiness.validation_warnings ?? [])]);
+}
+
+function nextActionLabel(action) {
+  return {
+    rerun_with_fresh_diagnostics: "Next: rerun with fresh diagnostics.",
+    sync_ig_costs_and_validate_prices: "Next: sync IG costs and validate prices.",
+    reject_or_rework_cost_edge: "Next: reject or rework the cost edge.",
+    retest_or_reject_fragile_edge: "Next: retest or reject fragile evidence.",
+    paper_track: "Next: 30-day paper tracking.",
+  }[action] ?? "Next: research review.";
 }
 
 function humanWarnings(warnings = []) {
@@ -1217,6 +1296,7 @@ function humanWarnings(warnings = []) {
     limited_sharpe_sample: "Limited Sharpe sample",
     legacy_sharpe_diagnostics: "Needs fresh Sharpe run",
     missing_cost_profile: "Missing cost profile",
+    missing_spread_slippage: "Missing spread/slippage",
     drawdown_too_high: "Drawdown too high",
     fails_higher_slippage: "Fails higher slippage",
     profits_not_consistent_across_folds: "Fragile folds",

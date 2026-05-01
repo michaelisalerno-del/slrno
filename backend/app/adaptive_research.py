@@ -7,6 +7,7 @@ from random import Random
 
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_badge
+from .promotion_readiness import LIVE_VALIDATED_COST_CONFIDENCE, MIN_PROMOTION_SHARPE_DAYS
 from .providers.base import OHLCBar
 from .research_lab import CandidateEvaluation, WalkForwardConfig, WalkForwardFold, walk_forward_splits
 from .research_labels import TripleBarrierConfig, triple_barrier_labels
@@ -548,6 +549,12 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
         and _expectancy_efficiency(backtest) >= 0.35
         and backtest.cost_to_gross_ratio <= 0.65
     )
+    fresh_costed_evidence = (
+        backtest.sharpe_observations >= MIN_PROMOTION_SHARPE_DAYS
+        and backtest.estimated_spread_bps > 0
+        and backtest.estimated_slippage_bps > 0
+        and backtest.total_cost > 0
+    )
     paper_ready = (
         backtest.net_profit > 0
         and backtest.test_profit > 0
@@ -557,10 +564,11 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
         and backtest.max_drawdown <= 3_500
         and cost_robust
         and stability >= 0.35
+        and fresh_costed_evidence
     )
-    if paper_ready and cost_profile.confidence == "ig_live_epic_cost_profile" and stability >= 0.55:
+    if paper_ready and cost_profile.confidence == LIVE_VALIDATED_COST_CONFIDENCE and stability >= 0.55:
         return "validated_candidate"
-    if paper_ready:
+    if paper_ready and cost_profile.confidence == LIVE_VALIDATED_COST_CONFIDENCE:
         return "paper_candidate"
     if (
         viable_research_lead
