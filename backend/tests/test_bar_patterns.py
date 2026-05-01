@@ -27,9 +27,26 @@ def test_strategy_pattern_analysis_warns_when_edge_only_works_in_shock_regime():
     analysis = analyze_strategy_patterns(bars, signals, config, backtest)
 
     assert "rebound_after_selloff" in analysis["allowed_regimes"]
+    assert analysis["regime_gated_backtest"]["net_profit"] > 0
+    assert analysis["regime_summary"][0]["sharpe_days"] >= 1
+    assert analysis["regime_summary"][0]["max_drawdown"] >= 0
+    assert analysis["worst_regime"]["key"] is not None
     assert "high_volatility_only_edge" in analysis["warnings"]
     assert "shock_regime_dependency" in analysis["warnings"]
     assert analysis["trade_summary"]["trade_segments"] >= 1
+
+
+def test_strategy_pattern_analysis_marks_negative_gated_oos_as_headline_only():
+    bars = _selloff_rebound_bars()
+    signals = [0] * len(bars)
+    signals[8] = 1
+    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0, train_fraction=0.8)
+    backtest = run_vector_backtest(bars, signals, config)
+
+    analysis = analyze_strategy_patterns(bars, signals, config, backtest)
+
+    assert "regime_gated_oos_negative" in analysis["warnings"]
+    assert analysis["regime_verdict"] in {"headline_only", "thin_regime_sample"}
 
 
 def _selloff_rebound_bars() -> list[OHLCBar]:

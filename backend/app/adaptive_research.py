@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from math import erf, log, sqrt
 from random import Random
 
-from .bar_patterns import analyze_strategy_patterns
+from .bar_patterns import analyze_strategy_patterns, eligible_specialist_regimes, gate_signals_to_regimes
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_badge
 from .promotion_readiness import LIVE_VALIDATED_COST_CONFIDENCE, MIN_PROMOTION_SHARPE_DAYS
@@ -21,6 +21,12 @@ SEARCH_PRESETS = {
     "balanced": 54,
     "deep": 120,
 }
+REGIME_SCAN_PRESET_BUDGETS = {
+    "quick": 6,
+    "balanced": 12,
+    "deep": 18,
+}
+REGIME_SCAN_HARD_CAP = 96
 
 STYLE_FAMILIES = {
     "find_anything_robust": (
@@ -66,6 +72,8 @@ class AdaptiveSearchConfig:
     risk_profile: str = "balanced"
     strategy_families: tuple[str, ...] = ()
     cost_stress_multiplier: float = 2.0
+    include_regime_scans: bool = False
+    regime_scan_budget_per_regime: int | None = None
     seed: int = 7
 
 
@@ -74,6 +82,7 @@ class AdaptiveSearchResult:
     evaluations: tuple[CandidateEvaluation, ...]
     pareto: tuple[dict[str, object], ...]
     cost_profile: IGCostProfile
+    regime_scan: dict[str, object] = field(default_factory=dict)
 
 
 def available_research_engines() -> list[dict[str, object]]:
@@ -98,6 +107,7 @@ def run_adaptive_search(
     backtest_base = backtest_config_from_profile(cost_profile)
     folds = _adaptive_folds(len(bars))
     evaluations: list[CandidateEvaluation] = []
+    eligible_regimes = eligible_specialist_regimes(bars)
 
     for trial_index in range(budget):
         family = families[trial_index % len(families)]
@@ -160,8 +170,91 @@ def run_adaptive_search(
             )
         )
 
-    ranked = _annotate_evaluations(tuple(evaluations), budget, tuple(families), config, cost_profile)
-    return AdaptiveSearchResult(ranked, _pareto(ranked), cost_profile)
+    regime_scan_trial_count = 0
+    if config.include_regime_scans:
+        per_regime_budget = _regime_scan_budget(config)
+        for regime_info in eligible_regimes:
+            if regime_scan_trial_count >= REGIME_SCAN_HARD_CAP:
+                break
+            target_regime = str(regime_info["regime"])
+            for scan_index in range(per_regime_budget):
+                if regime_scan_trial_count >= REGIME_SCAN_HARD_CAP:
+                    break
+                global_index = budget + regime_scan_trial_count
+                family = families[global_index % len(families)]
+                parameters = _sample_parameters(rng, family, config.risk_profile, global_index)
+                raw_signals = _generate_signals(bars, family, parameters)
+                signals = gate_signals_to_regimes(bars, raw_signals, {target_regime})
+                backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
+                backtest = run_vector_backtest(bars, signals, backtest_config)
+                fold_results = tuple(_fold_backtests(bars, signals, backtest_config, folds))
+                stress = run_vector_backtest(
+                    bars,
+                    signals,
+                    replace(
+                        backtest_config,
+                        cost_stress_multiplier=max(1.0, config.cost_stress_multiplier),
+                        cost_confidence=f"{cost_profile.confidence}_stress",
+                    ),
+                )
+                probabilities = _signals_to_probabilities(signals)
+                metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
+                score = balanced_score(backtest, fold_results, stress, backtest_config)
+                pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest, target_regime=target_regime)
+                warnings = tuple(
+                    sorted(
+                        set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
+                            str(warning) for warning in pattern_analysis.get("warnings", [])
+                        )
+                    )
+                )
+                parameters = {
+                    **parameters,
+                    "market_id": market_id,
+                    "timeframe": timeframe,
+                    "family": family,
+                    "style": config.trading_style,
+                    "objective": config.objective,
+                    "regime_scan": True,
+                    "target_regime": target_regime,
+                    "cost_confidence": cost_profile.confidence,
+                    "cost_badge": profile_badge(cost_profile),
+                    "estimated_spread_bps": cost_profile.spread_bps,
+                    "estimated_slippage_bps": cost_profile.slippage_bps,
+                    "stress_net_profit": round(stress.net_profit, 4),
+                    "stress_sharpe": round(stress.sharpe, 4),
+                    "bar_pattern_analysis": pattern_analysis,
+                }
+                candidate = ProbabilityCandidate(
+                    name=f"{config.trading_style}_{target_regime}_{family}_{scan_index + 1}",
+                    module_stack=("adaptive_ig_v1", config.trading_style, "regime_specialist", target_regime, family),
+                    parameters=parameters,
+                    probabilities=probabilities,
+                )
+                evaluations.append(
+                    CandidateEvaluation(
+                        candidate=candidate,
+                        metrics=metrics,
+                        backtest=backtest,
+                        fold_results=fold_results,
+                        robustness_score=score,
+                        passed=len(warnings) == 0,
+                        warnings=warnings,
+                        research_only=True,
+                    )
+                )
+                regime_scan_trial_count += 1
+
+    total_trials = len(evaluations)
+    ranked = _annotate_evaluations(tuple(evaluations), total_trials, tuple(families), config, cost_profile)
+    regime_scan = {
+        "enabled": config.include_regime_scans,
+        "eligible_regimes": eligible_regimes,
+        "trial_count": regime_scan_trial_count,
+        "budget_per_regime": _regime_scan_budget(config) if config.include_regime_scans else 0,
+        "hard_cap": REGIME_SCAN_HARD_CAP,
+    }
+    return AdaptiveSearchResult(ranked, _pareto(ranked), cost_profile, regime_scan)
 
 
 def balanced_score(
@@ -193,6 +286,14 @@ def balanced_score(
         ),
         4,
     )
+
+
+def _regime_scan_budget(config: AdaptiveSearchConfig) -> int:
+    preset_budget = REGIME_SCAN_PRESET_BUDGETS.get(config.preset, REGIME_SCAN_PRESET_BUDGETS["balanced"])
+    requested = config.regime_scan_budget_per_regime
+    if requested is None:
+        return preset_budget
+    return max(1, min(preset_budget, int(requested)))
 
 
 def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index: int) -> dict[str, float | int | str]:
@@ -522,6 +623,9 @@ def _annotate_evaluations(
                 "trading_style": config.trading_style,
                 "objective": config.objective,
                 "risk_profile": config.risk_profile,
+                "regime_scan_enabled": config.include_regime_scans,
+                "regime_scan": bool(evaluation.candidate.parameters.get("regime_scan")),
+                "target_regime": evaluation.candidate.parameters.get("target_regime"),
             },
             "parameter_stability_score": stability,
             "sharpe_diagnostics": diagnostics,

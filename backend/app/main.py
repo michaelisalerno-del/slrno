@@ -87,6 +87,8 @@ class ResearchRunPayload(BaseModel):
     strategy_families: list[str] = Field(default_factory=list)
     product_mode: str = "spread_bet"
     cost_stress_multiplier: float = 2.0
+    include_regime_scans: bool = False
+    regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -496,9 +498,14 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         risk_profile=payload.risk_profile,
                         strategy_families=tuple(payload.strategy_families),
                         cost_stress_multiplier=max(1.0, payload.cost_stress_multiplier),
+                        include_regime_scans=payload.include_regime_scans,
+                        regime_scan_budget_per_regime=payload.regime_scan_budget_per_regime,
                     ),
                 )
                 market_evaluations = list(result.evaluations)
+                market_status["regime_scan_enabled"] = bool(result.regime_scan.get("enabled"))
+                market_status["eligible_regimes"] = result.regime_scan.get("eligible_regimes", [])
+                market_status["regime_scan_trial_count"] = result.regime_scan.get("trial_count", 0)
             else:
                 market_evaluations = ResearchStack.default().evaluate(bars, backtest_config_from_profile(cost_profile))
         except Exception as exc:
@@ -696,6 +703,8 @@ def _research_run_config(
         "risk_profile": payload.risk_profile,
         "strategy_families": payload.strategy_families,
         "cost_stress_multiplier": payload.cost_stress_multiplier,
+        "include_regime_scans": payload.include_regime_scans,
+        "regime_scan_budget_per_regime": payload.regime_scan_budget_per_regime,
         "product_mode": payload.product_mode,
         "research_only": True,
         "ig_validation_required": True,

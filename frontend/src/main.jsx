@@ -153,6 +153,8 @@ function App() {
     risk_profile: "balanced",
     strategy_families: [],
     cost_stress_multiplier: 2.0,
+    include_regime_scans: false,
+    regime_scan_budget_per_regime: "",
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
 
@@ -294,10 +296,11 @@ function App() {
     const market_ids = activeMarketIds.length ? activeMarketIds : [researchRun.market_id];
     const budget = researchRun.search_budget === "" ? selectedPreset.budget : Number(researchRun.search_budget);
     const plannedTrials = budget * market_ids.length;
+    const regimeScanNote = researchRun.include_regime_scans ? " plus capped regime-specialist scans" : "";
     setMessage("Launching adaptive IG-aware search...");
     setResearchState({
       status: "running",
-      detail: `${selectedEngine.label}: ${budget} strategy trials per market, ${plannedTrials} total.`,
+      detail: `${selectedEngine.label}: ${budget} strategy trials per market, ${plannedTrials} base total${regimeScanNote}.`,
     });
     try {
       const result = await createResearchRun({
@@ -305,10 +308,11 @@ function App() {
         market_id: market_ids[0],
         market_ids,
         search_budget: budget,
+        regime_scan_budget_per_regime: researchRun.regime_scan_budget_per_regime === "" ? null : Number(researchRun.regime_scan_budget_per_regime),
         product_mode: "spread_bet",
       });
       setActiveTab("results");
-      setMessage(`Run ${result.run_id} started: ${budget} strategy trials per market, ${plannedTrials} total.`);
+      setMessage(`Run ${result.run_id} started: ${budget} base trials per market${regimeScanNote}.`);
       const detail = await pollResearchRun(result.run_id, plannedTrials);
       setResearchState({
         status: detail.status,
@@ -709,6 +713,27 @@ function App() {
                   </select>
                   <label>Cost stress</label>
                   <input value={researchRun.cost_stress_multiplier} onChange={(event) => setResearchRun({ ...researchRun, cost_stress_multiplier: Number(event.target.value) })} type="number" min="1" max="5" step="0.25" />
+                  <label className="checkbox-line">
+                    <input
+                      type="checkbox"
+                      checked={researchRun.include_regime_scans}
+                      onChange={(event) => setResearchRun({ ...researchRun, include_regime_scans: event.target.checked })}
+                    />
+                    Thorough regime scan
+                  </label>
+                  {researchRun.include_regime_scans && (
+                    <>
+                      <label>Regime trials / regime</label>
+                      <input
+                        value={researchRun.regime_scan_budget_per_regime}
+                        onChange={(event) => setResearchRun({ ...researchRun, regime_scan_budget_per_regime: event.target.value })}
+                        placeholder={String(regimePresetBudget(researchRun.search_preset))}
+                        type="number"
+                        min="1"
+                        max={regimePresetBudget(researchRun.search_preset)}
+                      />
+                    </>
+                  )}
                 </section>
 
                 <section className="lab-section">
@@ -1091,10 +1116,13 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
   const marketFailures = runDetail?.config?.market_failures ?? [];
   const [trialTierFilter, setTrialTierFilter] = React.useState("active");
+  const [trialScanFilter, setTrialScanFilter] = React.useState("all");
   const [showAllRuns, setShowAllRuns] = React.useState(false);
   const [selectedRunIds, setSelectedRunIds] = React.useState([]);
   const qualitySummary = runQualitySummary(trials);
-  const filteredTrials = trials.filter((trial) => tierMatchesFilter(trial.promotion_tier, trialTierFilter));
+  const filteredTrials = trials
+    .filter((trial) => tierMatchesFilter(trial.promotion_tier, trialTierFilter))
+    .filter((trial) => trialScanMatchesFilter(trial, trialScanFilter));
   const visibleRuns = showAllRuns ? researchRuns : researchRuns.slice(0, 18);
   const selectedRuns = researchRuns.filter((run) => selectedRunIds.includes(run.id));
   const visibleDeletableRuns = visibleRuns.filter((run) => !["created", "running"].includes(run.status));
@@ -1223,6 +1251,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
           </div>
         </section>
       )}
+      {runDetail && <RegimeEvidence runDetail={runDetail} trials={trials} />}
       {runDetail && (
         <section className="lab-section span-2">
           <div className="label-row table-heading">
@@ -1290,6 +1319,22 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
               </button>
             ))}
           </div>
+          <div className="segmented compact-filter">
+            {[
+              ["all", "All scans"],
+              ["full", "Full-period"],
+              ["specialist", "Specialist"],
+            ].map(([id, label]) => (
+              <button
+                className={trialScanFilter === id ? "segment active" : "segment"}
+                key={id}
+                type="button"
+                onClick={() => setTrialScanFilter(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="trial-list">
           {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} />)}
@@ -1305,11 +1350,55 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
   );
 }
 
+function RegimeEvidence({ runDetail, trials }) {
+  const statuses = runDetail?.config?.market_statuses ?? [];
+  const specialistCount = trials.filter((trial) => trial.parameters?.regime_scan).length;
+  const topRegimeTrials = trials
+    .filter((trial) => trial.parameters?.bar_pattern_analysis?.regime_gated_backtest)
+    .slice(0, 4);
+  return (
+    <section className="lab-section span-2">
+      <h3>Regime Evidence</h3>
+      <div className="metrics four">
+        <Metric label="Regime scans" value={runDetail?.config?.include_regime_scans ? "On" : "Off"} />
+        <Metric label="Specialist trials" value={specialistCount} />
+        <Metric label="Eligible regimes" value={statuses.flatMap((item) => item.eligible_regimes ?? []).length} />
+        <Metric label="Scan trials saved" value={statuses.reduce((total, item) => total + Number(item.regime_scan_trial_count ?? 0), 0)} />
+      </div>
+      <div className="status-list">
+        {statuses.map((item) => (
+          <div className="status compact-status" key={`${item.market_id}-regime`}>
+            <strong>{item.market_id} · current {regimeLabel(item.bar_regime?.current_regime)}</strong>
+            <span>{regimeCountsLabel(item.bar_regime?.regime_counts)}</span>
+            {(item.eligible_regimes ?? []).length > 0 && (
+              <small>{item.eligible_regimes.map((regime) => `${regimeLabel(regime.regime)} ${regime.trading_days}d`).join(" · ")}</small>
+            )}
+          </div>
+        ))}
+        {topRegimeTrials.map((trial) => {
+          const pattern = trial.parameters?.bar_pattern_analysis ?? {};
+          const gated = pattern.regime_gated_backtest ?? {};
+          return (
+            <div className="status compact-status" key={`${trial.id}-gated`}>
+              <strong>{trial.strategy_name} · {regimeVerdictLabel(pattern.regime_verdict)}</strong>
+              <span>
+                Full {formatMoney(trial.backtest?.net_profit)} / gated {formatMoney(gated.net_profit)} / OOS {formatMoney(gated.test_profit)}
+              </span>
+              <small>Allowed {(pattern.allowed_regimes ?? []).map(regimeLabel).join(" / ") || "none"} · worst {regimeLabel(pattern.worst_regime?.key)}</small>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function TrialCard({ trial, onRefineTemplate }) {
   const backtest = trial.backtest ?? {};
   const warnings = humanWarnings(trial.warnings);
   const capital = accountFeasibility(trial.capital_scenarios, 500);
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
+  const gated = pattern.regime_gated_backtest ?? {};
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -1339,8 +1428,12 @@ function TrialCard({ trial, onRefineTemplate }) {
         <Metric label="Costs" value={formatMoney(backtest.total_cost)} />
         <Metric label="Expectancy" value={formatMoney(backtest.expectancy_per_trade)} />
         <Metric label="Net/cost" value={formatRatio(backtest.net_cost_ratio)} />
+        <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
+        <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <Metric label="Regime verdict" value={regimeVerdictLabel(pattern.regime_verdict)} />
         <Metric label="Cost/gross" value={percent(backtest.cost_to_gross_ratio)} />
         <Metric label="Best regime" value={regimeLabel(pattern.dominant_profit_regime?.key)} />
+        <Metric label="Worst regime" value={regimeLabel(pattern.worst_regime?.key)} />
         <Metric label="Best month" value={pattern.dominant_profit_month?.key ?? "n/a"} />
         <Metric label="Spread/slip" value={`${round(backtest.estimated_spread_bps)} / ${round(backtest.estimated_slippage_bps)} bps`} />
         <Metric label="Trades" value={backtest.trade_count ?? 0} />
@@ -1451,6 +1544,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
   const issues = readinessIssues(readiness);
   const capital = accountFeasibility(candidate.capital_scenarios, 500);
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
+  const gated = pattern.regime_gated_backtest ?? {};
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -1487,7 +1581,11 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
         <Metric label="Expectancy" value={formatMoney(candidate.audit?.backtest?.expectancy_per_trade)} />
         <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
+        <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
+        <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <Metric label="Regime verdict" value={regimeVerdictLabel(pattern.regime_verdict)} />
         <Metric label="Best regime" value={regimeLabel(pattern.dominant_profit_regime?.key)} />
+        <Metric label="Worst regime" value={regimeLabel(pattern.worst_regime?.key)} />
         <Metric label="Best month" value={pattern.dominant_profit_month?.key ?? "n/a"} />
         <Metric label="Spread/slip" value={`${round(candidate.audit?.backtest?.estimated_spread_bps)} / ${round(candidate.audit?.backtest?.estimated_slippage_bps)} bps`} />
         <Metric label="Trades" value={candidate.audit?.backtest?.trade_count ?? 0} />
@@ -1753,6 +1851,14 @@ function tierMatchesFilter(tier, filter) {
   return tier !== "reject";
 }
 
+function trialScanMatchesFilter(trial, filter) {
+  if (filter === "all") {
+    return true;
+  }
+  const specialist = Boolean(trial.parameters?.regime_scan);
+  return filter === "specialist" ? specialist : !specialist;
+}
+
 function runQualitySummary(trials = []) {
   const warningCounts = new Map();
   let paperReady = 0;
@@ -1877,8 +1983,12 @@ function humanWarnings(warnings = []) {
     best_trades_dominate: "Best trades dominate",
     fails_normal_volatility_regime: "Fails normal-vol regime",
     high_volatility_only_edge: "High-vol only edge",
+    headline_sharpe_not_regime_robust: "Headline Sharpe not robust",
+    insufficient_regime_sample: "Thin regime sample",
     profit_concentrated_single_month: "Single-month profit",
     profit_concentrated_single_regime: "Single-regime profit",
+    regime_gated_backtest_negative: "Gated backtest negative",
+    regime_gated_oos_negative: "Gated OOS negative",
     shock_regime_dependency: "Shock-regime dependency",
     below_ig_min_deal_size: "Below IG min stake",
     risk_budget_exceeded: "Risk budget exceeded",
@@ -1910,6 +2020,30 @@ function regimeLabel(value) {
     normal: "Normal",
     unknown: "Unknown",
   }[value] ?? value ?? "n/a";
+}
+
+function regimeVerdictLabel(value) {
+  return {
+    tradeable_across_regimes: "Tradeable",
+    regime_tradeable: "Regime tradeable",
+    regime_specific: "Regime-specific",
+    headline_only: "Headline only",
+    thin_regime_sample: "Thin sample",
+    research_only: "Research only",
+    unavailable: "Unavailable",
+  }[value] ?? value ?? "n/a";
+}
+
+function regimeCountsLabel(counts = {}) {
+  const entries = Object.entries(counts ?? {}).sort((left, right) => Number(right[1]) - Number(left[1])).slice(0, 4);
+  if (entries.length === 0) {
+    return "No regime labels yet";
+  }
+  return entries.map(([regime, count]) => `${regimeLabel(regime)} ${count}d`).join(" · ");
+}
+
+function regimePresetBudget(preset) {
+  return { quick: 6, balanced: 12, deep: 18 }[preset] ?? 12;
 }
 
 function strategyFamilyLabel(value) {

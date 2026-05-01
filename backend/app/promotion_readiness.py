@@ -40,8 +40,12 @@ ROBUSTNESS_BLOCKING_WARNINGS = {
     "best_trades_dominate",
     "fails_normal_volatility_regime",
     "high_volatility_only_edge",
+    "headline_sharpe_not_regime_robust",
+    "insufficient_regime_sample",
     "profit_concentrated_single_month",
     "profit_concentrated_single_regime",
+    "regime_gated_backtest_negative",
+    "regime_gated_oos_negative",
     "shock_regime_dependency",
 }
 
@@ -83,6 +87,8 @@ def promotion_readiness(
         validation_warnings.append("needs_ig_price_validation")
 
     for warning in sorted((COST_BLOCKING_WARNINGS | ROBUSTNESS_BLOCKING_WARNINGS | FRESH_SAMPLE_WARNINGS) & warning_set):
+        if _regime_gate_allows_warning(warning, parameters):
+            continue
         blockers.append(warning)
     for warning in sorted(VALIDATION_WARNING_CODES & warning_set):
         validation_warnings.append(warning)
@@ -143,6 +149,15 @@ def _next_action(blockers: list[str], validation_warnings: list[str]) -> str:
 def _cost_confidence(backtest: object, parameters: Mapping[str, object]) -> str:
     raw = str(_value(backtest, "cost_confidence") or parameters.get("cost_confidence") or "")
     return raw.removesuffix("_stress")
+
+
+def _regime_gate_allows_warning(warning: str, parameters: Mapping[str, object]) -> bool:
+    if warning not in {"fails_normal_volatility_regime", "high_volatility_only_edge", "profit_concentrated_single_regime", "shock_regime_dependency"}:
+        return False
+    analysis = parameters.get("bar_pattern_analysis")
+    if not isinstance(analysis, Mapping):
+        return False
+    return bool(analysis.get("target_regime")) and analysis.get("regime_verdict") == "regime_tradeable"
 
 
 def _normalize_warnings(warnings: object) -> list[str]:

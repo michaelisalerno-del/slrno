@@ -403,6 +403,48 @@ def test_research_ideas_style_runs_calendar_family_trials():
     assert all(evaluation.candidate.parameters["direction"] == "long_only" for evaluation in result.evaluations)
 
 
+def test_regime_specialist_scans_are_opt_in_and_gated_to_target_regime():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    bars = _daily_trend_bars(90)
+
+    normal = run_adaptive_search(
+        bars,
+        "TEST",
+        "1day",
+        profile,
+        AdaptiveSearchConfig(preset="quick", trading_style="intraday_only", search_budget=6, seed=5),
+    )
+    thorough = run_adaptive_search(
+        bars,
+        "TEST",
+        "1day",
+        profile,
+        AdaptiveSearchConfig(
+            preset="quick",
+            trading_style="intraday_only",
+            search_budget=6,
+            include_regime_scans=True,
+            regime_scan_budget_per_regime=2,
+            seed=5,
+        ),
+    )
+
+    assert normal.regime_scan["enabled"] is False
+    assert len(normal.evaluations) == 6
+    assert thorough.regime_scan["enabled"] is True
+    assert thorough.regime_scan["trial_count"] > 0
+    specialist = [evaluation for evaluation in thorough.evaluations if evaluation.candidate.parameters.get("regime_scan")]
+    assert specialist
+    for evaluation in specialist:
+        target = evaluation.candidate.parameters["target_regime"]
+        analysis = evaluation.candidate.parameters["bar_pattern_analysis"]
+        assert analysis["target_regime"] == target
+        for row in analysis["regime_summary"]:
+            if row["key"] != target:
+                assert row["active_bars"] == 0
+
+
 def _trend_bars(count: int) -> list[OHLCBar]:
     start = datetime(2026, 1, 1, 9)
     price = 100.0
@@ -417,6 +459,25 @@ def _trend_bars(count: int) -> list[OHLCBar]:
                 price - 0.1,
                 price + 0.4,
                 price - 0.4,
+                price,
+            )
+        )
+    return bars
+
+
+def _daily_trend_bars(count: int) -> list[OHLCBar]:
+    start = datetime(2025, 1, 1, 16)
+    price = 100.0
+    bars: list[OHLCBar] = []
+    for index in range(count):
+        price *= 1.004 if index % 12 < 10 else 0.998
+        bars.append(
+            OHLCBar(
+                "TEST",
+                start + timedelta(days=index),
+                price * 0.999,
+                price * 1.004,
+                price * 0.996,
                 price,
             )
         )

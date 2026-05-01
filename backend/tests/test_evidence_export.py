@@ -55,6 +55,8 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
         assert "candidates.csv" in names
         assert "capital_scenarios.csv" in names
         assert "bar_analysis.json" in names
+        assert "regime_pnl.csv" in names
+        assert "regime_gated_backtests.csv" in names
         assert "monthly_pnl.csv" in names
         assert "session_pnl.csv" in names
         assert "pattern_warnings.csv" in names
@@ -199,6 +201,10 @@ def _evaluation(name: str) -> CandidateEvaluation:
                 "bar_pattern_analysis": {
                     "schema": "bar_pattern_analysis_v1",
                     "warnings": ["profit_concentrated_single_month"],
+                    "regime_verdict": "regime_specific",
+                    "allowed_regimes": ["trend_up"],
+                    "blocked_regimes": [],
+                    "regime_gated_backtest": {"net_profit": 100, "test_profit": 40, "daily_pnl_sharpe": 1.0},
                     "monthly_summary": [{"key": "2025-01", "net_profit": 100, "active_bars": 3}],
                     "session_summary": [{"key": "us_open", "net_profit": 100, "active_bars": 3}],
                     "regime_summary": [{"key": "trend_up", "net_profit": 100, "active_bars": 3}],

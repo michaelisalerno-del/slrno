@@ -78,6 +78,8 @@ def build_research_export_zip(
         archive.writestr("warnings.csv", _csv_bytes(warning_rows))
         archive.writestr("bar_analysis.json", _json_bytes(_redact_sensitive(bar_analysis)))
         archive.writestr("regime_segments.csv", _csv_bytes(_regime_segment_rows(run)))
+        archive.writestr("regime_pnl.csv", _csv_bytes(_pattern_summary_rows(bar_analysis, "regime_summary")))
+        archive.writestr("regime_gated_backtests.csv", _csv_bytes(_regime_gated_backtest_rows(bar_analysis)))
         archive.writestr("monthly_pnl.csv", _csv_bytes(_pattern_summary_rows(bar_analysis, "monthly_summary")))
         archive.writestr("session_pnl.csv", _csv_bytes(_pattern_summary_rows(bar_analysis, "session_summary")))
         archive.writestr("pattern_warnings.csv", _csv_bytes(_pattern_warning_rows(bar_analysis)))
@@ -327,6 +329,8 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
     for trial in trials:
         backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
         parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+        pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+        gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
         summary = trial.get("capital_summary") if isinstance(trial.get("capital_summary"), dict) else {}
         rows.append(
             {
@@ -345,6 +349,13 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
                 "total_cost": backtest.get("total_cost"),
                 "net_cost_ratio": backtest.get("net_cost_ratio"),
                 "cost_to_gross_ratio": backtest.get("cost_to_gross_ratio"),
+                "target_regime": pattern.get("target_regime"),
+                "regime_verdict": pattern.get("regime_verdict"),
+                "allowed_regimes": "|".join(str(item) for item in pattern.get("allowed_regimes", [])),
+                "blocked_regimes": "|".join(str(item) for item in pattern.get("blocked_regimes", [])),
+                "regime_gated_net_profit": gated.get("net_profit"),
+                "regime_gated_test_profit": gated.get("test_profit"),
+                "regime_gated_daily_pnl_sharpe": gated.get("daily_pnl_sharpe"),
                 "smallest_feasible_account": summary.get("smallest_feasible_account"),
                 "warnings": "|".join(str(item) for item in trial.get("warnings", [])),
             }
@@ -357,6 +368,10 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
     for candidate in candidates:
         audit = candidate.get("audit") if isinstance(candidate.get("audit"), dict) else {}
         backtest = audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
+        candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+        parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+        pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+        gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
         readiness = audit.get("promotion_readiness") if isinstance(audit.get("promotion_readiness"), dict) else {}
         summary = candidate.get("capital_summary") if isinstance(candidate.get("capital_summary"), dict) else {}
         rows.append(
@@ -373,6 +388,13 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
                 "daily_pnl_sharpe": backtest.get("daily_pnl_sharpe"),
                 "sharpe_observations": backtest.get("sharpe_observations"),
                 "total_cost": backtest.get("total_cost"),
+                "target_regime": pattern.get("target_regime"),
+                "regime_verdict": pattern.get("regime_verdict"),
+                "allowed_regimes": "|".join(str(item) for item in pattern.get("allowed_regimes", [])),
+                "blocked_regimes": "|".join(str(item) for item in pattern.get("blocked_regimes", [])),
+                "regime_gated_net_profit": gated.get("net_profit"),
+                "regime_gated_test_profit": gated.get("test_profit"),
+                "regime_gated_daily_pnl_sharpe": gated.get("daily_pnl_sharpe"),
                 "smallest_feasible_account": summary.get("smallest_feasible_account"),
                 "blockers": "|".join(str(item) for item in readiness.get("blockers", [])),
                 "validation_warnings": "|".join(str(item) for item in readiness.get("validation_warnings", [])),
@@ -515,6 +537,30 @@ def _pattern_summary_rows(bar_analysis: dict[str, object], key: str) -> list[dic
     return rows
 
 
+def _regime_gated_backtest_rows(bar_analysis: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in bar_analysis.get("items", []) if isinstance(bar_analysis.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
+        gated = analysis.get("regime_gated_backtest") if isinstance(analysis.get("regime_gated_backtest"), dict) else {}
+        rows.append(
+            {
+                "entity_type": item.get("entity_type"),
+                "id": item.get("id"),
+                "run_id": item.get("run_id"),
+                "strategy_name": item.get("strategy_name"),
+                "market_id": item.get("market_id"),
+                "target_regime": analysis.get("target_regime"),
+                "regime_verdict": analysis.get("regime_verdict"),
+                "allowed_regimes": "|".join(str(value) for value in analysis.get("allowed_regimes", [])),
+                "blocked_regimes": "|".join(str(value) for value in analysis.get("blocked_regimes", [])),
+                **gated,
+            }
+        )
+    return rows
+
+
 def _pattern_warning_rows(bar_analysis: dict[str, object]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for item in bar_analysis.get("items", []) if isinstance(bar_analysis.get("items"), list) else []:
@@ -651,7 +697,7 @@ This bundle is designed for offline review and Codex-assisted analysis. JSON fil
 
 Bars: {bars_note}
 
-Pattern diagnostics: `bar_analysis.json`, `regime_segments.csv`, `monthly_pnl.csv`, `session_pnl.csv`, and `pattern_warnings.csv` describe regime fit and concentration risks where available.
+Pattern diagnostics: `bar_analysis.json`, `regime_segments.csv`, `regime_pnl.csv`, `regime_gated_backtests.csv`, `monthly_pnl.csv`, `session_pnl.csv`, and `pattern_warnings.csv` describe regime fit and concentration risks where available.
 
 No API keys, passwords, or secret tokens are intentionally included in this export.
 """
