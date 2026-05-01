@@ -5,6 +5,7 @@ from datetime import date
 from math import erf, log, sqrt
 from random import Random
 
+from .bar_patterns import analyze_strategy_patterns
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_badge
 from .promotion_readiness import LIVE_VALIDATED_COST_CONFIDENCE, MIN_PROMOTION_SHARPE_DAYS
@@ -117,7 +118,14 @@ def run_adaptive_search(
         probabilities = _signals_to_probabilities(signals)
         metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
         score = balanced_score(backtest, fold_results, stress, backtest_config)
-        warnings = tuple(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile))
+        pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest)
+        warnings = tuple(
+            sorted(
+                set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
+                    str(warning) for warning in pattern_analysis.get("warnings", [])
+                )
+            )
+        )
         parameters = {
             **parameters,
             "market_id": market_id,
@@ -131,6 +139,7 @@ def run_adaptive_search(
             "estimated_slippage_bps": cost_profile.slippage_bps,
             "stress_net_profit": round(stress.net_profit, 4),
             "stress_sharpe": round(stress.sharpe, 4),
+            "bar_pattern_analysis": pattern_analysis,
         }
         candidate = ProbabilityCandidate(
             name=f"{config.trading_style}_{family}_{trial_index + 1}",

@@ -884,6 +884,7 @@ function CockpitView({ summary, setActiveModule }) {
 }
 
 function PaperView({ summary }) {
+  const tracked = summary?.tracked_candidates ?? [];
   return (
     <section className="lab-shell">
       <div className="lab-header">
@@ -894,10 +895,28 @@ function PaperView({ summary }) {
         <span className="mode"><ShieldCheck size={16} /> {summary?.status ?? "not started"}</span>
       </div>
       <div className="metrics four">
-        <Metric label="Tracked" value={(summary?.tracked_candidates ?? []).length} />
+        <Metric label="Tracked" value={tracked.length} />
         <Metric label="Order mode" value={summary?.live_ordering_enabled ? "live" : "disabled"} />
         <Metric label="Protocol" value="30 days" />
-        <Metric label="Review" value="paper only" />
+        <Metric label="Review" value="regime-gated" />
+      </div>
+      <div className="candidate-list">
+        {tracked.map((candidate) => (
+          <div className="candidate-card compact" key={candidate.id}>
+            <div className="label-row">
+              <strong>{candidate.strategy_name}</strong>
+              <span className="badge success-badge">Paper queue</span>
+            </div>
+            <span>{candidate.market_id} · current {regimeLabel(candidate.current_regime)}</span>
+            <div className="mini-metrics">
+              <Metric label="Allowed" value={(candidate.allowed_regimes ?? []).map(regimeLabel).join(" / ") || "n/a"} />
+              <Metric label="Blocked" value={(candidate.blocked_regimes ?? []).map(regimeLabel).join(" / ") || "none"} />
+              <Metric label="Best regime" value={regimeLabel(candidate.dominant_profit_regime)} />
+              <Metric label="£500" value={(candidate.capital_summary?.feasible_accounts ?? []).includes(500) ? "OK" : "Blocked"} />
+            </div>
+          </div>
+        ))}
+        {tracked.length === 0 && <span className="muted">No candidates have passed the freshness, cost, capital, and regime gates yet.</span>}
       </div>
     </section>
   );
@@ -1290,6 +1309,7 @@ function TrialCard({ trial, onRefineTemplate }) {
   const backtest = trial.backtest ?? {};
   const warnings = humanWarnings(trial.warnings);
   const capital = accountFeasibility(trial.capital_scenarios, 500);
+  const pattern = trial.parameters?.bar_pattern_analysis ?? {};
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -1320,6 +1340,8 @@ function TrialCard({ trial, onRefineTemplate }) {
         <Metric label="Expectancy" value={formatMoney(backtest.expectancy_per_trade)} />
         <Metric label="Net/cost" value={formatRatio(backtest.net_cost_ratio)} />
         <Metric label="Cost/gross" value={percent(backtest.cost_to_gross_ratio)} />
+        <Metric label="Best regime" value={regimeLabel(pattern.dominant_profit_regime?.key)} />
+        <Metric label="Best month" value={pattern.dominant_profit_month?.key ?? "n/a"} />
         <Metric label="Spread/slip" value={`${round(backtest.estimated_spread_bps)} / ${round(backtest.estimated_slippage_bps)} bps`} />
         <Metric label="Trades" value={backtest.trade_count ?? 0} />
       </div>
@@ -1428,6 +1450,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssues(readiness);
   const capital = accountFeasibility(candidate.capital_scenarios, 500);
+  const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -1464,6 +1487,8 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
         <Metric label="Expectancy" value={formatMoney(candidate.audit?.backtest?.expectancy_per_trade)} />
         <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
+        <Metric label="Best regime" value={regimeLabel(pattern.dominant_profit_regime?.key)} />
+        <Metric label="Best month" value={pattern.dominant_profit_month?.key ?? "n/a"} />
         <Metric label="Spread/slip" value={`${round(candidate.audit?.backtest?.estimated_spread_bps)} / ${round(candidate.audit?.backtest?.estimated_slippage_bps)} bps`} />
         <Metric label="Trades" value={candidate.audit?.backtest?.trade_count ?? 0} />
       </div>
@@ -1849,6 +1874,12 @@ function humanWarnings(warnings = []) {
     isolated_parameter_peak: "Isolated parameter peak",
     costs_small_vs_turnover: "Costs small vs turnover",
     multiple_testing_haircut: "Multiple-testing haircut",
+    best_trades_dominate: "Best trades dominate",
+    fails_normal_volatility_regime: "Fails normal-vol regime",
+    high_volatility_only_edge: "High-vol only edge",
+    profit_concentrated_single_month: "Single-month profit",
+    profit_concentrated_single_regime: "Single-regime profit",
+    shock_regime_dependency: "Shock-regime dependency",
     below_ig_min_deal_size: "Below IG min stake",
     risk_budget_exceeded: "Risk budget exceeded",
     margin_too_large: "Margin too large",
@@ -1865,6 +1896,20 @@ function humanWarnings(warnings = []) {
     invalid_side: "Invalid side",
   };
   return (warnings ?? []).map((warning) => labels[warning] ?? warning);
+}
+
+function regimeLabel(value) {
+  return {
+    shock_event: "Shock",
+    rebound_after_selloff: "Rebound",
+    high_volatility: "High vol",
+    trend_up: "Trend up",
+    trend_down: "Trend down",
+    range_chop: "Range/chop",
+    low_volatility: "Low vol",
+    normal: "Normal",
+    unknown: "Unknown",
+  }[value] ?? value ?? "n/a";
 }
 
 function strategyFamilyLabel(value) {

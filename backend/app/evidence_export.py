@@ -46,6 +46,7 @@ def build_research_export_zip(
     exported_candidates = [_candidate_export(candidate, cost_profiles) for candidate in candidates]
     warning_rows = _warning_rows(exported_trials, exported_candidates)
     capital_rows = _capital_rows(exported_trials, exported_candidates)
+    bar_analysis = _bar_analysis_payload(run, exported_trials, exported_candidates)
     manifest = {
         "app": "slrno",
         "schema": "research_evidence_bundle_v1",
@@ -75,6 +76,11 @@ def build_research_export_zip(
         archive.writestr("capital_scenarios.csv", _csv_bytes(capital_rows))
         archive.writestr("cost_profiles.json", _json_bytes(_redact_sensitive(cost_profiles)))
         archive.writestr("warnings.csv", _csv_bytes(warning_rows))
+        archive.writestr("bar_analysis.json", _json_bytes(_redact_sensitive(bar_analysis)))
+        archive.writestr("regime_segments.csv", _csv_bytes(_regime_segment_rows(run)))
+        archive.writestr("monthly_pnl.csv", _csv_bytes(_pattern_summary_rows(bar_analysis, "monthly_summary")))
+        archive.writestr("session_pnl.csv", _csv_bytes(_pattern_summary_rows(bar_analysis, "session_summary")))
+        archive.writestr("pattern_warnings.csv", _csv_bytes(_pattern_warning_rows(bar_analysis)))
         archive.writestr("README.md", _readme(run_id, include_bars, bool(bar_snapshots), bool(cached_bar_exports)))
         if include_bars:
             if bar_snapshots:
@@ -405,6 +411,130 @@ def _warning_rows(trials: list[dict[str, object]], candidates: list[dict[str, ob
     return rows
 
 
+def _bar_analysis_payload(
+    run: dict[str, object],
+    trials: list[dict[str, object]],
+    candidates: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "schema": "research_bar_analysis_v1",
+        "market_regimes": _market_regimes(run),
+        "items": _pattern_items("trial", trials) + _pattern_items("candidate", candidates),
+    }
+
+
+def _market_regimes(run: dict[str, object]) -> list[dict[str, object]]:
+    config = run.get("config") if isinstance(run.get("config"), dict) else {}
+    statuses = config.get("market_statuses") if isinstance(config.get("market_statuses"), list) else []
+    output: list[dict[str, object]] = []
+    for status in statuses:
+        if not isinstance(status, dict):
+            continue
+        regime = status.get("bar_regime") if isinstance(status.get("bar_regime"), dict) else None
+        if regime is None:
+            continue
+        output.append(
+            {
+                "market_id": status.get("market_id"),
+                "interval": status.get("interval"),
+                "eodhd_symbol": status.get("eodhd_symbol"),
+                **regime,
+            }
+        )
+    return output
+
+
+def _pattern_items(entity_type: str, items: list[dict[str, object]]) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for item in items:
+        analysis = _item_pattern_analysis(item)
+        if not analysis:
+            continue
+        output.append(
+            {
+                "entity_type": entity_type,
+                "id": item.get("id"),
+                "run_id": item.get("run_id"),
+                "strategy_name": item.get("strategy_name"),
+                "market_id": _entity_market_id(item),
+                "promotion_tier": item.get("promotion_tier"),
+                "analysis": analysis,
+            }
+        )
+    return output
+
+
+def _item_pattern_analysis(item: dict[str, object]) -> dict[str, object] | None:
+    parameters = item.get("parameters") if isinstance(item.get("parameters"), dict) else None
+    if parameters is None:
+        audit = item.get("audit") if isinstance(item.get("audit"), dict) else {}
+        candidate = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+        parameters = candidate.get("parameters") if isinstance(candidate.get("parameters"), dict) else None
+    if not parameters:
+        return None
+    analysis = parameters.get("bar_pattern_analysis")
+    return analysis if isinstance(analysis, dict) else None
+
+
+def _regime_segment_rows(run: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for market in _market_regimes(run):
+        for segment in market.get("segments", []) if isinstance(market.get("segments"), list) else []:
+            if not isinstance(segment, dict):
+                continue
+            rows.append(
+                {
+                    "market_id": market.get("market_id"),
+                    "interval": market.get("interval"),
+                    **segment,
+                }
+            )
+    return rows
+
+
+def _pattern_summary_rows(bar_analysis: dict[str, object], key: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in bar_analysis.get("items", []) if isinstance(bar_analysis.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
+        for summary in analysis.get(key, []) if isinstance(analysis.get(key), list) else []:
+            if not isinstance(summary, dict):
+                continue
+            rows.append(
+                {
+                    "entity_type": item.get("entity_type"),
+                    "id": item.get("id"),
+                    "run_id": item.get("run_id"),
+                    "strategy_name": item.get("strategy_name"),
+                    "market_id": item.get("market_id"),
+                    "bucket_type": key.removesuffix("_summary"),
+                    **summary,
+                }
+            )
+    return rows
+
+
+def _pattern_warning_rows(bar_analysis: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in bar_analysis.get("items", []) if isinstance(bar_analysis.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
+        for warning in analysis.get("warnings", []) if isinstance(analysis.get("warnings"), list) else []:
+            rows.append(
+                {
+                    "entity_type": item.get("entity_type"),
+                    "id": item.get("id"),
+                    "run_id": item.get("run_id"),
+                    "strategy_name": item.get("strategy_name"),
+                    "market_id": item.get("market_id"),
+                    "warning": warning,
+                }
+            )
+    return rows
+
+
 def _entity_market_id(item: dict[str, object]) -> str:
     if item.get("market_id"):
         return str(item["market_id"])
@@ -520,6 +650,8 @@ Run ID: {run_id}
 This bundle is designed for offline review and Codex-assisted analysis. JSON files preserve nested audit evidence, while CSV files are intended for spreadsheet inspection.
 
 Bars: {bars_note}
+
+Pattern diagnostics: `bar_analysis.json`, `regime_segments.csv`, `monthly_pnl.csv`, `session_pnl.csv`, and `pattern_warnings.csv` describe regime fit and concentration risks where available.
 
 No API keys, passwords, or secret tokens are intentionally included in this export.
 """

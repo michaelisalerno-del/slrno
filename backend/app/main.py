@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .adaptive_research import AdaptiveSearchConfig, available_research_engines, run_adaptive_search
+from .bar_patterns import analyze_market_regimes
 from .broker_preview import broker_order_preview
 from .capital import CAPITAL_SCENARIOS_GBP, DAILY_LOSS_FRACTION, RISK_PER_TRADE_FRACTION, capital_scenarios, capital_summary
 from .config import allowed_origins
@@ -156,11 +157,12 @@ def backtests_summary(include_archived: bool = False) -> dict[str, object]:
 
 @app.get("/paper/summary")
 def paper_summary() -> dict[str, object]:
+    tracked_candidates = _paper_track_candidates()
     return {
-        "status": "not_started",
+        "status": "ready_queue" if tracked_candidates else "not_started",
         "live_ordering_enabled": False,
-        "protocol": "30-day paper review before any live trading work",
-        "tracked_candidates": [],
+        "protocol": "30-day paper review with regime gate before any live trading work",
+        "tracked_candidates": tracked_candidates,
     }
 
 
@@ -475,7 +477,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             payload.end,
             bars,
         )
-        market_status.update({"status": "evaluating", "bar_count": len(bars)})
+        market_status.update({"status": "evaluating", "bar_count": len(bars), "bar_regime": analyze_market_regimes(bars)})
         market_status["bar_snapshot"] = snapshot
         persist_status()
         cost_profile = _cost_profile_for_market(market)
@@ -812,6 +814,34 @@ def _risk_summary() -> dict[str, object]:
         "kill_switch_enabled": True,
         "policy": "paper/demo only; live order placement disabled",
     }
+
+
+def _paper_track_candidates(limit: int = 50) -> list[dict[str, object]]:
+    tracked: list[dict[str, object]] = []
+    for candidate in (_candidate_with_capital(item) for item in research_store.list_candidates(limit=limit)):
+        audit = candidate.get("audit") if isinstance(candidate.get("audit"), dict) else {}
+        readiness = audit.get("promotion_readiness") if isinstance(audit.get("promotion_readiness"), dict) else {}
+        if readiness.get("status") != "ready_for_paper":
+            continue
+        candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+        parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+        pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+        tracked.append(
+            {
+                "id": candidate.get("id"),
+                "run_id": candidate.get("run_id"),
+                "strategy_name": candidate.get("strategy_name"),
+                "market_id": candidate.get("market_id"),
+                "promotion_tier": candidate.get("promotion_tier"),
+                "allowed_regimes": pattern.get("allowed_regimes", []),
+                "blocked_regimes": pattern.get("blocked_regimes", []),
+                "current_regime": (pattern.get("market_regime") or {}).get("current_regime") if isinstance(pattern.get("market_regime"), dict) else None,
+                "dominant_profit_regime": (pattern.get("dominant_profit_regime") or {}).get("key") if isinstance(pattern.get("dominant_profit_regime"), dict) else None,
+                "capital_summary": candidate.get("capital_summary"),
+                "next_action": readiness.get("next_action"),
+            }
+        )
+    return tracked
 
 
 def _candidate_queue_summary(candidates: list[dict[str, object]]) -> dict[str, int]:

@@ -37,6 +37,12 @@ ROBUSTNESS_BLOCKING_WARNINGS = {
     "high_sharpe_weak_folds",
     "isolated_parameter_peak",
     "multiple_testing_haircut",
+    "best_trades_dominate",
+    "fails_normal_volatility_regime",
+    "high_volatility_only_edge",
+    "profit_concentrated_single_month",
+    "profit_concentrated_single_regime",
+    "shock_regime_dependency",
 }
 
 

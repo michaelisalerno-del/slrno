@@ -54,9 +54,14 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
         assert "trials.json" in names
         assert "candidates.csv" in names
         assert "capital_scenarios.csv" in names
+        assert "bar_analysis.json" in names
+        assert "monthly_pnl.csv" in names
+        assert "session_pnl.csv" in names
+        assert "pattern_warnings.csv" in names
         assert "bars/NAS100_5min.csv" in names
         manifest = json.loads(archive.read("manifest.json"))
         run = json.loads(archive.read("run.json"))
+        bar_analysis = json.loads(archive.read("bar_analysis.json"))
         capital_csv = archive.read("capital_scenarios.csv").decode()
         bars_csv = archive.read("bars/NAS100_5min.csv").decode()
 
@@ -64,6 +69,7 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
     assert manifest["bar_snapshots"][0]["sha256"] == snapshot["sha256"]
     assert snapshot["sha256"]
     assert run["config"]["api_token"] == "***"
+    assert bar_analysis["items"][0]["analysis"]["warnings"] == ["profit_concentrated_single_month"]
     assert "10000.0" in capital_csv
     assert "timestamp" in bars_csv
 
@@ -190,6 +196,13 @@ def _evaluation(name: str) -> CandidateEvaluation:
                 "family": "fixture",
                 "position_size": 1.0,
                 "stop_loss_bps": 20.0,
+                "bar_pattern_analysis": {
+                    "schema": "bar_pattern_analysis_v1",
+                    "warnings": ["profit_concentrated_single_month"],
+                    "monthly_summary": [{"key": "2025-01", "net_profit": 100, "active_bars": 3}],
+                    "session_summary": [{"key": "us_open", "net_profit": 100, "active_bars": 3}],
+                    "regime_summary": [{"key": "trend_up", "net_profit": 100, "active_bars": 3}],
+                },
             },
             [0.1, 0.9],
         ),

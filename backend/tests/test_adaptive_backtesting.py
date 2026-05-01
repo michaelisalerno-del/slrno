@@ -67,6 +67,7 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert best.candidate.parameters["promotion_tier"] == best.promotion_tier
     assert best.candidate.parameters["search_audit"]["trial_count"] == 9
     assert "deflated_sharpe_probability" in best.candidate.parameters["sharpe_diagnostics"]
+    assert "bar_pattern_analysis" in best.candidate.parameters
     assert "parameter_stability_score" in best.candidate.parameters
     assert "net_cost_ratio" in best.backtest.__dict__
     assert best.backtest.cost_to_gross_ratio >= 0
