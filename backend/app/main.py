@@ -35,6 +35,9 @@ markets.seed_defaults()
 research_store = ResearchStore()
 research_critic = ResearchCritic.default()
 
+CRITIQUE_TRIAL_SAMPLE_LIMIT = 80
+CRITIQUE_CANDIDATE_SAMPLE_LIMIT = 24
+
 
 class EODHDSettings(BaseModel):
     api_token: str = Field(min_length=1)
@@ -404,7 +407,7 @@ def get_research_run(run_id: int) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="Research run not found")
     return {
         **run,
-        "trials": research_store.list_trials(run_id)[:25],
+        "trials": research_store.list_trials(run_id, limit=25),
         "candidates": research_store.list_candidates(run_id),
         "pareto": research_store.list_pareto(run_id),
     }
@@ -443,12 +446,7 @@ def critique_latest_research() -> dict[str, object]:
     if not runs:
         return research_critic.critique(None, [], []).as_dict()
     latest = research_store.get_run(int(runs[0]["id"]))
-    run_id = int(runs[0]["id"])
-    return research_critic.critique(
-        latest,
-        research_store.list_trials(run_id),
-        research_store.list_candidates(run_id),
-    ).as_dict()
+    return _critique_research_run(latest).as_dict()
 
 
 @app.get("/research/runs/{run_id}/critique")
@@ -456,11 +454,28 @@ def critique_research_run(run_id: int) -> dict[str, object]:
     run = research_store.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Research run not found")
-    return research_critic.critique(
-        run,
-        research_store.list_trials(run_id),
-        research_store.list_candidates(run_id),
-    ).as_dict()
+    return _critique_research_run(run).as_dict()
+
+
+def _critique_research_run(run: dict[str, object] | None):
+    if run is None:
+        return research_critic.critique(None, [], [])
+    run_id = int(run["id"])
+    trials = research_store.list_trials(run_id, limit=CRITIQUE_TRIAL_SAMPLE_LIMIT)
+    candidates = research_store.list_candidates(run_id, limit=CRITIQUE_CANDIDATE_SAMPLE_LIMIT)
+    stored_candidate_count = research_store.count_candidates(run_id)
+    candidate_count = max(stored_candidate_count, len(candidates))
+    trial_count = int(run.get("trial_count") or len(trials))
+    critique_run = {
+        **run,
+        "candidate_count": candidate_count,
+        "critique_sampled": trial_count > len(trials) or candidate_count > len(candidates),
+        "critique_trial_sample_size": len(trials),
+        "critique_candidate_sample_size": len(candidates),
+        "critique_trial_limit": CRITIQUE_TRIAL_SAMPLE_LIMIT,
+        "critique_candidate_limit": CRITIQUE_CANDIDATE_SAMPLE_LIMIT,
+    }
+    return research_critic.critique(critique_run, trials, candidates)
 
 
 @app.get("/research/candidates")

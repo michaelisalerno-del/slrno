@@ -18,12 +18,12 @@ def install_payload_compaction() -> None:
     original_get_candidate = ResearchStore.get_candidate
 
     @wraps(original_list_trials)
-    def list_trials(self: ResearchStore, run_id: int | None = None) -> list[dict[str, object]]:
-        return [_compact_trial(trial) for trial in original_list_trials(self, run_id)]
+    def list_trials(self: ResearchStore, run_id: int | None = None, limit: int | None = None) -> list[dict[str, object]]:
+        return [_compact_trial(trial) for trial in original_list_trials(self, run_id, limit)]
 
     @wraps(original_list_candidates)
-    def list_candidates(self: ResearchStore, run_id: int | None = None) -> list[dict[str, object]]:
-        return [_compact_candidate(candidate) for candidate in original_list_candidates(self, run_id)]
+    def list_candidates(self: ResearchStore, run_id: int | None = None, limit: int | None = None) -> list[dict[str, object]]:
+        return [_compact_candidate(candidate) for candidate in original_list_candidates(self, run_id, limit)]
 
     @wraps(original_get_candidate)
     def get_candidate(self: ResearchStore, candidate_id: int) -> dict[str, object] | None:

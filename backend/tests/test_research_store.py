@@ -74,6 +74,23 @@ def test_research_store_deletes_run_trials_and_candidates(tmp_path):
     assert store.delete_run(999_999) is None
 
 
+def test_research_store_limits_trial_and_candidate_reads(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")
+
+    for name, score in (("low", 10), ("high", 90), ("mid", 40)):
+        evaluation = _evaluation(name, passed=True, robustness_score=score)
+        store.save_trial(run_id, evaluation)
+        store.save_candidate(run_id, "NAS100", evaluation)
+
+    trials = store.list_trials(run_id, limit=2)
+    candidates = store.list_candidates(run_id, limit=2)
+
+    assert [trial["strategy_name"] for trial in trials] == ["high", "mid"]
+    assert [candidate["strategy_name"] for candidate in candidates] == ["high", "mid"]
+    assert store.count_candidates(run_id) == 3
+
+
 def test_research_store_records_material_watchlist_leads(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("US500", {"interval": "5min"}, status="finished")

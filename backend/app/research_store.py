@@ -301,20 +301,23 @@ class ResearchStore:
             "best_score": row[9] or 0,
         }
 
-    def list_trials(self, run_id: int | None = None) -> list[dict[str, object]]:
+    def list_trials(self, run_id: int | None = None, limit: int | None = None) -> list[dict[str, object]]:
         query = """
             SELECT id, run_id, strategy_name, passed, robustness_score, metrics_json, warnings_json,
                    strategy_family, style, parameters_json, backtest_json, folds_json, costs_json, tags_json,
                    promotion_tier
             FROM strategy_trials
         """
-        params: tuple[object, ...] = ()
+        params: list[object] = []
         if run_id is not None:
             query += " WHERE run_id = ?"
-            params = (run_id,)
+            params.append(run_id)
         query += " ORDER BY robustness_score DESC, id"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
         with self._connect() as conn:
-            rows = conn.execute(query, params).fetchall()
+            rows = conn.execute(query, tuple(params)).fetchall()
         return [_trial_from_row(row) for row in rows]
 
     def list_pareto(self, run_id: int) -> list[dict[str, object]]:
@@ -368,19 +371,24 @@ class ResearchStore:
             )
         return output
 
-    def list_candidates(self, run_id: int | None = None) -> list[dict[str, object]]:
-        params: tuple[object, ...] = ()
+    def list_candidates(self, run_id: int | None = None, limit: int | None = None) -> list[dict[str, object]]:
+        params: list[object] = []
         where = ""
         if run_id is not None:
             where = "WHERE run_id = ?"
-            params = (run_id,)
+            params.append(run_id)
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = " LIMIT ?"
+            params.append(max(0, int(limit)))
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at, promotion_tier
                 FROM candidates {where} ORDER BY robustness_score DESC, id DESC
+                {limit_clause}
                 """,
-                params,
+                tuple(params),
             ).fetchall()
         candidates = []
         for row in rows:
@@ -398,7 +406,17 @@ class ResearchStore:
                     "promotion_tier": str(audit.get("promotion_tier") or row[8]),
                 }
             )
-        return self._include_trial_research_leads(candidates, run_id)
+        lead_limit = None if limit is None else max(0, int(limit) - len(candidates))
+        return self._include_trial_research_leads(candidates, run_id, lead_limit)
+
+    def count_candidates(self, run_id: int | None = None) -> int:
+        query = "SELECT COUNT(*) FROM candidates"
+        params: tuple[object, ...] = ()
+        if run_id is not None:
+            query += " WHERE run_id = ?"
+            params = (run_id,)
+        with self._connect() as conn:
+            return int(conn.execute(query, params).fetchone()[0])
 
     def get_candidate(self, candidate_id: int) -> dict[str, object] | None:
         if candidate_id < 0:
@@ -429,9 +447,18 @@ class ResearchStore:
             "promotion_tier": str(audit.get("promotion_tier") or row[8]),
         }
 
-    def _include_trial_research_leads(self, candidates: list[dict[str, object]], run_id: int | None) -> list[dict[str, object]]:
+    def _include_trial_research_leads(
+        self,
+        candidates: list[dict[str, object]],
+        run_id: int | None,
+        lead_limit: int | None = None,
+    ) -> list[dict[str, object]]:
         existing = {(int(candidate["run_id"]), str(candidate["strategy_name"])) for candidate in candidates}
         limit = 12 if run_id is not None else 24
+        if lead_limit is not None:
+            limit = min(limit, max(0, int(lead_limit)))
+        if limit <= 0:
+            return sorted(candidates, key=lambda item: (float(item["robustness_score"]), int(item["id"])), reverse=True)
         added = 0
         for trial in self._list_candidate_lead_trials(run_id, limit * 4):
             key = (int(trial["run_id"]), str(trial["strategy_name"]))

@@ -67,6 +67,41 @@ def test_research_critic_flags_high_auc_as_possible_leakage():
     assert any(finding.code == "possible_leakage_or_overfit" for finding in report.findings)
 
 
+def test_research_critic_reports_full_counts_for_sampled_dashboard_context():
+    report = ResearchCritic.default().critique(
+        {
+            "id": 1,
+            "market_id": "NAS100",
+            "data_source": "eodhd",
+            "trial_count": 500,
+            "passed_count": 0,
+            "candidate_count": 35,
+            "critique_sampled": True,
+            "critique_trial_limit": 80,
+            "critique_candidate_limit": 24,
+        },
+        [
+            {
+                "id": index,
+                "run_id": 1,
+                "strategy_name": f"sample_{index}",
+                "passed": False,
+                "robustness_score": 10,
+                "metrics": {},
+                "warnings": [],
+            }
+            for index in range(80)
+        ],
+        [],
+    )
+
+    codes = {finding.code for finding in report.findings}
+    assert report.trial_count == 500
+    assert report.candidate_count == 35
+    assert "sampled_trial_audit" in codes
+    assert "trial_count_mismatch" not in codes
+
+
 def _evaluation(name: str, passed: bool) -> CandidateEvaluation:
     return CandidateEvaluation(
         candidate=ProbabilityCandidate(name, ("fixture",), {}, [0.1, 0.9]),

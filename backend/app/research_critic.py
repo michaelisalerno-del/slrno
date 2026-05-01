@@ -87,8 +87,8 @@ class ResearchCritic:
             data_source=str(run["data_source"]),
             decision=_decision(findings, candidates),
             confidence_score=_confidence_score(findings),
-            trial_count=len(trials),
-            candidate_count=len(candidates),
+            trial_count=_report_count(run, "trial_count", len(trials)),
+            candidate_count=_report_count(run, "candidate_count", len(candidates)),
             findings=tuple(findings),
         )
 
@@ -104,6 +104,19 @@ class AuditTrailRule:
                     "no_trial_audit",
                     "No individual trials were stored. A run without rejected trials is not useful evidence.",
                     {"expected_trials": expected_trials},
+                )
+            )
+        elif _is_sampled_context(context) and expected_trials > len(context.trials):
+            findings.append(
+                CriticFinding(
+                    "note",
+                    "sampled_trial_audit",
+                    "The dashboard critique is using a bounded sample of stored trials to keep large research runs responsive.",
+                    {
+                        "summary_count": expected_trials,
+                        "sampled_count": len(context.trials),
+                        "sample_limit": int(context.run.get("critique_trial_limit") or len(context.trials)),
+                    },
                 )
             )
         elif expected_trials != len(context.trials):
@@ -135,8 +148,8 @@ class ProviderValidationRule:
 
 class SearchBreadthRule:
     def evaluate(self, context: CriticContext) -> list[CriticFinding]:
-        trial_count = len(context.trials)
-        passed = sum(1 for trial in context.trials if trial.get("passed"))
+        trial_count = _report_count(context.run, "trial_count", len(context.trials))
+        passed = _report_count(context.run, "passed_count", sum(1 for trial in context.trials if trial.get("passed")))
         pass_rate = passed / trial_count if trial_count else 0.0
         findings: list[CriticFinding] = []
         if trial_count < 10:
@@ -353,3 +366,17 @@ def _confidence_score(findings: list[CriticFinding]) -> float:
         else:
             score -= 3.0
     return max(0.0, round(score, 2))
+
+
+def _report_count(run: dict[str, object], key: str, fallback: int) -> int:
+    value = run.get(key)
+    if value is None:
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _is_sampled_context(context: CriticContext) -> bool:
+    return bool(context.run.get("critique_sampled"))
