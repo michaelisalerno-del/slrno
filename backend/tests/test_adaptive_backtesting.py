@@ -68,6 +68,8 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert best.candidate.parameters["search_audit"]["trial_count"] == 9
     assert "deflated_sharpe_probability" in best.candidate.parameters["sharpe_diagnostics"]
     assert "bar_pattern_analysis" in best.candidate.parameters
+    assert "evidence_profile" in best.candidate.parameters
+    assert "positive_fold_rate" in best.candidate.parameters["evidence_profile"]
     assert "parameter_stability_score" in best.candidate.parameters
     assert "net_cost_ratio" in best.backtest.__dict__
     assert best.backtest.cost_to_gross_ratio >= 0
@@ -319,6 +321,38 @@ def test_short_sharpe_sample_is_flagged_separately_from_weak_sharpe():
 
     assert "weak_sharpe" not in warnings
     assert "short_sharpe_sample" in warnings
+
+
+def test_warnings_flag_weak_oos_and_fold_concentration():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = public_ig_cost_profile(market)
+    backtest = BacktestResult(
+        net_profit=600,
+        sharpe=1.0,
+        max_drawdown=100,
+        win_rate=0.55,
+        trade_count=40,
+        exposure=0.3,
+        turnover=40,
+        train_profit=800,
+        test_profit=100,
+        gross_profit=900,
+        total_cost=300,
+        daily_pnl_sharpe=1.0,
+        sharpe_observations=140,
+        expectancy_per_trade=15,
+        average_cost_per_trade=7.5,
+        net_cost_ratio=2,
+        cost_to_gross_ratio=0.333,
+    )
+    positive_fold = BacktestResult(**{**backtest.__dict__, "net_profit": 100, "trade_count": 4})
+    negative_fold = BacktestResult(**{**backtest.__dict__, "net_profit": -150, "trade_count": 4})
+
+    warnings = _warnings(backtest, (positive_fold, negative_fold), backtest, BacktestConfig(), "mean_reversion", profile)
+
+    assert "weak_oos_evidence" in warnings
+    assert "low_oos_trades" in warnings
+    assert "one_fold_dependency" in warnings
 
 
 def test_turnaround_tuesday_signals_after_down_monday():

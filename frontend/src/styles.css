@@ -613,7 +613,7 @@ button.ghost {
 }
 
 .refinement-metrics {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .refinement-lock {
@@ -662,6 +662,12 @@ button.ghost {
 .repair-action button,
 .compact-button {
   white-space: nowrap;
+}
+
+.repair-mode-badge {
+  justify-content: center;
+  min-height: 34px;
+  border-radius: 8px;
 }
 
 .metrics,

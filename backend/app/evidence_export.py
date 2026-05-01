@@ -329,6 +329,7 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
     for trial in trials:
         backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
         parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+        evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
         pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
         gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
         summary = trial.get("capital_summary") if isinstance(trial.get("capital_summary"), dict) else {}
@@ -346,6 +347,11 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
                 "sharpe_observations": backtest.get("sharpe_observations"),
                 "max_drawdown": backtest.get("max_drawdown"),
                 "trade_count": backtest.get("trade_count"),
+                "oos_net_profit": evidence.get("oos_net_profit"),
+                "oos_trade_count": evidence.get("oos_trade_count"),
+                "positive_fold_rate": evidence.get("positive_fold_rate"),
+                "single_fold_profit_share": evidence.get("single_fold_profit_share"),
+                "worst_fold_net_profit": evidence.get("worst_fold_net_profit"),
                 "total_cost": backtest.get("total_cost"),
                 "net_cost_ratio": backtest.get("net_cost_ratio"),
                 "cost_to_gross_ratio": backtest.get("cost_to_gross_ratio"),
@@ -370,6 +376,7 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
         backtest = audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
         candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
         parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+        evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
         pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
         gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
         readiness = audit.get("promotion_readiness") if isinstance(audit.get("promotion_readiness"), dict) else {}
@@ -388,6 +395,11 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
                 "daily_pnl_sharpe": backtest.get("daily_pnl_sharpe"),
                 "sharpe_observations": backtest.get("sharpe_observations"),
                 "total_cost": backtest.get("total_cost"),
+                "oos_net_profit": evidence.get("oos_net_profit"),
+                "oos_trade_count": evidence.get("oos_trade_count"),
+                "positive_fold_rate": evidence.get("positive_fold_rate"),
+                "single_fold_profit_share": evidence.get("single_fold_profit_share"),
+                "worst_fold_net_profit": evidence.get("worst_fold_net_profit"),
                 "target_regime": pattern.get("target_regime"),
                 "regime_verdict": pattern.get("regime_verdict"),
                 "allowed_regimes": "|".join(str(item) for item in pattern.get("allowed_regimes", [])),

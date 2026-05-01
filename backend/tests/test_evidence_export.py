@@ -65,6 +65,7 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
         run = json.loads(archive.read("run.json"))
         bar_analysis = json.loads(archive.read("bar_analysis.json"))
         capital_csv = archive.read("capital_scenarios.csv").decode()
+        trials_csv = archive.read("trials.csv").decode()
         bars_csv = archive.read("bars/NAS100_5min.csv").decode()
 
     assert manifest["data_completeness"]["exact_run_bars_available"] is True
@@ -74,6 +75,8 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
     assert bar_analysis["items"][0]["analysis"]["warnings"] == ["profit_concentrated_single_month"]
     assert "2000.0" in capital_csv
     assert "10000.0" in capital_csv
+    assert "positive_fold_rate" in trials_csv
+    assert "single_fold_profit_share" in trials_csv
     assert "timestamp" in bars_csv
 
 

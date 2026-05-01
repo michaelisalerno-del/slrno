@@ -28,8 +28,11 @@ COST_BLOCKING_WARNINGS = {
 }
 ROBUSTNESS_BLOCKING_WARNINGS = {
     "too_few_trades",
+    "low_oos_trades",
     "drawdown_too_high",
     "profits_not_consistent_across_folds",
+    "weak_oos_evidence",
+    "one_fold_dependency",
     "calendar_effect_needs_longer_history",
     "known_edge_needs_cross_market_validation",
     "high_sharpe_low_trade_count",

@@ -159,6 +159,7 @@ function App() {
     include_regime_scans: false,
     regime_scan_budget_per_regime: "",
     excluded_months: [],
+    repair_mode: "standard",
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
 
@@ -315,6 +316,7 @@ function App() {
         search_budget: budget,
         regime_scan_budget_per_regime: researchRun.regime_scan_budget_per_regime === "" ? null : Number(researchRun.regime_scan_budget_per_regime),
         excluded_months: uniqueMonths(researchRun.excluded_months),
+        repair_mode: researchRun.repair_mode || "standard",
         product_mode: "spread_bet",
       });
       setActiveTab("results");
@@ -364,6 +366,7 @@ function App() {
       warnings: warningCodesForSource(source),
       readiness: source.audit?.promotion_readiness ?? null,
       pattern,
+      evidence: evidenceProfileForSource(source),
       parameters,
     };
     setRefinementTemplate(template);
@@ -408,7 +411,18 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        repairMode: "focused_retest",
         label: "Focused robustness run staged.",
+      },
+      evidence_first: {
+        marketIds: selectedMarket,
+        budget: "24",
+        stress: 2.5,
+        start: researchRun.start,
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        repairMode: "evidence_first",
+        label: "Evidence-first retest staged with a smaller locked search and stricter fold ranking.",
       },
       more_trades: {
         marketIds: selectedMarket,
@@ -417,6 +431,7 @@ function App() {
         start: "2024-01-01",
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        repairMode: "more_trades",
         label: "More-trades repair run staged with longer history and a deeper search.",
       },
       higher_costs: {
@@ -426,6 +441,7 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        repairMode: "cost_stress",
         label: "Higher-cost robustness run staged.",
       },
       cross_market: {
@@ -435,6 +451,7 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        repairMode: "cross_market",
         label: "Cross-market robustness run staged.",
       },
       regime_scan: {
@@ -446,6 +463,7 @@ function App() {
         interval: refinementTemplate.interval,
         includeRegimeScans: true,
         regimeScanBudget: "",
+        repairMode: "regime_repair",
         label: "Regime repair run staged with capped specialist scans.",
       },
       exclude_best_month: {
@@ -456,6 +474,7 @@ function App() {
         end: researchRun.end,
         interval: refinementTemplate.interval,
         excludedMonths: dominantMonth ? [dominantMonth] : [],
+        repairMode: "month_exclusion",
         label: dominantMonth ? `Best-month exclusion run staged without ${dominantMonth}.` : "No dominant month found to exclude.",
       },
       longer_history: {
@@ -465,6 +484,7 @@ function App() {
         start: "2024-01-01",
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        repairMode: "longer_history",
         label: "Longer-history robustness run staged.",
       },
     }[preset];
@@ -491,6 +511,7 @@ function App() {
       include_regime_scans: Boolean(presetConfig.includeRegimeScans),
       regime_scan_budget_per_regime: presetConfig.regimeScanBudget ?? "",
       excluded_months: presetConfig.excludedMonths ?? [],
+      repair_mode: presetConfig.repairMode ?? "standard",
     }));
     setMessage(presetConfig.label);
   }
@@ -690,6 +711,10 @@ function App() {
                       <Metric label="Take profit" value={`${round(refinementTemplate.parameters.take_profit_bps)} bps`} />
                       <Metric label="Hold bars" value={refinementTemplate.parameters.max_hold_bars ?? "-"} />
                       <Metric label="Direction" value={refinementTemplate.parameters.direction ?? "-"} />
+                      <Metric label="Fold win" value={percent(refinementTemplate.evidence?.positive_fold_rate)} />
+                      <Metric label="Fold share" value={percent(refinementTemplate.evidence?.single_fold_profit_share)} />
+                      <Metric label="OOS net" value={formatMoney(refinementTemplate.evidence?.oos_net_profit)} />
+                      <Metric label="OOS trades" value={refinementTemplate.evidence?.oos_trade_count ?? 0} />
                     </div>
                     <div className="warning-row">
                       {(refinementTemplate.warnings ?? []).length > 0
@@ -716,6 +741,7 @@ function App() {
                     </div>
                     <div className="button-row robustness-actions">
                       <button type="button" className="secondary" onClick={() => applyRobustnessPreset("focused")}><RefreshCw size={16} /> Same market</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("evidence_first")}>Evidence first</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("higher_costs")}>Higher costs</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Cross-market</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("longer_history")}>Longer history</button>
@@ -812,6 +838,8 @@ function App() {
                   <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} required />
                   <label>Strategy trials / market</label>
                   <input value={researchRun.search_budget} onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })} placeholder={`${selectedPreset.budget}`} type="number" min="6" max="500" />
+                  <label>Repair mode</label>
+                  <span className="badge muted-badge repair-mode-badge">{repairModeLabel(researchRun.repair_mode)}</span>
                   <label>Excluded months</label>
                   <div className="exclusion-row">
                     {uniqueMonths(researchRun.excluded_months).length > 0
@@ -1476,6 +1504,7 @@ function TrialCard({ trial, onRefineTemplate }) {
   const capital = accountFeasibility(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
+  const evidence = evidenceProfileForSource(trial);
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -1507,6 +1536,10 @@ function TrialCard({ trial, onRefineTemplate }) {
         <Metric label="Net/cost" value={formatRatio(backtest.net_cost_ratio)} />
         <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
         <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
+        <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
+        <Metric label="OOS net" value={formatMoney(evidence.oos_net_profit)} />
+        <Metric label="OOS trades" value={evidence.oos_trade_count ?? 0} />
         <Metric label="Regime verdict" value={regimeVerdictLabel(pattern.regime_verdict)} />
         <Metric label="Cost/gross" value={percent(backtest.cost_to_gross_ratio)} />
         <Metric label="Best regime" value={regimeLabel(pattern.dominant_profit_regime?.key)} />
@@ -1622,6 +1655,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
   const capital = accountFeasibility(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
+  const evidence = evidenceProfileForSource(candidate);
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -1660,6 +1694,10 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
         <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
         <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
+        <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
+        <Metric label="OOS net" value={formatMoney(evidence.oos_net_profit)} />
+        <Metric label="OOS trades" value={evidence.oos_trade_count ?? 0} />
         <Metric label="Regime verdict" value={regimeVerdictLabel(pattern.regime_verdict)} />
         <Metric label="Best regime" value={regimeLabel(pattern.dominant_profit_regime?.key)} />
         <Metric label="Worst regime" value={regimeLabel(pattern.worst_regime?.key)} />
@@ -1999,6 +2037,41 @@ function candidateReadiness(candidate) {
   };
 }
 
+function evidenceProfileForSource(source = {}) {
+  const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
+  const stored = parameters.evidence_profile;
+  if (stored && typeof stored === "object") {
+    return {
+      fold_count: numberOrZero(stored.fold_count),
+      positive_fold_rate: numberOrZero(stored.positive_fold_rate),
+      single_fold_profit_share: numberOrZero(stored.single_fold_profit_share),
+      oos_net_profit: numberOrZero(stored.oos_net_profit),
+      oos_trade_count: numberOrZero(stored.oos_trade_count),
+      worst_fold_net_profit: numberOrZero(stored.worst_fold_net_profit),
+    };
+  }
+  const folds = arrayValue(source.audit?.fold_results).length ? source.audit.fold_results : arrayValue(source.folds);
+  if (folds.length === 0) {
+    return { fold_count: 0, positive_fold_rate: 0, single_fold_profit_share: 0, oos_net_profit: 0, oos_trade_count: 0, worst_fold_net_profit: 0 };
+  }
+  const foldNet = folds.map((fold) => numberOrZero(fold.net_profit));
+  const positive = foldNet.filter((value) => value > 0);
+  const positiveTotal = positive.reduce((total, value) => total + value, 0);
+  return {
+    fold_count: folds.length,
+    positive_fold_rate: positive.length / folds.length,
+    single_fold_profit_share: positiveTotal > 0 ? Math.max(...positive) / positiveTotal : 0,
+    oos_net_profit: foldNet.reduce((total, value) => total + value, 0),
+    oos_trade_count: folds.reduce((total, fold) => total + numberOrZero(fold.trade_count), 0),
+    worst_fold_net_profit: Math.min(...foldNet),
+  };
+}
+
+function numberOrZero(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
 function warningCodesForSource(source = {}) {
   const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
   const pattern = parameters.bar_pattern_analysis ?? {};
@@ -2090,7 +2163,7 @@ function repairActionsForTemplate(template) {
       primary: actions.length === 0,
     });
   }
-  if (hasAny("profits_not_consistent_across_folds", "high_sharpe_weak_folds", "unstable_folds", "weak_oos_economics", "weak_oos_evidence", "no_walk_forward_folds")) {
+  if (hasAny("profits_not_consistent_across_folds", "high_sharpe_weak_folds", "unstable_folds", "weak_oos_economics", "weak_oos_evidence", "no_walk_forward_folds", "one_fold_dependency")) {
     add({
       id: "fold-repair",
       preset: "longer_history",
@@ -2100,11 +2173,21 @@ function repairActionsForTemplate(template) {
       primary: actions.length === 0,
     });
   }
-  if (hasAny("multiple_testing_haircut", "isolated_parameter_peak", "known_edge_needs_cross_market_validation")) {
+  if (hasAny("multiple_testing_haircut", "isolated_parameter_peak")) {
+    add({
+      id: "evidence-first",
+      preset: "evidence_first",
+      title: "Reduce scan bias",
+      detail: "Rerank a smaller locked search around fold strength, OOS profit, and concentration before trusting the headline.",
+      button: "Evidence first",
+      primary: actions.length === 0,
+    });
+  }
+  if (hasAny("known_edge_needs_cross_market_validation", "multiple_testing_haircut")) {
     add({
       id: "scan-bias",
       preset: "cross_market",
-      title: "Reduce scan bias",
+      title: "Cross-check markets",
       detail: "Retest the locked family across enabled markets so one lucky scan does not dominate the decision.",
       button: "Cross-market",
       primary: actions.length === 0,
@@ -2147,6 +2230,20 @@ function nextActionLabel(action) {
   }[action] ?? "Next: research review.";
 }
 
+function repairModeLabel(value) {
+  return {
+    standard: "Standard search",
+    focused_retest: "Focused retest",
+    evidence_first: "Evidence first",
+    more_trades: "More trades",
+    cost_stress: "Cost stress",
+    cross_market: "Cross-market",
+    regime_repair: "Regime repair",
+    month_exclusion: "Month exclusion",
+    longer_history: "Longer history",
+  }[value] ?? value ?? "Standard search";
+}
+
 function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
   const scenario = (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
   if (!scenario) {
@@ -2185,6 +2282,7 @@ function humanWarnings(warnings = []) {
     no_walk_forward_folds: "No walk-forward folds",
     weak_oos_economics: "Weak OOS economics",
     weak_oos_evidence: "Weak OOS evidence",
+    one_fold_dependency: "One fold dominates",
     funding_eats_swing_edge: "Funding eats swing edge",
     needs_ig_price_validation: "Needs IG price validation",
     not_paper_ready_research_lead: "Research lead only",

@@ -97,6 +97,7 @@ class ResearchRunPayload(BaseModel):
     include_regime_scans: bool = False
     regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
     excluded_months: list[str] = Field(default_factory=list)
+    repair_mode: str = "standard"
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -520,6 +521,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         cost_stress_multiplier=max(1.0, payload.cost_stress_multiplier),
                         include_regime_scans=payload.include_regime_scans,
                         regime_scan_budget_per_regime=payload.regime_scan_budget_per_regime,
+                        repair_mode=payload.repair_mode,
                     ),
                 )
                 market_evaluations = list(result.evaluations)
@@ -743,6 +745,7 @@ def _research_run_config(
         "include_regime_scans": payload.include_regime_scans,
         "regime_scan_budget_per_regime": payload.regime_scan_budget_per_regime,
         "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
+        "repair_mode": payload.repair_mode,
         "product_mode": payload.product_mode,
         "research_only": True,
         "ig_validation_required": True,

@@ -74,6 +74,7 @@ class AdaptiveSearchConfig:
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = False
     regime_scan_budget_per_regime: int | None = None
+    repair_mode: str = "standard"
     seed: int = 7
 
 
@@ -116,6 +117,7 @@ def run_adaptive_search(
         backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
         backtest = run_vector_backtest(bars, signals, backtest_config)
         fold_results = tuple(_fold_backtests(bars, signals, backtest_config, folds))
+        evidence_profile = _evidence_profile(backtest, fold_results)
         stress = run_vector_backtest(
             bars,
             signals,
@@ -149,6 +151,8 @@ def run_adaptive_search(
             "estimated_slippage_bps": cost_profile.slippage_bps,
             "stress_net_profit": round(stress.net_profit, 4),
             "stress_sharpe": round(stress.sharpe, 4),
+            "repair_mode": config.repair_mode,
+            "evidence_profile": evidence_profile,
             "bar_pattern_analysis": pattern_analysis,
         }
         candidate = ProbabilityCandidate(
@@ -188,6 +192,7 @@ def run_adaptive_search(
                 backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
                 backtest = run_vector_backtest(bars, signals, backtest_config)
                 fold_results = tuple(_fold_backtests(bars, signals, backtest_config, folds))
+                evidence_profile = _evidence_profile(backtest, fold_results)
                 stress = run_vector_backtest(
                     bars,
                     signals,
@@ -223,6 +228,8 @@ def run_adaptive_search(
                     "estimated_slippage_bps": cost_profile.slippage_bps,
                     "stress_net_profit": round(stress.net_profit, 4),
                     "stress_sharpe": round(stress.sharpe, 4),
+                    "repair_mode": config.repair_mode,
+                    "evidence_profile": evidence_profile,
                     "bar_pattern_analysis": pattern_analysis,
                 }
                 candidate = ProbabilityCandidate(
@@ -532,6 +539,21 @@ def _fold_backtests(
     return results
 
 
+def _evidence_profile(backtest: BacktestResult, folds: tuple[BacktestResult, ...]) -> dict[str, object]:
+    fold_net = [float(fold.net_profit) for fold in folds]
+    positive_fold_net = [profit for profit in fold_net if profit > 0]
+    positive_total = sum(positive_fold_net)
+    return {
+        "fold_count": len(folds),
+        "positive_fold_rate": round(_positive_fold_rate(folds), 6),
+        "single_fold_profit_share": round(max(positive_fold_net) / positive_total, 6) if positive_total > 0 else 0.0,
+        "oos_net_profit": round(sum(fold_net), 4),
+        "oos_trade_count": sum(int(fold.trade_count) for fold in folds),
+        "worst_fold_net_profit": round(min(fold_net), 4) if fold_net else 0.0,
+        "full_period_test_profit": round(backtest.test_profit, 4),
+    }
+
+
 def _adaptive_folds(total_bars: int) -> tuple[WalkForwardFold, ...]:
     train = max(20, min(500, total_bars // 4))
     test = max(10, min(150, total_bars // 10))
@@ -570,6 +592,13 @@ def _warnings(
         warnings.append("fails_higher_slippage")
     if folds and _positive_fold_rate(folds) < 0.55:
         warnings.append("profits_not_consistent_across_folds")
+    evidence = _evidence_profile(backtest, folds)
+    if folds and float(evidence["oos_net_profit"]) <= 0:
+        warnings.append("weak_oos_evidence")
+    if folds and int(evidence["oos_trade_count"]) < 18:
+        warnings.append("low_oos_trades")
+    if folds and float(evidence["single_fold_profit_share"]) >= 0.6:
+        warnings.append("one_fold_dependency")
     if family == "swing_trend" and backtest.funding_cost > max(1.0, backtest.gross_profit * 0.35):
         warnings.append("funding_eats_swing_edge")
     if family in CALENDAR_FAMILIES and backtest.trade_count < 30:
@@ -708,6 +737,7 @@ def _cost_aware_score(
     net_cost_component = _clamp(backtest.net_cost_ratio, 0.0, 1.0)
     expectancy_component = _expectancy_efficiency(backtest)
     fold_component = _positive_fold_rate(evaluation.fold_results)
+    concentration_penalty = _profit_concentration(evaluation.fold_results)
     drawdown_component = 1.0 - _clamp(backtest.max_drawdown / 3_500.0, 0.0, 1.0)
     churn_penalty = _churn_penalty(backtest)
     if config.objective == "profit_first":
@@ -716,6 +746,10 @@ def _cost_aware_score(
         profit_weight, sharpe_weight = 0.24, 0.24
     else:
         profit_weight, sharpe_weight = 0.30, 0.16
+    evidence_mode = config.repair_mode == "evidence_first"
+    if evidence_mode:
+        profit_weight *= 0.85
+        sharpe_weight *= 0.75
     score = 100 * (
         profit_weight * profit_component
         + 0.10 * net_component
@@ -724,9 +758,10 @@ def _cost_aware_score(
         + 0.12 * net_cost_component
         + 0.10 * expectancy_component
         + 0.08 * stability
-        + 0.05 * fold_component
+        + (0.13 if evidence_mode else 0.05) * fold_component
         + 0.04 * drawdown_component
         - 0.28 * churn_penalty
+        - (0.12 if evidence_mode else 0.04) * concentration_penalty
     )
     return round(_clamp(score, -100.0, 100.0), 4)
 
