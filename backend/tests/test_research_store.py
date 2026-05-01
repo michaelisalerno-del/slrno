@@ -85,6 +85,42 @@ def test_research_store_records_material_watchlist_leads(tmp_path):
     assert candidate["research_only"] is True
 
 
+def test_research_store_normalizes_stale_weak_sharpe_warning(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("NAS100", {"interval": "5min"}, status="finished")
+    evaluation = CandidateEvaluation(
+        candidate=ProbabilityCandidate("daily_sharpe_lead", ("fixture",), {}, [0.1, 0.9]),
+        metrics=ClassificationMetrics(1.0, 1.0, 0.01, 0.1, 1.0, 0.5, 2),
+        backtest=BacktestResult(
+            net_profit=100,
+            sharpe=0.1,
+            max_drawdown=10,
+            win_rate=0.6,
+            trade_count=20,
+            exposure=0.3,
+            turnover=20,
+            train_profit=60,
+            test_profit=40,
+            daily_pnl_sharpe=1.2,
+            sharpe_observations=20,
+        ),
+        fold_results=(BacktestResult(10, 0.8, 1, 0.6, 5, 0.2, 1, 6, 4),),
+        robustness_score=40,
+        passed=False,
+        warnings=("weak_sharpe", "needs_ig_price_validation"),
+        promotion_tier="research_candidate",
+    )
+
+    store.save_trial(run_id, evaluation)
+    store.save_candidate(run_id, "NAS100", evaluation)
+
+    [trial] = store.list_trials(run_id)
+    [candidate] = store.list_candidates(run_id)
+    assert "weak_sharpe" not in trial["warnings"]
+    assert "weak_sharpe" not in candidate["audit"]["warnings"]
+    assert "needs_ig_price_validation" in candidate["audit"]["warnings"]
+
+
 def _evaluation(name: str, passed: bool, promotion_tier: str = "reject", robustness_score: float = 75.0) -> CandidateEvaluation:
     return CandidateEvaluation(
         candidate=ProbabilityCandidate(name, ("fixture",), {}, [0.1, 0.9]),
