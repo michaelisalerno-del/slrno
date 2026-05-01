@@ -72,6 +72,7 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
     assert snapshot["sha256"]
     assert run["config"]["api_token"] == "***"
     assert bar_analysis["items"][0]["analysis"]["warnings"] == ["profit_concentrated_single_month"]
+    assert "2000.0" in capital_csv
     assert "10000.0" in capital_csv
     assert "timestamp" in bars_csv
 

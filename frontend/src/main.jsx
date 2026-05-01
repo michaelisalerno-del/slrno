@@ -48,6 +48,9 @@ import {
 } from "./api";
 import "./styles.css";
 
+const WORKING_ACCOUNT_SIZE = 2000;
+const WORKING_ACCOUNT_LABEL = "£2k";
+
 const FALLBACK_ENGINES = [
   {
     id: "adaptive_ig_v1",
@@ -155,6 +158,7 @@ function App() {
     cost_stress_multiplier: 2.0,
     include_regime_scans: false,
     regime_scan_budget_per_regime: "",
+    excluded_months: [],
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
 
@@ -164,6 +168,7 @@ function App() {
   const selectedMarkets = enabledMarkets.filter((item) => activeMarketIds.includes(item.market_id));
   const selectedEngine = engines.find((engine) => engine.id === researchRun.engine) ?? engines[0] ?? FALLBACK_ENGINES[0];
   const selectedPreset = SEARCH_PRESETS.find((preset) => preset.id === researchRun.search_preset) ?? SEARCH_PRESETS[1];
+  const refinementRepairActions = refinementTemplate ? repairActionsForTemplate(refinementTemplate) : [];
 
   const loadModule = React.useCallback(async (moduleId = activeModule) => {
     setLoadingModule(moduleId);
@@ -309,6 +314,7 @@ function App() {
         market_ids,
         search_budget: budget,
         regime_scan_budget_per_regime: researchRun.regime_scan_budget_per_regime === "" ? null : Number(researchRun.regime_scan_budget_per_regime),
+        excluded_months: uniqueMonths(researchRun.excluded_months),
         product_mode: "spread_bet",
       });
       setActiveTab("results");
@@ -342,6 +348,7 @@ function App() {
   function refineTemplate(source) {
     const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
     const searchAudit = parameters.search_audit ?? {};
+    const pattern = parameters.bar_pattern_analysis ?? {};
     const family = parameters.family ? String(parameters.family) : String(source.strategy_family || source.family || "");
     const marketId = String(source.market_id || parameters.market_id || researchRun.market_id);
     const template = {
@@ -354,6 +361,9 @@ function App() {
       interval: normalizeInterval(parameters.timeframe || researchRun.interval),
       risk_profile: String(searchAudit.risk_profile || researchRun.risk_profile),
       recipe: researchRecipeLabel(parameters.research_recipe),
+      warnings: warningCodesForSource(source),
+      readiness: source.audit?.promotion_readiness ?? null,
+      pattern,
       parameters,
     };
     setRefinementTemplate(template);
@@ -379,7 +389,7 @@ function App() {
 
   function clearRefinementTemplate() {
     setRefinementTemplate(null);
-    setResearchRun((current) => ({ ...current, strategy_families: [] }));
+    setResearchRun((current) => ({ ...current, strategy_families: [], excluded_months: [] }));
   }
 
   function applyRobustnessPreset(preset) {
@@ -389,6 +399,7 @@ function App() {
     const family = refinementTemplate.family ? [refinementTemplate.family] : [];
     const selectedMarket = refinementTemplate.market_id ? [refinementTemplate.market_id] : activeMarketIds;
     const allMarketIds = enabledMarkets.map((item) => item.market_id);
+    const dominantMonth = refinementTemplate.pattern?.dominant_profit_month?.key;
     const presetConfig = {
       focused: {
         marketIds: selectedMarket,
@@ -398,6 +409,15 @@ function App() {
         end: researchRun.end,
         interval: refinementTemplate.interval,
         label: "Focused robustness run staged.",
+      },
+      more_trades: {
+        marketIds: selectedMarket,
+        budget: "120",
+        stress: 2.0,
+        start: "2024-01-01",
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        label: "More-trades repair run staged with longer history and a deeper search.",
       },
       higher_costs: {
         marketIds: selectedMarket,
@@ -416,6 +436,27 @@ function App() {
         end: researchRun.end,
         interval: refinementTemplate.interval,
         label: "Cross-market robustness run staged.",
+      },
+      regime_scan: {
+        marketIds: selectedMarket,
+        budget: "54",
+        stress: 2.0,
+        start: researchRun.start,
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        includeRegimeScans: true,
+        regimeScanBudget: "",
+        label: "Regime repair run staged with capped specialist scans.",
+      },
+      exclude_best_month: {
+        marketIds: selectedMarket,
+        budget: "54",
+        stress: 2.0,
+        start: researchRun.start,
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        excludedMonths: dominantMonth ? [dominantMonth] : [],
+        label: dominantMonth ? `Best-month exclusion run staged without ${dominantMonth}.` : "No dominant month found to exclude.",
       },
       longer_history: {
         marketIds: selectedMarket,
@@ -447,6 +488,9 @@ function App() {
       search_budget: presetConfig.budget,
       strategy_families: family,
       cost_stress_multiplier: presetConfig.stress,
+      include_regime_scans: Boolean(presetConfig.includeRegimeScans),
+      regime_scan_budget_per_regime: presetConfig.regimeScanBudget ?? "",
+      excluded_months: presetConfig.excludedMonths ?? [],
     }));
     setMessage(presetConfig.label);
   }
@@ -647,11 +691,35 @@ function App() {
                       <Metric label="Hold bars" value={refinementTemplate.parameters.max_hold_bars ?? "-"} />
                       <Metric label="Direction" value={refinementTemplate.parameters.direction ?? "-"} />
                     </div>
+                    <div className="warning-row">
+                      {(refinementTemplate.warnings ?? []).length > 0
+                        ? humanWarnings(refinementTemplate.warnings).slice(0, 10).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>)
+                        : <span className="muted">No active blockers were attached to this template.</span>}
+                    </div>
+                    <div className="repair-plan">
+                      {refinementRepairActions.map((action) => (
+                        <div className="repair-action" key={action.id}>
+                          <div>
+                            <strong>{action.title}</strong>
+                            <span>{action.detail}</span>
+                          </div>
+                          <button
+                            type="button"
+                            className={action.primary ? "secondary" : "ghost"}
+                            disabled={action.preset === "exclude_best_month" && !refinementTemplate.pattern?.dominant_profit_month?.key}
+                            onClick={() => (action.kind === "sync_costs" ? syncCosts() : applyRobustnessPreset(action.preset))}
+                          >
+                            {action.button}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                     <div className="button-row robustness-actions">
                       <button type="button" className="secondary" onClick={() => applyRobustnessPreset("focused")}><RefreshCw size={16} /> Same market</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("higher_costs")}>Higher costs</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Cross-market</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("longer_history")}>Longer history</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("regime_scan")}>Regime repair</button>
                     </div>
                   </section>
                 )}
@@ -744,6 +812,15 @@ function App() {
                   <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} required />
                   <label>Strategy trials / market</label>
                   <input value={researchRun.search_budget} onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })} placeholder={`${selectedPreset.budget}`} type="number" min="6" max="500" />
+                  <label>Excluded months</label>
+                  <div className="exclusion-row">
+                    {uniqueMonths(researchRun.excluded_months).length > 0
+                      ? uniqueMonths(researchRun.excluded_months).map((month) => <span className="badge muted-badge" key={month}>{month}</span>)
+                      : <span className="muted">None</span>}
+                    {uniqueMonths(researchRun.excluded_months).length > 0 && (
+                      <button type="button" className="ghost compact-button" onClick={() => setResearchRun({ ...researchRun, excluded_months: [] })}>Clear</button>
+                    )}
+                  </div>
                   <div className="button-row">
                     <button type="button" className="secondary" onClick={syncCosts}><RefreshCw size={16} /> Sync costs</button>
                     <button disabled={researchState.status === "running" || activeMarketIds.length === 0}>{researchState.status === "running" ? "Running..." : "Run search"}</button>
@@ -937,7 +1014,7 @@ function PaperView({ summary }) {
               <Metric label="Allowed" value={(candidate.allowed_regimes ?? []).map(regimeLabel).join(" / ") || "n/a"} />
               <Metric label="Blocked" value={(candidate.blocked_regimes ?? []).map(regimeLabel).join(" / ") || "none"} />
               <Metric label="Best regime" value={regimeLabel(candidate.dominant_profit_regime)} />
-              <Metric label="£500" value={(candidate.capital_summary?.feasible_accounts ?? []).includes(500) ? "OK" : "Blocked"} />
+              <Metric label={WORKING_ACCOUNT_LABEL} value={(candidate.capital_summary?.feasible_accounts ?? []).includes(WORKING_ACCOUNT_SIZE) ? "OK" : "Blocked"} />
             </div>
           </div>
         ))}
@@ -953,7 +1030,7 @@ function BrokerView({ summary, markets }) {
     market_id: defaultMarket,
     side: "BUY",
     stake: "1",
-    account_size: "500",
+    account_size: String(WORKING_ACCOUNT_SIZE),
     entry_price: "",
     stop: "",
     limit: "",
@@ -1396,7 +1473,7 @@ function RegimeEvidence({ runDetail, trials }) {
 function TrialCard({ trial, onRefineTemplate }) {
   const backtest = trial.backtest ?? {};
   const warnings = humanWarnings(trial.warnings);
-  const capital = accountFeasibility(trial.capital_scenarios, 500);
+  const capital = accountFeasibility(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   return (
@@ -1420,7 +1497,7 @@ function TrialCard({ trial, onRefineTemplate }) {
         </div>
       </div>
       <div className="trial-metrics">
-        <Metric label="£500 fit" value={capital} />
+        <Metric label={`${WORKING_ACCOUNT_LABEL} fit`} value={capital} />
         <Metric label="Daily Sharpe" value={round(backtest.daily_pnl_sharpe)} />
         <Metric label="Days" value={backtest.sharpe_observations ?? 0} />
         <Metric label="DSR" value={percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
@@ -1542,7 +1619,7 @@ function CandidateView({ candidates, critique, onRefineTemplate }) {
 function CandidateCard({ candidate, onRefineTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssues(readiness);
-  const capital = accountFeasibility(candidate.capital_scenarios, 500);
+  const capital = accountFeasibility(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   return (
@@ -1571,7 +1648,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         </button>
       </div>
       <div className="mini-metrics">
-        <Metric label="£500 fit" value={capital} />
+        <Metric label={`${WORKING_ACCOUNT_LABEL} fit`} value={capital} />
         <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
         <Metric label="Sharpe days" value={candidate.audit?.backtest?.sharpe_observations ?? 0} />
         <Metric label="Bar Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
@@ -1922,6 +1999,140 @@ function candidateReadiness(candidate) {
   };
 }
 
+function warningCodesForSource(source = {}) {
+  const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
+  const pattern = parameters.bar_pattern_analysis ?? {};
+  const readiness = source.audit?.promotion_readiness ?? {};
+  const warnings = [
+    ...arrayValue(source.warnings),
+    ...arrayValue(source.audit?.warnings),
+    ...arrayValue(pattern.warnings),
+    ...arrayValue(readiness.blockers),
+    ...arrayValue(readiness.validation_warnings),
+  ];
+  return [...new Set(warnings.filter(Boolean).map(String))];
+}
+
+function arrayValue(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function uniqueMonths(months = []) {
+  return [...new Set(arrayValue(months).map((month) => String(month).trim()).filter((month) => /^\d{4}-\d{2}$/.test(month)))];
+}
+
+function repairActionsForTemplate(template) {
+  const warnings = new Set(template.warnings ?? []);
+  const pattern = template.pattern ?? {};
+  const dominantMonth = pattern.dominant_profit_month?.key;
+  const dominantRegime = pattern.dominant_profit_regime?.key;
+  const dominantMonthShare = Number(pattern.dominant_profit_month?.positive_profit_share ?? 0);
+  const dominantRegimeShare = Number(pattern.dominant_profit_regime?.positive_profit_share ?? 0);
+  const verdict = pattern.regime_verdict;
+  const actions = [];
+  const add = (action) => {
+    if (!actions.some((item) => item.id === action.id)) {
+      actions.push(action);
+    }
+  };
+  const hasAny = (...codes) => codes.some((code) => warnings.has(code));
+
+  if (hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage")) {
+    add({
+      id: "sync-costs",
+      kind: "sync_costs",
+      title: "Fix IG validation",
+      detail: "Refresh the spread, slippage, margin, and minimum stake rules before trusting the result.",
+      button: "Sync costs",
+      primary: true,
+    });
+  }
+  if (hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "calendar_effect_needs_longer_history")) {
+    add({
+      id: "more-trades",
+      preset: "more_trades",
+      title: "Fix too few trades",
+      detail: "Use longer history and a deeper locked-family retest so the edge has more chances to prove itself.",
+      button: "Stage retest",
+      primary: actions.length === 0,
+    });
+  }
+  if (hasAny("profit_concentrated_single_month", "best_trades_dominate") || dominantMonthShare >= 0.45) {
+    add({
+      id: "exclude-month",
+      preset: "exclude_best_month",
+      title: "Check month dependence",
+      detail: dominantMonth ? `Rerun with ${dominantMonth} removed to see whether the edge survives.` : "Rerun after removing the dominant profit month when one is available.",
+      button: "Exclude month",
+      primary: actions.length === 0,
+    });
+  }
+  if (
+    hasAny(
+      "profit_concentrated_single_regime",
+      "headline_sharpe_not_regime_robust",
+      "regime_gated_backtest_negative",
+      "regime_gated_oos_negative",
+      "insufficient_regime_sample",
+      "high_volatility_only_edge",
+      "fails_normal_volatility_regime",
+      "shock_regime_dependency",
+    ) ||
+    dominantRegimeShare >= 0.5 ||
+    ["headline_only", "regime_specific", "thin_regime_sample"].includes(verdict)
+  ) {
+    add({
+      id: "regime-repair",
+      preset: "regime_scan",
+      title: "Check regime dependence",
+      detail: dominantRegime ? `Run gated specialists around ${regimeLabel(dominantRegime)} and compare full-period evidence.` : "Run capped regime specialists and keep full-period gates active.",
+      button: "Regime repair",
+      primary: actions.length === 0,
+    });
+  }
+  if (hasAny("profits_not_consistent_across_folds", "high_sharpe_weak_folds", "unstable_folds", "weak_oos_economics", "weak_oos_evidence", "no_walk_forward_folds")) {
+    add({
+      id: "fold-repair",
+      preset: "longer_history",
+      title: "Fix fragile folds",
+      detail: "Extend the window and keep the strategy family locked so fold evidence has more calendar variety.",
+      button: "Longer history",
+      primary: actions.length === 0,
+    });
+  }
+  if (hasAny("multiple_testing_haircut", "isolated_parameter_peak", "known_edge_needs_cross_market_validation")) {
+    add({
+      id: "scan-bias",
+      preset: "cross_market",
+      title: "Reduce scan bias",
+      detail: "Retest the locked family across enabled markets so one lucky scan does not dominate the decision.",
+      button: "Cross-market",
+      primary: actions.length === 0,
+    });
+  }
+  if (hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag")) {
+    add({
+      id: "cost-stress",
+      preset: "higher_costs",
+      title: "Stress costs",
+      detail: "Rerun with harsher costs so weak net-profit edges are filtered before paper tracking.",
+      button: "Higher costs",
+      primary: actions.length === 0,
+    });
+  }
+  if (actions.length === 0) {
+    add({
+      id: "focused",
+      preset: "focused",
+      title: "Confirm template",
+      detail: "Rerun the same market with the strategy family locked before changing anything else.",
+      button: "Same market",
+      primary: true,
+    });
+  }
+  return actions.slice(0, 5);
+}
+
 function readinessIssues(readiness) {
   return humanWarnings([...(readiness.blockers ?? []), ...(readiness.validation_warnings ?? [])]);
 }
@@ -1936,7 +2147,7 @@ function nextActionLabel(action) {
   }[action] ?? "Next: research review.";
 }
 
-function accountFeasibility(scenarios = [], accountSize = 500) {
+function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
   const scenario = (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
   if (!scenario) {
     return "Unknown";
@@ -1969,6 +2180,11 @@ function humanWarnings(warnings = []) {
     drawdown_too_high: "Drawdown too high",
     fails_higher_slippage: "Fails higher slippage",
     profits_not_consistent_across_folds: "Fragile folds",
+    unstable_folds: "Unstable folds",
+    low_oos_trades: "Low OOS trades",
+    no_walk_forward_folds: "No walk-forward folds",
+    weak_oos_economics: "Weak OOS economics",
+    weak_oos_evidence: "Weak OOS evidence",
     funding_eats_swing_edge: "Funding eats swing edge",
     needs_ig_price_validation: "Needs IG price validation",
     not_paper_ready_research_lead: "Research lead only",

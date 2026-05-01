@@ -10,7 +10,7 @@ def test_capital_scenarios_include_default_account_sizes_and_feasibility():
         {"bid": 100, "offer": 101, "min_deal_size": 1.0, "margin_percent": 5.0},
     )
 
-    assert [item["account_size"] for item in scenarios] == [250.0, 500.0, 1000.0, 10000.0]
+    assert [item["account_size"] for item in scenarios] == [250.0, 500.0, 1000.0, 2000.0, 10000.0]
     assert all("below_ig_min_deal_size" in item["violations"] for item in scenarios)
     assert capital_summary(scenarios)["smallest_feasible_account"] is None
 
@@ -27,6 +27,7 @@ def test_capital_scenarios_block_accounts_with_historical_drawdown_or_daily_loss
     assert "historical_daily_loss_stop_breached" in by_account[250.0]["violations"]
     assert "historical_drawdown_too_large" in by_account[1000.0]["violations"]
     assert "historical_daily_loss_stop_breached" not in by_account[1000.0]["violations"]
+    assert "historical_drawdown_too_large" in by_account[2000.0]["violations"]
     assert by_account[10000.0]["feasible"] is True
     assert capital_summary(scenarios)["smallest_feasible_account"] == 10000.0
 

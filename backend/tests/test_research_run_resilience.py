@@ -66,6 +66,35 @@ def test_research_run_passes_cost_stress_multiplier_to_adaptive_search(tmp_path,
     assert store.get_run(run_id)["config"]["cost_stress_multiplier"] == 3.0
 
 
+def test_research_run_excludes_months_before_snapshot_and_search(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    registry = MarketRegistry(tmp_path / "markets.sqlite3")
+    registry.upsert(_market("OK", "OK.INDX"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", registry)
+    monkeypatch.setattr(main, "EODHDProvider", lambda _token: MonthProvider())
+
+    def fake_search(*args, **kwargs):
+        captured["bars"] = args[0]
+        return SimpleNamespace(evaluations=[_evaluation("accepted")], regime_scan={})
+
+    monkeypatch.setattr(main, "run_adaptive_search", fake_search)
+    payload = main.ResearchRunPayload(start="2025-01-01", end="2025-02-28", market_ids=["OK"], search_budget=2, excluded_months=["2025-01", "bad"])
+    run_id = store.create_run("OK", main._research_run_config(payload, [registry.get("OK")]), status="running")
+
+    asyncio.run(main._execute_research_run(run_id, payload, "token"))
+
+    bars = captured["bars"]
+    assert [bar.timestamp.strftime("%Y-%m") for bar in bars] == ["2025-02", "2025-02"]
+    snapshots = store.list_bar_snapshots(run_id, include_payload=True)
+    assert snapshots[0]["bar_count"] == 2
+    assert all(not item["timestamp"].startswith("2025-01") for item in snapshots[0]["bars"])
+    run = store.get_run(run_id)
+    assert run["config"]["excluded_months"] == ["2025-01"]
+    assert run["config"]["market_statuses"][0]["excluded_bar_count"] == 2
+
+
 def test_multi_market_run_errors_when_all_markets_fail(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     registry = MarketRegistry(tmp_path / "markets.sqlite3")
@@ -121,6 +150,18 @@ class FakeProvider:
         return [
             OHLCBar(symbol=symbol, timestamp=start + timedelta(minutes=index * 5), open=100 + index, high=101 + index, low=99 + index, close=100 + index, volume=10)
             for index in range(3)
+        ]
+
+
+class MonthProvider:
+    cache = FakeCache()
+
+    async def historical_bars(self, symbol: str, _interval: str, _start: str, _end: str) -> list[OHLCBar]:
+        return [
+            OHLCBar(symbol=symbol, timestamp=datetime(2025, 1, 2, tzinfo=UTC), open=100, high=101, low=99, close=100, volume=10),
+            OHLCBar(symbol=symbol, timestamp=datetime(2025, 1, 3, tzinfo=UTC), open=101, high=102, low=100, close=101, volume=10),
+            OHLCBar(symbol=symbol, timestamp=datetime(2025, 2, 3, tzinfo=UTC), open=102, high=103, low=101, close=102, volume=10),
+            OHLCBar(symbol=symbol, timestamp=datetime(2025, 2, 4, tzinfo=UTC), open=103, high=104, low=102, close=103, volume=10),
         ]
 
 

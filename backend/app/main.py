@@ -10,7 +10,14 @@ from pydantic import BaseModel, Field
 from .adaptive_research import AdaptiveSearchConfig, available_research_engines, run_adaptive_search
 from .bar_patterns import analyze_market_regimes
 from .broker_preview import broker_order_preview
-from .capital import CAPITAL_SCENARIOS_GBP, DAILY_LOSS_FRACTION, RISK_PER_TRADE_FRACTION, capital_scenarios, capital_summary
+from .capital import (
+    CAPITAL_SCENARIOS_GBP,
+    DAILY_LOSS_FRACTION,
+    RISK_PER_TRADE_FRACTION,
+    WORKING_ACCOUNT_SIZE_GBP,
+    capital_scenarios,
+    capital_summary,
+)
 from .config import allowed_origins
 from .evidence_export import build_research_export_zip
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile
@@ -89,6 +96,7 @@ class ResearchRunPayload(BaseModel):
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = False
     regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
+    excluded_months: list[str] = Field(default_factory=list)
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -107,7 +115,7 @@ class BrokerOrderPreviewPayload(BaseModel):
     market_id: str
     side: str = "BUY"
     stake: float = Field(default=1.0, gt=0)
-    account_size: float = Field(default=500.0, gt=0)
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
     entry_price: float | None = Field(default=None, gt=0)
     stop: float | None = Field(default=None, gt=0)
     limit: float | None = Field(default=None, gt=0)
@@ -178,7 +186,7 @@ def broker_summary() -> dict[str, object]:
         "preview_policy": {
             "enabled": True,
             "places_orders": False,
-            "default_account_size": 500,
+            "default_account_size": WORKING_ACCOUNT_SIZE_GBP,
             "capital_scenarios": list(CAPITAL_SCENARIOS_GBP),
             "checks": [
                 "IG minimum deal size",
@@ -460,6 +468,18 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             )
             persist_status()
             continue
+        excluded_months = _normalized_excluded_months(payload.excluded_months)
+        if excluded_months:
+            original_bar_count = len(bars)
+            bars = [bar for bar in bars if _bar_month_key(bar) not in excluded_months]
+            market_status.update(
+                {
+                    "excluded_months": sorted(excluded_months),
+                    "excluded_bar_count": original_bar_count - len(bars),
+                    "bar_count_before_exclusions": original_bar_count,
+                }
+            )
+            persist_status()
         if len(bars) < market.min_backtest_bars:
             _mark_market_failed(
                 market_status,
@@ -503,9 +523,10 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                     ),
                 )
                 market_evaluations = list(result.evaluations)
-                market_status["regime_scan_enabled"] = bool(result.regime_scan.get("enabled"))
-                market_status["eligible_regimes"] = result.regime_scan.get("eligible_regimes", [])
-                market_status["regime_scan_trial_count"] = result.regime_scan.get("trial_count", 0)
+                regime_scan = getattr(result, "regime_scan", {}) or {}
+                market_status["regime_scan_enabled"] = bool(regime_scan.get("enabled"))
+                market_status["eligible_regimes"] = regime_scan.get("eligible_regimes", [])
+                market_status["regime_scan_trial_count"] = regime_scan.get("trial_count", 0)
             else:
                 market_evaluations = ResearchStack.default().evaluate(bars, backtest_config_from_profile(cost_profile))
         except Exception as exc:
@@ -684,6 +705,22 @@ def _selected_markets(market_ids: list[str]) -> list[MarketMapping]:
     return selected
 
 
+def _normalized_excluded_months(months: list[str] | tuple[str, ...] | None) -> set[str]:
+    output: set[str] = set()
+    for month in months or []:
+        key = str(month or "").strip()
+        if re.fullmatch(r"\d{4}-\d{2}", key):
+            output.add(key)
+    return output
+
+
+def _bar_month_key(bar: object) -> str:
+    timestamp = getattr(bar, "timestamp", None)
+    if timestamp is None:
+        return ""
+    return timestamp.strftime("%Y-%m")
+
+
 def _research_run_config(
     payload: ResearchRunPayload,
     selected_markets: list[MarketMapping],
@@ -705,6 +742,7 @@ def _research_run_config(
         "cost_stress_multiplier": payload.cost_stress_multiplier,
         "include_regime_scans": payload.include_regime_scans,
         "regime_scan_budget_per_regime": payload.regime_scan_budget_per_regime,
+        "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
         "product_mode": payload.product_mode,
         "research_only": True,
         "ig_validation_required": True,
@@ -817,6 +855,7 @@ def _summary_backtest(backtest: dict[str, object]) -> dict[str, object]:
 def _risk_summary() -> dict[str, object]:
     return {
         "capital_scenarios": list(CAPITAL_SCENARIOS_GBP),
+        "working_account_size": WORKING_ACCOUNT_SIZE_GBP,
         "risk_per_trade_fraction": RISK_PER_TRADE_FRACTION,
         "daily_loss_fraction": DAILY_LOSS_FRACTION,
         "live_ordering_enabled": False,
@@ -869,7 +908,7 @@ def _candidate_queue_summary(candidates: list[dict[str, object]]) -> dict[str, i
         if any(warning in blockers for warning in ("legacy_sharpe_diagnostics", "missing_cost_profile", "missing_spread_slippage", "short_sharpe_sample", "limited_sharpe_sample")):
             summary["needs_fresh_run"] += 1
         capital = candidate.get("capital_summary") if isinstance(candidate.get("capital_summary"), dict) else {}
-        if 500.0 in (capital.get("blocked_accounts") or []):
+        if WORKING_ACCOUNT_SIZE_GBP in (capital.get("blocked_accounts") or []):
             summary["capital_infeasible"] += 1
     return summary
 

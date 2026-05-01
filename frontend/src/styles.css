@@ -628,6 +628,42 @@ button.ghost {
   align-items: center;
 }
 
+.repair-plan {
+  display: grid;
+  gap: 8px;
+}
+
+.repair-action,
+.exclusion-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.repair-action {
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid #dbe6f4;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.repair-action div {
+  display: grid;
+  gap: 3px;
+}
+
+.repair-action span {
+  color: #5b6674;
+  font-size: 12px;
+}
+
+.repair-action button,
+.compact-button {
+  white-space: nowrap;
+}
+
 .metrics,
 .mini-metrics {
   display: grid;
