@@ -453,6 +453,10 @@ button.ghost {
   gap: 8px;
 }
 
+.trial-actions {
+  align-items: flex-start;
+}
+
 .trial-summary {
   justify-content: space-between;
 }
@@ -522,6 +526,29 @@ button.ghost {
 
 .compact-status {
   grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.refinement-panel {
+  display: grid;
+  gap: 12px;
+  border-color: #b7cef6;
+  background: #f8fbff;
+}
+
+.refinement-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.refinement-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: #3f4854;
+}
+
+.robustness-actions {
   align-items: center;
 }
 
@@ -606,7 +633,8 @@ th {
   }
 
   .row,
-  .compact {
+  .compact,
+  .refinement-metrics {
     grid-template-columns: 1fr;
   }
 

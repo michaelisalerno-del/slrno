@@ -90,6 +90,7 @@ function App() {
   const [critique, setCritique] = React.useState(null);
   const [runDetail, setRunDetail] = React.useState(null);
   const [costProfiles, setCostProfiles] = React.useState({});
+  const [refinementTemplate, setRefinementTemplate] = React.useState(null);
   const [message, setMessage] = React.useState("");
   const [eodhdKey, setEodhdKey] = React.useState("");
   const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "", accountId: "" });
@@ -120,6 +121,8 @@ function App() {
     objective: "profit_first",
     search_budget: "",
     risk_profile: "balanced",
+    strategy_families: [],
+    cost_stress_multiplier: 2.0,
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
 
@@ -273,6 +276,118 @@ function App() {
     setMessage(`Research schedule ${result.schedule_id} saved.`);
   }
 
+  function refineTemplate(source) {
+    const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
+    const searchAudit = parameters.search_audit ?? {};
+    const family = parameters.family ? String(parameters.family) : String(source.strategy_family || source.family || "");
+    const marketId = String(source.market_id || parameters.market_id || researchRun.market_id);
+    const template = {
+      id: source.id ?? source.trial_id ?? source.strategy_name,
+      name: source.strategy_name,
+      market_id: marketId,
+      family,
+      style: String(parameters.style || searchAudit.trading_style || "find_anything_robust"),
+      objective: String(parameters.objective || searchAudit.objective || "profit_first"),
+      interval: normalizeInterval(parameters.timeframe || researchRun.interval),
+      risk_profile: String(searchAudit.risk_profile || researchRun.risk_profile),
+      recipe: researchRecipeLabel(parameters.research_recipe),
+      parameters,
+    };
+    setRefinementTemplate(template);
+    if (marketId) {
+      setActiveMarketIds([marketId]);
+      loadCostProfile(marketId).catch(() => undefined);
+    }
+    setResearchRun((current) => ({
+      ...current,
+      market_id: marketId || current.market_id,
+      interval: template.interval,
+      trading_style: template.style,
+      objective: template.objective,
+      risk_profile: template.risk_profile,
+      search_preset: "balanced",
+      search_budget: current.search_budget || "54",
+      strategy_families: family ? [family] : [],
+      cost_stress_multiplier: current.cost_stress_multiplier || 2.0,
+    }));
+    setActiveTab("builder");
+    setMessage(`Refining ${source.strategy_name} on ${marketId || "selected market"}.`);
+  }
+
+  function clearRefinementTemplate() {
+    setRefinementTemplate(null);
+    setResearchRun((current) => ({ ...current, strategy_families: [] }));
+  }
+
+  function applyRobustnessPreset(preset) {
+    if (!refinementTemplate) {
+      return;
+    }
+    const family = refinementTemplate.family ? [refinementTemplate.family] : [];
+    const selectedMarket = refinementTemplate.market_id ? [refinementTemplate.market_id] : activeMarketIds;
+    const allMarketIds = enabledMarkets.map((item) => item.market_id);
+    const presetConfig = {
+      focused: {
+        marketIds: selectedMarket,
+        budget: "54",
+        stress: 2.0,
+        start: researchRun.start,
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        label: "Focused robustness run staged.",
+      },
+      higher_costs: {
+        marketIds: selectedMarket,
+        budget: "54",
+        stress: 3.0,
+        start: researchRun.start,
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        label: "Higher-cost robustness run staged.",
+      },
+      cross_market: {
+        marketIds: allMarketIds.length ? allMarketIds : selectedMarket,
+        budget: "120",
+        stress: 2.5,
+        start: researchRun.start,
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        label: "Cross-market robustness run staged.",
+      },
+      longer_history: {
+        marketIds: selectedMarket,
+        budget: "120",
+        stress: 2.0,
+        start: "2024-01-01",
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        label: "Longer-history robustness run staged.",
+      },
+    }[preset];
+    if (!presetConfig) {
+      return;
+    }
+    setActiveMarketIds(presetConfig.marketIds);
+    for (const marketId of presetConfig.marketIds) {
+      loadCostProfile(marketId).catch(() => undefined);
+    }
+    setResearchRun((current) => ({
+      ...current,
+      market_id: presetConfig.marketIds[0] || current.market_id,
+      interval: presetConfig.interval,
+      start: presetConfig.start,
+      end: presetConfig.end,
+      trading_style: refinementTemplate.style,
+      objective: "profit_first",
+      risk_profile: refinementTemplate.risk_profile,
+      search_preset: presetConfig.budget === "120" ? "deep" : "balanced",
+      search_budget: presetConfig.budget,
+      strategy_families: family,
+      cost_stress_multiplier: presetConfig.stress,
+    }));
+    setMessage(presetConfig.label);
+  }
+
   async function pollResearchRun(runId, plannedTrials) {
     let detail = await getResearchRun(runId);
     setRunDetail(detail);
@@ -387,6 +502,39 @@ function App() {
 
         {activeTab === "builder" && (
           <form onSubmit={submitResearchRun} className="lab-grid">
+            {refinementTemplate && (
+              <section className="lab-section span-2 refinement-panel">
+                <div className="label-row table-heading">
+                  <h3>Template Refinement</h3>
+                  <button type="button" className="ghost" onClick={clearRefinementTemplate}>Clear</button>
+                </div>
+                <div className="status-list">
+                  <div className="status">
+                    <strong>{refinementTemplate.name}</strong>
+                    <span>
+                      {refinementTemplate.market_id} · {strategyFamilyLabel(refinementTemplate.family)} · {normalizeInterval(refinementTemplate.interval)}
+                    </span>
+                    {refinementTemplate.recipe && <small>{refinementTemplate.recipe}</small>}
+                  </div>
+                </div>
+                <div className="mini-metrics refinement-metrics">
+                  <Metric label="Lookback" value={refinementTemplate.parameters.lookback ?? "-"} />
+                  <Metric label="Threshold" value={`${round(refinementTemplate.parameters.threshold_bps)} bps`} />
+                  <Metric label="Stop" value={`${round(refinementTemplate.parameters.stop_loss_bps)} bps`} />
+                  <Metric label="Take profit" value={`${round(refinementTemplate.parameters.take_profit_bps)} bps`} />
+                  <Metric label="Hold bars" value={refinementTemplate.parameters.max_hold_bars ?? "-"} />
+                  <Metric label="Direction" value={refinementTemplate.parameters.direction ?? "-"} />
+                </div>
+                <div className="button-row robustness-actions">
+                  <button type="button" className="secondary" onClick={() => applyRobustnessPreset("focused")}>
+                    <RefreshCw size={16} /> Same market
+                  </button>
+                  <button type="button" className="ghost" onClick={() => applyRobustnessPreset("higher_costs")}>Higher costs</button>
+                  <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Cross-market</button>
+                  <button type="button" className="ghost" onClick={() => applyRobustnessPreset("longer_history")}>Longer history</button>
+                </div>
+              </section>
+            )}
             <section className="lab-section span-2">
               <h3>Search Mode</h3>
               <div className="segmented">
@@ -413,6 +561,12 @@ function App() {
                   </button>
                 ))}
               </div>
+              {refinementTemplate?.family && (
+                <div className="refinement-lock">
+                  <span className="badge base">Family locked</span>
+                  <strong>{strategyFamilyLabel(refinementTemplate.family)}</strong>
+                </div>
+              )}
             </section>
 
             <section className="lab-section span-2">
@@ -452,6 +606,15 @@ function App() {
                 <option value="balanced">Balanced</option>
                 <option value="aggressive">Aggressive</option>
               </select>
+              <label>Cost stress</label>
+              <input
+                value={researchRun.cost_stress_multiplier}
+                onChange={(event) => setResearchRun({ ...researchRun, cost_stress_multiplier: Number(event.target.value) })}
+                type="number"
+                min="1"
+                max="5"
+                step="0.25"
+              />
             </section>
 
             <section className="lab-section">
@@ -495,10 +658,11 @@ function App() {
             loadRun={async (id) => setRunDetail(await getResearchRun(id))}
             deleteRun={deleteRun}
             deleteRuns={deleteRuns}
+            onRefineTemplate={refineTemplate}
           />
         )}
 
-        {activeTab === "candidates" && <CandidateView candidates={candidates} critique={critique} />}
+        {activeTab === "candidates" && <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} />}
 
         {activeTab === "settings" && (
           <SettingsView
@@ -599,7 +763,7 @@ function App() {
   );
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns, onRefineTemplate }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
@@ -741,7 +905,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }
       <section className="lab-section span-2">
         <h3>Pareto Picks</h3>
         <div className="pareto-grid">
-          {pareto.map((item) => <ParetoCard key={`${item.kind}-${item.strategy_name}`} item={item} />)}
+          {pareto.map((item) => <ParetoCard key={`${item.kind}-${item.strategy_name}`} item={item} onRefineTemplate={onRefineTemplate} />)}
           {pareto.length === 0 && <span className="muted">Run an adaptive search to see balanced, Sharpe, and profit alternatives.</span>}
         </div>
       </section>
@@ -768,7 +932,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }
           </div>
         </div>
         <div className="trial-list">
-          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} />)}
+          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} />)}
         </div>
         {filteredTrials.length === 0 && trials.length > 0 && (
           <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
@@ -781,7 +945,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, deleteRuns }
   );
 }
 
-function TrialCard({ trial }) {
+function TrialCard({ trial, onRefineTemplate }) {
   const backtest = trial.backtest ?? {};
   const warnings = humanWarnings(trial.warnings);
   return (
@@ -793,6 +957,11 @@ function TrialCard({ trial }) {
             <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
           </div>
           <span>{strategyFamilyLabel(trial.strategy_family || trial.style)} · score {round(trial.robustness_score)}</span>
+        </div>
+        <div className="button-row trial-actions">
+          <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
+            <RefreshCw size={16} /> Refine
+          </button>
         </div>
         <div className="trial-net">
           <small>Net</small>
@@ -818,7 +987,7 @@ function TrialCard({ trial }) {
   );
 }
 
-function ParetoCard({ item }) {
+function ParetoCard({ item, onRefineTemplate }) {
   const recipe = researchRecipeLabel(item.settings?.research_recipe);
   return (
     <div className="pareto-card">
@@ -838,11 +1007,14 @@ function ParetoCard({ item }) {
         <Metric label="Est spread/slip" value={`${round(item.estimated_spread_bps)} / ${round(item.estimated_slippage_bps)} bps`} />
       </div>
       <small>{humanWarnings(item.warnings).join(" · ") || "Ready for research review"}</small>
+      <button type="button" className="ghost" onClick={() => onRefineTemplate(item)}>
+        <RefreshCw size={16} /> Refine
+      </button>
     </div>
   );
 }
 
-function CandidateView({ candidates, critique }) {
+function CandidateView({ candidates, critique, onRefineTemplate }) {
   const visibleCandidates = candidates.slice(0, 24);
   const queue = candidateQueueSummary(candidates);
   return (
@@ -877,7 +1049,7 @@ function CandidateView({ candidates, critique }) {
       <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} />)}
+          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} />)}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
           {candidates.length > visibleCandidates.length && (
             <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
@@ -909,7 +1081,7 @@ function CandidateView({ candidates, critique }) {
   );
 }
 
-function CandidateCard({ candidate }) {
+function CandidateCard({ candidate, onRefineTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssues(readiness);
   return (
@@ -931,6 +1103,11 @@ function CandidateCard({ candidate }) {
       <small>{nextActionLabel(readiness.next_action)}</small>
       <div className="warning-row">
         {issues.length ? issues.slice(0, 8).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>) : <span className="muted">Gate clear</span>}
+      </div>
+      <div className="button-row">
+        <button type="button" className="ghost" onClick={() => onRefineTemplate(candidate)}>
+          <RefreshCw size={16} /> Refine
+        </button>
       </div>
       <div className="mini-metrics">
         <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />

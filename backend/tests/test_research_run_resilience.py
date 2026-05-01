@@ -43,6 +43,29 @@ def test_multi_market_run_finishes_with_warnings_when_one_market_fails(tmp_path,
     assert run["config"]["market_failures"][0]["eodhd_symbol"] == "GDAXI.INDX"
 
 
+def test_research_run_passes_cost_stress_multiplier_to_adaptive_search(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    registry = MarketRegistry(tmp_path / "markets.sqlite3")
+    registry.upsert(_market("OK", "OK.INDX"))
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", registry)
+    monkeypatch.setattr(main, "EODHDProvider", lambda _token: FakeProvider(fail_symbols=set()))
+
+    def fake_search(*args, **kwargs):
+        captured["config"] = args[4]
+        return SimpleNamespace(evaluations=[_evaluation("accepted")])
+
+    monkeypatch.setattr(main, "run_adaptive_search", fake_search)
+    payload = main.ResearchRunPayload(start="2025-01-01", end="2025-01-02", market_ids=["OK"], search_budget=2, cost_stress_multiplier=3.0)
+    run_id = store.create_run("OK", main._research_run_config(payload, [registry.get("OK")]), status="running")
+
+    asyncio.run(main._execute_research_run(run_id, payload, "token"))
+
+    assert captured["config"].cost_stress_multiplier == 3.0
+    assert store.get_run(run_id)["config"]["cost_stress_multiplier"] == 3.0
+
+
 def test_multi_market_run_errors_when_all_markets_fail(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     registry = MarketRegistry(tmp_path / "markets.sqlite3")
