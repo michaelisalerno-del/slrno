@@ -157,6 +157,10 @@ def candidate_warnings(
         warnings.append("weak_top_precision")
     if _risk_adjusted_sharpe(backtest) < gate.min_oos_sharpe:
         warnings.append("weak_sharpe")
+    if 0 < backtest.sharpe_observations < 60:
+        warnings.append("short_sharpe_sample")
+    elif 0 < backtest.sharpe_observations < 120:
+        warnings.append("limited_sharpe_sample")
     if backtest.net_profit <= 0:
         warnings.append("negative_profit")
     if backtest.max_drawdown > backtest_config.starting_cash * gate.max_drawdown_fraction:
@@ -203,7 +207,7 @@ def candidate_promotion_tier(
 def robustness_score(metrics: ClassificationMetrics, backtest: BacktestResult, folds: tuple[BacktestResult, ...]) -> float:
     auc_component = 0.0 if metrics.roc_auc is None else max(0.0, (metrics.roc_auc - 0.5) * 2)
     precision_lift = max(0.0, metrics.precision_at_top_quantile - metrics.positive_rate)
-    profit_component = max(0.0, min(2.0, backtest.sharpe)) / 2
+    profit_component = max(0.0, min(2.0, _risk_adjusted_sharpe(backtest))) / 2
     drawdown_penalty = min(1.0, backtest.max_drawdown / max(1.0, abs(backtest.net_profit) + backtest.max_drawdown))
     fold_component = 0.0
     if folds:

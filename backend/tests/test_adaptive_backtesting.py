@@ -238,6 +238,35 @@ def test_weak_sharpe_warning_still_flags_low_daily_pnl_sharpe():
     assert "weak_sharpe" in warnings
 
 
+def test_short_sharpe_sample_is_flagged_separately_from_weak_sharpe():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = public_ig_cost_profile(market)
+    backtest = BacktestResult(
+        net_profit=1_000,
+        sharpe=0.1,
+        max_drawdown=200,
+        win_rate=0.55,
+        trade_count=40,
+        exposure=0.3,
+        turnover=40,
+        train_profit=500,
+        test_profit=500,
+        gross_profit=1_200,
+        total_cost=200,
+        daily_pnl_sharpe=2.2,
+        sharpe_observations=35,
+        expectancy_per_trade=25,
+        average_cost_per_trade=5,
+        net_cost_ratio=5,
+        cost_to_gross_ratio=0.1667,
+    )
+
+    warnings = _warnings(backtest, (backtest,), backtest, BacktestConfig(), "mean_reversion", profile)
+
+    assert "weak_sharpe" not in warnings
+    assert "short_sharpe_sample" in warnings
+
+
 def test_turnaround_tuesday_signals_after_down_monday():
     bars = [
         OHLCBar("TEST", datetime(2026, 1, 2, 16), 100, 101, 99, 100),

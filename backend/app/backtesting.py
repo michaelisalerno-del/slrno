@@ -56,6 +56,16 @@ class BacktestResult:
     rolling_sharpe_median: float = 0.0
     probabilistic_sharpe_ratio: float = 0.0
     sharpe_observations: int = 0
+    bar_sharpe_observations: int = 0
+    sample_calendar_days: int = 0
+    sample_trading_days: int = 0
+    daily_periods_per_year: float = 252.0
+    bar_periods_per_year: float = 252.0
+    daily_pnl_sample_sharpe: float = 0.0
+    bar_sample_sharpe: float = 0.0
+    train_daily_pnl_sharpe: float = 0.0
+    test_daily_pnl_sharpe: float = 0.0
+    sharpe_annualization_note: str = ""
     turnover_efficiency: float = 0.0
     expectancy_per_trade: float = 0.0
     average_cost_per_trade: float = 0.0
@@ -92,6 +102,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     funding_cost = 0.0
     fx_cost = 0.0
     guaranteed_stop_cost = 0.0
+    pnl_dates: list[str] = []
     daily_pnl: dict[str, float] = {}
 
     for index in range(1, len(bars)):
@@ -136,6 +147,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         guaranteed_stop_cost += trade_guaranteed
         pnl.append(trade_pnl)
         pnl_date = current_bar.timestamp.date().isoformat()
+        pnl_dates.append(pnl_date)
         daily_pnl[pnl_date] = daily_pnl.get(pnl_date, 0.0) + trade_pnl
         equity += trade_pnl
         wins += 1 if trade_pnl > 0 else 0
@@ -149,14 +161,19 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     split = max(1, int(len(pnl) * config.train_fraction))
     train_profit = sum(pnl[:split])
     test_profit = sum(pnl[split:])
-    sharpe = _sharpe(pnl)
-    train_sharpe = _sharpe(pnl[:split])
-    test_sharpe = _sharpe(pnl[split:])
+    bar_periods_per_year = _bar_periods_per_year(bars)
+    sharpe = _sharpe(pnl, periods_per_year=bar_periods_per_year)
+    train_sharpe = _sharpe(pnl[:split], periods_per_year=bar_periods_per_year)
+    test_sharpe = _sharpe(pnl[split:], periods_per_year=bar_periods_per_year)
     total_cost = spread_cost + slippage_cost + commission_cost + funding_cost + fx_cost + guaranteed_stop_cost
     net_profit = sum(pnl)
     daily_pnl_values = list(daily_pnl.values())
+    train_daily_pnl_values = _daily_pnl_values(pnl[:split], pnl_dates[:split])
+    test_daily_pnl_values = _daily_pnl_values(pnl[split:], pnl_dates[split:])
     rolling_sharpes = _rolling_sharpes(daily_pnl_values, window=20)
     trade_denominator = max(1, trade_count)
+    sample_trading_days = len(daily_pnl_values)
+    sample_calendar_days = (bars[-1].timestamp.date() - bars[0].timestamp.date()).days + 1
 
     return BacktestResult(
         net_profit=net_profit,
@@ -186,6 +203,16 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         rolling_sharpe_median=_median(rolling_sharpes),
         probabilistic_sharpe_ratio=_probabilistic_sharpe_ratio(daily_pnl_values),
         sharpe_observations=len(daily_pnl_values),
+        bar_sharpe_observations=len(pnl),
+        sample_calendar_days=sample_calendar_days,
+        sample_trading_days=sample_trading_days,
+        daily_periods_per_year=252.0,
+        bar_periods_per_year=bar_periods_per_year,
+        daily_pnl_sample_sharpe=_sample_sharpe(daily_pnl_values),
+        bar_sample_sharpe=_sample_sharpe(pnl),
+        train_daily_pnl_sharpe=_sharpe(train_daily_pnl_values),
+        test_daily_pnl_sharpe=_sharpe(test_daily_pnl_values),
+        sharpe_annualization_note=_sharpe_note(sample_trading_days),
         turnover_efficiency=net_profit / max(1e-9, trade_count * config.position_size),
         expectancy_per_trade=net_profit / trade_denominator,
         average_cost_per_trade=total_cost / trade_denominator,
@@ -221,18 +248,46 @@ def _sample_curve(values: list[float], max_points: int = 250) -> tuple[float, ..
     return tuple(round(value, 4) for value in sampled[:max_points])
 
 
-def _sharpe(pnl: list[float]) -> float:
+def _sharpe(pnl: list[float], periods_per_year: float = 252.0) -> float:
+    sample_sharpe = _sample_sharpe(pnl)
+    return sample_sharpe * sqrt(max(0.0, periods_per_year)) if sample_sharpe else 0.0
+
+
+def _sample_sharpe(pnl: list[float]) -> float:
     if not pnl:
         return 0.0
     mean = sum(pnl) / len(pnl)
     variance = sum((value - mean) ** 2 for value in pnl) / len(pnl)
-    return 0.0 if variance == 0 else (mean / sqrt(variance)) * sqrt(252)
+    return 0.0 if variance == 0 else mean / sqrt(variance)
 
 
-def _rolling_sharpes(pnl: list[float], window: int) -> list[float]:
+def _rolling_sharpes(pnl: list[float], window: int, periods_per_year: float = 252.0) -> list[float]:
     if len(pnl) < max(5, window):
         return []
-    return [_sharpe(pnl[index - window : index]) for index in range(window, len(pnl) + 1)]
+    return [_sharpe(pnl[index - window : index], periods_per_year) for index in range(window, len(pnl) + 1)]
+
+
+def _daily_pnl_values(pnl: list[float], pnl_dates: list[str]) -> list[float]:
+    daily: dict[str, float] = {}
+    for value, pnl_date in zip(pnl, pnl_dates):
+        daily[pnl_date] = daily.get(pnl_date, 0.0) + value
+    return list(daily.values())
+
+
+def _bar_periods_per_year(bars: list[OHLCBar]) -> float:
+    counts: dict[str, int] = {}
+    for bar in bars:
+        date_key = bar.timestamp.date().isoformat()
+        counts[date_key] = counts.get(date_key, 0) + 1
+    if counts:
+        return max(1.0, _median([float(count) for count in counts.values()]) * 252.0)
+    return 252.0
+
+
+def _sharpe_note(sample_trading_days: int) -> str:
+    if sample_trading_days < 1:
+        return "Sharpe is unavailable without daily PnL observations."
+    return f"Annualized estimate from {sample_trading_days} daily PnL observations."
 
 
 def _median(values: list[float]) -> float:

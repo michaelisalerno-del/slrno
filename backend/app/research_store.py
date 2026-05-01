@@ -354,6 +354,11 @@ class ResearchStore:
                     "settings": trial["parameters"],
                     "promotion_tier": trial["promotion_tier"],
                     "daily_pnl_sharpe": backtest.get("daily_pnl_sharpe", 0),
+                    "daily_pnl_sample_sharpe": backtest.get("daily_pnl_sample_sharpe", 0),
+                    "sharpe_observations": backtest.get("sharpe_observations", 0),
+                    "sample_calendar_days": backtest.get("sample_calendar_days", 0),
+                    "sample_trading_days": backtest.get("sample_trading_days", 0),
+                    "sharpe_annualization_note": backtest.get("sharpe_annualization_note", ""),
                     "deflated_sharpe_probability": (trial["parameters"].get("sharpe_diagnostics") or {}).get("deflated_sharpe_probability")
                     if isinstance(trial["parameters"].get("sharpe_diagnostics"), dict)
                     else 0,

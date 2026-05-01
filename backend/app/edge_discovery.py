@@ -259,7 +259,7 @@ def _candidate_from_evaluation(
         test_net_profit=round(backtest.test_profit, 4),
         net_profit=round(backtest.net_profit, 4),
         gross_profit=round(backtest.gross_profit, 4),
-        holdout_sharpe=round(backtest.test_sharpe, 4),
+        holdout_sharpe=round(backtest.test_daily_pnl_sharpe, 4),
         walk_forward_sharpe=round(_walk_forward_sharpe(evaluation), 4),
         total_cost=round(backtest.total_cost, 4),
         cost_gross_ratio=round(cost_gross_ratio, 6),
@@ -333,7 +333,10 @@ def _profit_concentration(evaluation: CandidateEvaluation) -> float:
 
 
 def _walk_forward_sharpe(evaluation: CandidateEvaluation) -> float:
-    values = [fold.sharpe for fold in evaluation.fold_results]
+    values = [
+        fold.daily_pnl_sharpe if fold.sharpe_observations >= 3 or fold.daily_pnl_sharpe != 0 else fold.sharpe
+        for fold in evaluation.fold_results
+    ]
     if not values:
         return 0.0
     midpoint = len(values) // 2

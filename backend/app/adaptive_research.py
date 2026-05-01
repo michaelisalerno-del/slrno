@@ -449,6 +449,10 @@ def _warnings(
         warnings.append("high_turnover_cost_drag")
     if _risk_adjusted_sharpe(backtest) < 0.55:
         warnings.append("weak_sharpe")
+    if 0 < backtest.sharpe_observations < 60:
+        warnings.append("short_sharpe_sample")
+    elif 0 < backtest.sharpe_observations < 120:
+        warnings.append("limited_sharpe_sample")
     if backtest.max_drawdown > config.starting_cash * 0.35:
         warnings.append("drawdown_too_high")
     if stress.net_profit <= 0:
@@ -692,14 +696,16 @@ def _sharpe_diagnostics(
     trial_count: int,
     parameter_stability_score: float,
 ) -> dict[str, object]:
-    fold_sharpes = [fold.sharpe for fold in folds]
+    fold_sharpes = [_risk_adjusted_sharpe(fold) for fold in folds]
     daily_pnl = list(backtest.daily_pnl_curve)
     deflated = _deflated_sharpe_probability(daily_pnl, trial_count)
-    haircut = _multiple_testing_sharpe_haircut(backtest.daily_pnl_sharpe, len(daily_pnl), trial_count)
+    haircut = _multiple_testing_sharpe_haircut(backtest.daily_pnl_sharpe, backtest.sharpe_observations, trial_count)
     return {
         "daily_pnl_sharpe": round(backtest.daily_pnl_sharpe, 4),
-        "full_period_sharpe": round(backtest.sharpe, 4),
-        "holdout_sharpe": round(backtest.test_sharpe, 4),
+        "daily_pnl_sample_sharpe": round(backtest.daily_pnl_sample_sharpe, 4),
+        "bar_period_annualized_sharpe": round(backtest.sharpe, 4),
+        "bar_sample_sharpe": round(backtest.bar_sample_sharpe, 4),
+        "holdout_sharpe": round(backtest.test_daily_pnl_sharpe, 4),
         "walk_forward_median_sharpe": round(_median(fold_sharpes), 4),
         "rolling_sharpe_min": round(backtest.rolling_sharpe_min, 4),
         "rolling_sharpe_median": round(backtest.rolling_sharpe_median, 4),
@@ -708,6 +714,12 @@ def _sharpe_diagnostics(
         "haircut_adjusted_daily_sharpe": haircut,
         "trial_count": trial_count,
         "sharpe_observations": backtest.sharpe_observations,
+        "bar_sharpe_observations": backtest.bar_sharpe_observations,
+        "sample_calendar_days": backtest.sample_calendar_days,
+        "sample_trading_days": backtest.sample_trading_days,
+        "daily_periods_per_year": backtest.daily_periods_per_year,
+        "bar_periods_per_year": round(backtest.bar_periods_per_year, 4),
+        "annualization_note": backtest.sharpe_annualization_note,
         "parameter_stability_score": parameter_stability_score,
         "turnover_efficiency": round(backtest.turnover_efficiency, 6),
         "implausibility_flags": _implausibility_flags(backtest, folds, trial_count, parameter_stability_score),
@@ -723,6 +735,8 @@ def _implausibility_flags(
     flags: list[str] = []
     if backtest.daily_pnl_sharpe >= 2 and backtest.trade_count < 25:
         flags.append("high_sharpe_low_trade_count")
+    if backtest.daily_pnl_sharpe >= 2 and backtest.sharpe_observations < 120:
+        flags.append("high_sharpe_short_sample")
     if backtest.daily_pnl_sharpe >= 2 and _positive_fold_rate(folds) < 0.6:
         flags.append("high_sharpe_weak_folds")
     if backtest.daily_pnl_sharpe >= 2 and parameter_stability_score < 0.35:

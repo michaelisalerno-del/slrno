@@ -682,7 +682,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
         <div className="table-scroll">
           <table>
             <thead>
-              <tr><th>Strategy</th><th>Tier</th><th>Style</th><th>Score</th><th>Daily PnL Sharpe</th><th>Bar Sharpe</th><th>DSR</th><th>Net</th><th>Expectancy</th><th>Net/cost</th><th>Cost/gross</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
+              <tr><th>Strategy</th><th>Tier</th><th>Style</th><th>Score</th><th>Daily Sharpe (ann.)</th><th>Sharpe days</th><th>Bar Sharpe (ann.)</th><th>DSR</th><th>Net</th><th>Expectancy</th><th>Net/cost</th><th>Cost/gross</th><th>Est spread/slip</th><th>Trades</th><th>Warnings</th></tr>
             </thead>
             <tbody>
               {filteredTrials.slice(0, 12).map((trial) => (
@@ -692,6 +692,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun }) {
                   <td>{strategyFamilyLabel(trial.strategy_family || trial.style)}</td>
                   <td>{round(trial.robustness_score)}</td>
                   <td>{round(trial.backtest?.daily_pnl_sharpe)}</td>
+                  <td>{trial.backtest?.sharpe_observations ?? 0}</td>
                   <td>{round(trial.backtest?.sharpe)}</td>
                   <td>{percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)}</td>
                   <td>{formatMoney(trial.backtest?.net_profit)}</td>
@@ -723,8 +724,9 @@ function ParetoCard({ item }) {
       {recipe && <small>{recipe}</small>}
       <div className="mini-metrics">
         <Metric label="Score" value={round(item.robustness_score)} />
-        <Metric label="Daily PnL Sharpe" value={round(item.daily_pnl_sharpe)} />
-        <Metric label="Bar Sharpe" value={round(item.sharpe)} />
+        <Metric label="Daily Sharpe (ann.)" value={round(item.daily_pnl_sharpe)} />
+        <Metric label="Sharpe days" value={item.sharpe_observations ?? 0} />
+        <Metric label="Bar Sharpe (ann.)" value={round(item.sharpe)} />
         <Metric label="DSR" value={percent(item.deflated_sharpe_probability)} />
         <Metric label="Net" value={formatMoney(item.net_profit)} />
         <Metric label="Cost" value={formatMoney(item.total_cost)} />
@@ -758,8 +760,9 @@ function CandidateView({ candidates, critique }) {
               )}
               <small>{humanWarnings(candidate.audit?.warnings).join(" · ") || "Passed current research gates"}</small>
               <div className="mini-metrics">
-                <Metric label="Daily PnL Sharpe" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
-                <Metric label="Bar Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
+                <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
+                <Metric label="Sharpe days" value={candidate.audit?.backtest?.sharpe_observations ?? 0} />
+                <Metric label="Bar Sharpe (ann.)" value={round(candidate.audit?.backtest?.sharpe)} />
                 <Metric label="DSR" value={percent(candidate.audit?.candidate?.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
                 <Metric label="Stability" value={percent(candidate.audit?.candidate?.parameters?.parameter_stability_score)} />
                 <Metric label="Net" value={formatMoney(candidate.audit?.backtest?.net_profit)} />
@@ -1067,6 +1070,8 @@ function humanWarnings(warnings = []) {
     high_turnover_cost_drag: "High-turnover cost drag",
     negative_expectancy_after_costs: "Negative expectancy after costs",
     weak_sharpe: "Weak Sharpe",
+    short_sharpe_sample: "Short Sharpe sample",
+    limited_sharpe_sample: "Limited Sharpe sample",
     drawdown_too_high: "Drawdown too high",
     fails_higher_slippage: "Fails higher slippage",
     profits_not_consistent_across_folds: "Fragile folds",
@@ -1076,6 +1081,7 @@ function humanWarnings(warnings = []) {
     calendar_effect_needs_longer_history: "Needs longer calendar history",
     known_edge_needs_cross_market_validation: "Needs cross-market validation",
     high_sharpe_low_trade_count: "High Sharpe, low trades",
+    high_sharpe_short_sample: "High Sharpe, short sample",
     high_sharpe_weak_folds: "High Sharpe, weak folds",
     isolated_parameter_peak: "Isolated parameter peak",
     costs_small_vs_turnover: "Costs small vs turnover",
