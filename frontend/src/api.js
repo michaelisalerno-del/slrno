@@ -124,8 +124,8 @@ export function getResearchPareto(runId) {
   return request(`/research/runs/${runId}/pareto`);
 }
 
-export function getResearchCandidates() {
-  return request("/research/candidates");
+export function getResearchCandidates(limit = 80) {
+  return request(`/research/candidates?limit=${limit}`);
 }
 
 export function getResearchCandidate(candidateId) {

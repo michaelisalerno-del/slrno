@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -479,8 +479,8 @@ def _critique_research_run(run: dict[str, object] | None):
 
 
 @app.get("/research/candidates")
-def list_research_candidates() -> list[dict[str, object]]:
-    return research_store.list_candidates()
+def list_research_candidates(limit: int | None = Query(default=None, ge=1, le=500)) -> list[dict[str, object]]:
+    return research_store.list_candidates(limit=limit)
 
 
 @app.get("/research/candidates/{candidate_id}")
