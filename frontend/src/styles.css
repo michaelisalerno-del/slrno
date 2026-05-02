@@ -394,9 +394,21 @@ label {
 
 .label-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+}
+
+.label-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.badge-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .secret-badge,
@@ -436,6 +448,12 @@ label {
   color: #7a4b00;
   background: #fff7e6;
   border: 1px solid #f0d28a;
+}
+
+.market-badge {
+  color: #0b4f6c;
+  background: #e6f6fb;
+  border: 1px solid #adddea;
 }
 
 input,

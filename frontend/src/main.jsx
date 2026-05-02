@@ -1763,15 +1763,20 @@ function TrialCard({ trial, onRefineTemplate }) {
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(trial);
+  const marketId = trialMarketId(trial);
+  const interval = trialIntervalLabel(trial);
   return (
     <article className="trial-card">
       <div className="trial-summary">
         <div>
           <div className="label-row">
             <strong>{trial.strategy_name}</strong>
-            <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
+            <div className="badge-group">
+              {marketId && <span className="badge market-badge">{marketId}</span>}
+              <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
+            </div>
           </div>
-          <span>{strategyFamilyLabel(trial.strategy_family || trial.style)} · score {round(trial.robustness_score)}</span>
+          <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="button-row trial-actions">
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
@@ -2187,6 +2192,15 @@ function intervalValue(value) {
     return "1hour";
   }
   return value || "5min";
+}
+
+function trialMarketId(item) {
+  return String(item?.market_id || item?.parameters?.market_id || "").trim();
+}
+
+function trialIntervalLabel(item) {
+  const raw = item?.parameters?.timeframe || item?.parameters?.interval || item?.parameters?.bar_interval;
+  return raw ? normalizeInterval(String(raw)) : "";
 }
 
 function costBadge(profile, market) {

@@ -811,6 +811,7 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
         "id": row[0],
         "run_id": row[1],
         "strategy_name": row[2],
+        "market_id": str(parameters.get("market_id") or ""),
         "passed": bool(row[3]),
         "robustness_score": row[4],
         "metrics": json.loads(row[5]),
