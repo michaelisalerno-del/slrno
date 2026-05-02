@@ -15,6 +15,17 @@ def test_capital_scenarios_include_default_account_sizes_and_feasibility():
     assert capital_summary(scenarios)["smallest_feasible_account"] is None
 
 
+def test_capital_scenarios_include_selected_testing_account_size():
+    scenarios = capital_scenarios(
+        {"net_profit": 100, "max_drawdown": 20},
+        {"position_size": 0.25, "stop_loss_bps": 50},
+        {"bid": 100, "offer": 101, "min_deal_size": 0.1, "margin_percent": 5.0},
+        account_sizes=(2000,),
+    )
+
+    assert [item["account_size"] for item in scenarios] == [250.0, 500.0, 1000.0, 2000.0, 3000.0, 10000.0]
+
+
 def test_capital_scenarios_block_accounts_with_historical_drawdown_or_daily_loss():
     scenarios = capital_scenarios(
         {"max_drawdown": 600, "daily_pnl_curve": [100, -30, 20]},

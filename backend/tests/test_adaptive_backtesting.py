@@ -273,6 +273,14 @@ def test_auto_refine_target_regime_samples_more_active_trade_repair_parameters()
     assert parameters["min_trade_spacing"] <= 12
 
 
+def test_capital_fit_repair_samples_smaller_risk_parameters():
+    parameters = _sample_parameters(Random(2), "intraday_trend", "balanced", 0, "capital_fit", "shock_event")
+
+    assert parameters["repair_profile"] == "capital_fit"
+    assert parameters["position_size"] <= 0.55
+    assert parameters["stop_loss_bps"] <= 27.5
+
+
 def test_negative_total_net_does_not_promote_to_research_candidate():
     market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
     profile = public_ig_cost_profile(market)
