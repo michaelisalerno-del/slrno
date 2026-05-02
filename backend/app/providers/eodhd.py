@@ -35,6 +35,7 @@ class EODHDProvider:
         "1hour": ("1h", 1),
         "1h": ("1h", 1),
     }
+    _INTRADAY_CHUNK_DAYS = {"1m": 30, "5m": 90, "1h": 365}
     _DAILY_INTERVALS = {"1day", "1d", "day", "daily"}
     _COMMODITY_INTERVALS = {
         "1day": "daily",
@@ -100,25 +101,7 @@ class EODHDProvider:
             return await self._eod_bars(symbol, start_date, end_date)
 
         provider_interval, aggregate_size = self._INTERVALS.get(interval, ("5m", 1))
-        payload = await self._get_json(
-            "historical_bars",
-            f"/intraday/{symbol}",
-            {
-                "interval": provider_interval,
-                "from": int(datetime.combine(start_date, time.min, tzinfo=UTC).timestamp()),
-                "to": int(datetime.combine(end_date, time.max, tzinfo=UTC).timestamp()),
-            },
-            ttl_seconds=_historical_ttl_seconds(end_date),
-            use_cache=True,
-            timeout_seconds=30.0,
-            timeout_message="EODHD historical data request timed out after 30 seconds",
-            operation="historical bars",
-            symbol_for_error=symbol,
-        )
-        if not isinstance(payload, list):
-            raise EODHDProviderError(f"EODHD returned an unexpected historical data shape for {symbol}")
-        bars = [bar for row in payload if (bar := _bar_from_row(symbol, row)) is not None]
-        bars = sorted({bar.timestamp: bar for bar in bars}.values(), key=lambda bar: bar.timestamp)
+        bars = await self._intraday_bars(symbol, provider_interval, start_date, end_date)
         return _aggregate_bars(bars, aggregate_size) if aggregate_size > 1 else bars
 
     async def search(self, query: str) -> list[dict[str, str]]:
@@ -164,6 +147,31 @@ class EODHDProvider:
             raise EODHDProviderError(f"EODHD returned an unexpected EOD data shape for {symbol}")
         bars = [bar for row in payload if (bar := _bar_from_row(symbol, row)) is not None]
         return sorted(bars, key=lambda bar: bar.timestamp)
+
+    async def _intraday_bars(self, symbol: str, provider_interval: str, start_date: date, end_date: date) -> list[OHLCBar]:
+        rows: list[dict[str, object]] = []
+        chunk_days = self._INTRADAY_CHUNK_DAYS.get(provider_interval, 90)
+        for chunk_start, chunk_end in _date_chunks(start_date, end_date, chunk_days):
+            payload = await self._get_json(
+                "historical_bars",
+                f"/intraday/{symbol}",
+                {
+                    "interval": provider_interval,
+                    "from": int(datetime.combine(chunk_start, time.min, tzinfo=UTC).timestamp()),
+                    "to": int(datetime.combine(chunk_end, time.max, tzinfo=UTC).timestamp()),
+                },
+                ttl_seconds=_historical_ttl_seconds(chunk_end),
+                use_cache=True,
+                timeout_seconds=30.0,
+                timeout_message="EODHD historical data request timed out after 30 seconds",
+                operation=f"historical bars {chunk_start.isoformat()} to {chunk_end.isoformat()}",
+                symbol_for_error=symbol,
+            )
+            if not isinstance(payload, list):
+                raise EODHDProviderError(f"EODHD returned an unexpected historical data shape for {symbol}")
+            rows.extend(row for row in payload if isinstance(row, dict))
+        bars = [bar for row in rows if (bar := _bar_from_row(symbol, row)) is not None]
+        return sorted({bar.timestamp: bar for bar in bars}.values(), key=lambda bar: bar.timestamp)
 
     async def _commodity_bars(self, symbol: str, interval: str, start_date: date, end_date: date) -> list[OHLCBar]:
         provider_interval = self._COMMODITY_INTERVALS.get(interval)
@@ -371,6 +379,15 @@ def _historical_ttl_seconds(chunk_end: date) -> int:
     if chunk_end < today - timedelta(days=3):
         return EODHDProvider.CLOSED_HISTORY_TTL_SECONDS
     return EODHDProvider.LIVE_HISTORY_TTL_SECONDS
+
+
+def _date_chunks(start_date: date, end_date: date, chunk_days: int):
+    current = start_date
+    safe_chunk_days = max(1, chunk_days)
+    while current <= end_date:
+        chunk_end = min(end_date, current + timedelta(days=safe_chunk_days - 1))
+        yield current, chunk_end
+        current = chunk_end + timedelta(days=1)
 
 
 def _raise_status_error(exc: object, operation: str, symbol: str) -> None:

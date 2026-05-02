@@ -87,6 +87,65 @@ def test_eodhd_provider_reuses_cached_intraday_across_tokens(tmp_path, monkeypat
     assert {call["api_token"] for call in calls} == {"first-token"}
 
 
+def test_eodhd_provider_chunks_long_intraday_ranges(tmp_path, monkeypatch):
+    cache = MarketDataCache(tmp_path / "market_data_cache.sqlite3")
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, params: dict[str, object]) -> None:
+            self.params = params
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, object]]:
+            calls.append(dict(self.params))
+            return [
+                {
+                    "timestamp": self.params["from"],
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100 + len(calls),
+                    "volume": 10,
+                }
+            ]
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, _url: str, params: dict[str, object]) -> FakeResponse:
+            return FakeResponse(params)
+
+    class FakeTimeout:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(AsyncClient=FakeClient, Timeout=FakeTimeout, TimeoutException=TimeoutError, HTTPStatusError=RuntimeError),
+    )
+    provider = EODHDProvider("token", base_url="https://example.test", cache=cache)
+
+    bars = asyncio.run(provider.historical_bars("NDX.INDX", "5min", "2025-01-01", "2025-05-15"))
+    cached = asyncio.run(provider.historical_bars("NDX.INDX", "5min", "2025-01-01", "2025-05-15"))
+
+    assert [bar.close for bar in bars] == [101, 102]
+    assert [bar.close for bar in cached] == [101, 102]
+    assert len(calls) == 2
+    assert [datetime.fromtimestamp(call["from"], UTC).date().isoformat() for call in calls] == ["2025-01-01", "2025-04-01"]
+    assert [datetime.fromtimestamp(call["to"], UTC).date().isoformat() for call in calls] == ["2025-03-31", "2025-05-15"]
+    assert {call["api_token"] for call in calls} == {"token"}
+
+
 def test_eodhd_provider_skips_incomplete_intraday_rows(tmp_path, monkeypatch):
     cache = MarketDataCache(tmp_path / "market_data_cache.sqlite3")
 
