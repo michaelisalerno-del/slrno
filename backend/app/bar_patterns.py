@@ -337,6 +337,7 @@ def _group_summary(rows: list[dict[str, object]], key: str, train_fraction: floa
             "cost": 0.0,
             "active_bars": 0.0,
             "transitions": 0.0,
+            "test_transitions": 0.0,
             "train_profit": 0.0,
             "test_profit": 0.0,
             "daily_pnl": defaultdict(float),
@@ -367,6 +368,8 @@ def _group_summary(rows: list[dict[str, object]], key: str, train_fraction: floa
                 grouped[bucket]["active_days"].add(str_date)  # type: ignore[union-attr]
         if _number(row.get("position_delta")) > 0:
             grouped[bucket]["transitions"] = _number(grouped[bucket]["transitions"]) + 1
+            if index >= split:
+                grouped[bucket]["test_transitions"] = _number(grouped[bucket]["test_transitions"]) + 1
     summaries = [
         {
             "key": bucket,
@@ -377,6 +380,7 @@ def _group_summary(rows: list[dict[str, object]], key: str, train_fraction: floa
             "active_days": len(values["active_days"]),  # type: ignore[arg-type]
             "trading_days": len(values["trading_days"]),  # type: ignore[arg-type]
             "transitions": int(_number(values["transitions"])),
+            "test_transitions": int(_number(values["test_transitions"])),
             "train_profit": round(_number(values["train_profit"]), 4),
             "test_profit": round(_number(values["test_profit"]), 4),
             "daily_pnl_sharpe": _sharpe(list(values["daily_pnl"].values())),  # type: ignore[union-attr]
@@ -499,6 +503,9 @@ def _pattern_warnings(
         warnings.append("regime_gated_backtest_negative")
     if _number(gated_backtest.get("test_profit")) <= 0.0:
         warnings.append("regime_gated_oos_negative")
+    target_row = next((row for row in regime_summary if str(row.get("key")) == str(target_regime)), None) if target_regime else None
+    if target_row is not None and int(target_row.get("test_transitions") or 0) < 8:
+        warnings.append("target_regime_low_oos_trades")
     sample_days = _allowed_regime_sample_days(regime_summary, target_regime)
     sample_regime = str(target_regime or dominant_regime.get("key") or "normal")
     if sample_days < regime_minimum_days(sample_regime):
@@ -613,6 +620,7 @@ def _regime_evidence_summary(row: dict[str, object] | None) -> dict[str, object]
         "gross_profit": row.get("gross_profit"),
         "cost": row.get("cost"),
         "trade_count": row.get("transitions"),
+        "test_trade_count": row.get("test_transitions"),
         "active_bars": row.get("active_bars"),
         "active_days": row.get("active_days"),
         "trading_days": row.get("trading_days"),

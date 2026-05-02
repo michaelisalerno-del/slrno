@@ -119,10 +119,11 @@ def run_adaptive_search(
     market_regime, regime_by_date = market_regime_context(bars)
     eligible_regimes = eligible_specialist_regimes(bars)
     target_regime = _target_regime(config.target_regime)
+    reference_price = _latest_reference_price(bars)
 
     for trial_index in range(budget):
         family = families[trial_index % len(families)]
-        parameters = _sample_parameters(rng, family, config.risk_profile, trial_index)
+        parameters = _sample_parameters(rng, family, config.risk_profile, trial_index, config.repair_mode, target_regime)
         raw_signals = _generate_signals(bars, family, parameters)
         signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}, regime_by_date=regime_by_date) if target_regime else raw_signals
         backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
@@ -168,6 +169,8 @@ def run_adaptive_search(
             "cost_badge": profile_badge(cost_profile),
             "estimated_spread_bps": cost_profile.spread_bps,
             "estimated_slippage_bps": cost_profile.slippage_bps,
+            "reference_price": reference_price,
+            "reference_price_source": "latest_eodhd_bar_close",
             "stress_net_profit": round(stress.net_profit, 4),
             "stress_sharpe": round(stress.sharpe, 4),
             "repair_mode": config.repair_mode,
@@ -210,7 +213,7 @@ def run_adaptive_search(
                     break
                 global_index = budget + regime_scan_trial_count
                 family = families[global_index % len(families)]
-                parameters = _sample_parameters(rng, family, config.risk_profile, global_index)
+                parameters = _sample_parameters(rng, family, config.risk_profile, global_index, config.repair_mode, target_regime)
                 raw_signals = _generate_signals(bars, family, parameters)
                 signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}, regime_by_date=regime_by_date)
                 backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
@@ -258,6 +261,8 @@ def run_adaptive_search(
                     "cost_badge": profile_badge(cost_profile),
                     "estimated_spread_bps": cost_profile.spread_bps,
                     "estimated_slippage_bps": cost_profile.slippage_bps,
+                    "reference_price": reference_price,
+                    "reference_price_source": "latest_eodhd_bar_close",
                     "stress_net_profit": round(stress.net_profit, 4),
                     "stress_sharpe": round(stress.sharpe, 4),
                     "repair_mode": config.repair_mode,
@@ -341,15 +346,34 @@ def _target_regime(value: str | None) -> str | None:
     return text or None
 
 
-def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index: int) -> dict[str, float | int | str]:
+def _latest_reference_price(bars: list[OHLCBar]) -> float:
+    for bar in reversed(bars):
+        if bar.close > 0:
+            return round(float(bar.close), 8)
+    return 0.0
+
+
+def _trade_count_repair_mode(repair_mode: str) -> bool:
+    return repair_mode in {"auto_refine", "more_trades", "longer_history"}
+
+
+def _sample_parameters(
+    rng: Random,
+    family: str,
+    risk_profile: str,
+    trial_index: int,
+    repair_mode: str = "standard",
+    target_regime: str | None = None,
+) -> dict[str, float | int | str]:
+    trade_repair = _trade_count_repair_mode(repair_mode) and bool(target_regime)
     lookbacks = {
-        "scalping": (3, 5, 8, 12),
-        "intraday_trend": (8, 12, 16, 24, 36),
-        "breakout": (12, 20, 32, 48),
-        "liquidity_sweep_reversal": (12, 20, 32, 48, 72),
-        "mean_reversion": (10, 16, 24, 36),
-        "volatility_expansion": (12, 18, 30, 42),
-        "swing_trend": (48, 72, 96, 144),
+        "scalping": (3, 5, 8, 12) if not trade_repair else (2, 3, 5, 8),
+        "intraday_trend": (8, 12, 16, 24, 36) if not trade_repair else (4, 6, 8, 12, 16, 24),
+        "breakout": (12, 20, 32, 48) if not trade_repair else (6, 8, 12, 16, 24, 32),
+        "liquidity_sweep_reversal": (12, 20, 32, 48, 72) if not trade_repair else (6, 8, 12, 16, 24, 32),
+        "mean_reversion": (10, 16, 24, 36) if not trade_repair else (5, 8, 10, 16, 24),
+        "volatility_expansion": (12, 18, 30, 42) if not trade_repair else (6, 8, 12, 18, 24),
+        "swing_trend": (48, 72, 96, 144) if not trade_repair else (24, 36, 48, 72, 96),
         "calendar_turnaround_tuesday": (1,),
         "month_end_seasonality": (1,),
     }.get(family, (12, 24, 36))
@@ -357,20 +381,22 @@ def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index:
     risk_scale = {"conservative": 0.7, "balanced": 1.0, "aggressive": 1.35}.get(risk_profile, 1.0)
     parameters: dict[str, float | int | str] = {
         "lookback": rng.choice(lookbacks),
-        "threshold_bps": round(rng.choice(_threshold_choices(family)) * risk_scale, 2),
+        "threshold_bps": round(rng.choice(_threshold_choices(family, trade_repair)) * risk_scale, 2),
         "z_threshold": round(rng.uniform(0.65, 2.2), 3),
         "volatility_multiplier": round(rng.uniform(1.1, 2.8), 3),
         "stop_loss_bps": round(rng.choice((18, 25, 35, 50, 75, 110)) * risk_scale, 2),
         "take_profit_bps": round(rng.choice((20, 35, 55, 80, 130, 180)) * risk_scale, 2),
-        "max_hold_bars": rng.choice(_max_hold_choices(family)),
-        "min_hold_bars": rng.choice((3, 5, 8, 12) if family in CALENDAR_FAMILIES else (2, 3, 5, 8)),
-        "min_trade_spacing": rng.choice(_spacing_choices(family)),
-        "confidence_quantile": 1.0 if family in CALENDAR_FAMILIES else rng.choice((0.1, 0.15, 0.2, 0.25, 0.3, 0.4)),
-        "regime_filter": rng.choice(("any", "trend", "volatile", "calm")),
+        "max_hold_bars": rng.choice(_max_hold_choices(family, trade_repair)),
+        "min_hold_bars": rng.choice((1, 2, 3, 5) if trade_repair else ((3, 5, 8, 12) if family in CALENDAR_FAMILIES else (2, 3, 5, 8))),
+        "min_trade_spacing": rng.choice(_spacing_choices(family, trade_repair)),
+        "confidence_quantile": 1.0 if family in CALENDAR_FAMILIES else rng.choice((0.3, 0.4, 0.55, 0.7, 1.0) if trade_repair else (0.1, 0.15, 0.2, 0.25, 0.3, 0.4)),
+        "regime_filter": rng.choice(("any", "any", "trend", "volatile") if trade_repair else ("any", "trend", "volatile", "calm")),
         "false_breakout_filter": rng.choice((0, 1)),
         "position_size": round(rng.choice((0.5, 1.0, 1.5, 2.0)) * risk_scale, 2),
         "direction": direction,
     }
+    if trade_repair:
+        parameters["repair_profile"] = "target_regime_more_oos_trades"
     if family == "calendar_turnaround_tuesday":
         parameters.update(
             {
@@ -844,7 +870,22 @@ def _cost_aware_score(
         - 0.28 * churn_penalty
         - (0.12 if evidence_mode else 0.04) * concentration_penalty
     )
+    score = min(score, _oos_trade_score_cap(evaluation, grade))
     return round(_clamp(score, -100.0, 100.0), 4)
+
+
+def _oos_trade_score_cap(evaluation: CandidateEvaluation, grade: dict[str, object]) -> float:
+    evidence = evaluation.candidate.parameters.get("evidence_profile")
+    if not isinstance(evidence, dict):
+        return 100.0
+    oos_trades = int(_safe_float(evidence.get("oos_trade_count")))
+    if oos_trades >= 18:
+        return 100.0
+    cap = 45.0 + (max(0, oos_trades) / 18.0) * 20.0
+    if grade.get("mode") == "target_regime":
+        target_test_trades = int(_safe_float(grade.get("test_trade_count")))
+        cap = min(cap, 42.0 + (max(0, target_test_trades) / 12.0) * 18.0)
+    return cap
 
 
 def _trial_ranking_key(
@@ -923,6 +964,7 @@ def _target_regime_grade_profile(evaluation: CandidateEvaluation) -> dict[str, o
         "daily_pnl_sharpe": _safe_float(in_regime.get("daily_pnl_sharpe")),
         "sharpe_days": int(_safe_float(in_regime.get("sharpe_days"))),
         "trade_count": trade_count,
+        "test_trade_count": int(_safe_float(in_regime.get("test_trade_count"))),
         "max_drawdown": _safe_float(in_regime.get("max_drawdown")),
         "gross_profit": gross_profit,
         "total_cost": total_cost,
@@ -1224,7 +1266,17 @@ def _churn_penalty(backtest: BacktestResult) -> float:
     return _clamp(0.55 * cost_drag + 0.30 * turnover_drag + 0.15 * poor_expectancy_drag, 0.0, 1.0)
 
 
-def _threshold_choices(family: str) -> tuple[int, ...]:
+def _threshold_choices(family: str, trade_repair: bool = False) -> tuple[int, ...]:
+    if trade_repair:
+        if family == "scalping":
+            return (6, 8, 12, 18, 25, 35)
+        if family == "liquidity_sweep_reversal":
+            return (4, 6, 8, 12, 18, 25)
+        if family in {"intraday_trend", "breakout", "volatility_expansion"}:
+            return (6, 8, 12, 18, 25, 35, 50)
+        if family == "swing_trend":
+            return (12, 18, 25, 35, 50, 75)
+        return (4, 6, 8, 12, 18, 25, 35)
     if family == "scalping":
         return (12, 18, 25, 35, 50, 75)
     if family == "liquidity_sweep_reversal":
@@ -1236,7 +1288,15 @@ def _threshold_choices(family: str) -> tuple[int, ...]:
     return (8, 12, 18, 25, 35, 50, 75)
 
 
-def _max_hold_choices(family: str) -> tuple[int, ...]:
+def _max_hold_choices(family: str, trade_repair: bool = False) -> tuple[int, ...]:
+    if trade_repair:
+        if family == "scalping":
+            return (4, 6, 8, 12, 18)
+        if family == "swing_trend":
+            return (24, 36, 48, 72, 96)
+        if family == "liquidity_sweep_reversal":
+            return (8, 12, 18, 24, 36)
+        return (12, 18, 24, 36, 48, 72)
     if family == "scalping":
         return (8, 12, 18, 24, 36)
     if family == "swing_trend":
@@ -1246,7 +1306,15 @@ def _max_hold_choices(family: str) -> tuple[int, ...]:
     return (24, 48, 72, 96, 144)
 
 
-def _spacing_choices(family: str) -> tuple[int, ...]:
+def _spacing_choices(family: str, trade_repair: bool = False) -> tuple[int, ...]:
+    if trade_repair:
+        if family == "scalping":
+            return (1, 2, 3, 4, 6)
+        if family == "swing_trend":
+            return (4, 6, 8, 12, 18)
+        if family == "liquidity_sweep_reversal":
+            return (2, 3, 4, 6, 8, 12)
+        return (1, 2, 3, 4, 6, 8, 12)
     if family == "scalping":
         return (4, 8, 12, 18)
     if family == "swing_trend":

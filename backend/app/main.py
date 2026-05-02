@@ -21,7 +21,7 @@ from .capital import (
 )
 from .config import allowed_origins
 from .evidence_export import build_research_export_zip
-from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile
+from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile, select_ig_market_candidate
 from .ig_spread_bet_engines import list_spread_bet_engines
 from .market_data_cache import MarketDataCache
 from .market_plugins import get_market_plugin, list_market_plugins
@@ -351,9 +351,20 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
     profiles: list[dict[str, object]] = []
     for market in selected:
         profile = public_ig_cost_profile(market, account_currency)
-        if provider is not None and market.ig_epic:
+        resolved_market = market
+        resolution_note = ""
+        if provider is not None and not resolved_market.ig_epic:
+            resolved = await _resolve_ig_market(provider, resolved_market)
+            if resolved is not None:
+                resolved_market, resolution_note = resolved
+                markets.upsert(resolved_market)
+        if provider is not None and resolved_market.ig_epic:
             try:
-                profile = profile_from_ig_market(market, await provider.market_details(market.ig_epic), account_currency)
+                profile = profile_from_ig_market(resolved_market, await provider.market_details(resolved_market.ig_epic), account_currency)
+                if resolution_note:
+                    payload = profile.as_dict()
+                    payload["notes"] = list(payload.get("notes", [])) + [resolution_note]
+                    profile = IGCostProfile(**{key: value for key, value in payload.items() if key in IGCostProfile.__dataclass_fields__})
             except Exception as exc:
                 fallback = profile.as_dict()
                 fallback["notes"] = list(fallback.get("notes", [])) + [f"IG sync failed: {_public_error(exc)}"]
@@ -361,6 +372,49 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
         research_store.save_cost_profile(profile)
         profiles.append(profile.as_dict())
     return {"status": "synced", "profile_count": len(profiles), "profiles": profiles}
+
+
+async def _resolve_ig_market(provider: IGDemoProvider, market: MarketMapping) -> tuple[MarketMapping, str] | None:
+    queries = [
+        market.ig_name,
+        *(part.strip() for part in market.ig_search_terms.split(",")),
+        market.name,
+        market.market_id,
+    ]
+    seen: set[str] = set()
+    for query in queries:
+        search_term = str(query or "").strip()
+        if not search_term or search_term.lower() in seen:
+            continue
+        seen.add(search_term.lower())
+        try:
+            matches = await provider.find_market(search_term)
+        except Exception:
+            continue
+        selected = select_ig_market_candidate(market, matches)
+        if selected is None:
+            continue
+        epic = str(selected.get("epic") or "").strip()
+        if not epic:
+            continue
+        name = str(selected.get("name") or market.ig_name or market.name)
+        resolved = MarketMapping(
+            market.market_id,
+            market.name,
+            market.asset_class,
+            market.eodhd_symbol,
+            epic,
+            market.enabled,
+            market.plugin_id,
+            name,
+            market.ig_search_terms,
+            market.default_timeframe,
+            market.spread_bps,
+            market.slippage_bps,
+            market.min_backtest_bars,
+        )
+        return resolved, f"IG EPIC auto-bound from search term '{search_term}' to {epic} ({name})."
+    return None
 
 
 @app.get("/ig/markets/{market_id}/cost-profile")
