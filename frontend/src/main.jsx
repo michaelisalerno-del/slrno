@@ -537,6 +537,7 @@ function App() {
       readiness: source.audit?.promotion_readiness ?? null,
       pattern,
       evidence: evidenceProfileForSource(source),
+      backtest: source.audit?.backtest ?? source.backtest ?? {},
       parameters,
     };
   }
@@ -599,12 +600,14 @@ function App() {
         marketIds: selectedMarket,
         budget: "120",
         stress: 2.0,
-        start: "2024-01-01",
+        start: longEvidenceStartForTemplate(refinementTemplate),
         end: researchRun.end,
         interval: refinementTemplate.interval,
-        targetRegime: templateTargetRegime,
+        targetRegime: regimeRepairTarget,
         repairMode: "more_trades",
-        label: "More-trades repair run staged with longer history and a deeper search.",
+        label: regimeRepairTarget
+          ? `Target-regime OOS repair staged for ${regimeLabel(regimeRepairTarget)} with longer history and a deeper search.`
+          : "More-trades repair run staged with longer history and a deeper search.",
       },
       higher_costs: {
         marketIds: selectedMarket,
@@ -661,12 +664,14 @@ function App() {
         marketIds: selectedMarket,
         budget: "120",
         stress: 2.0,
-        start: "2024-01-01",
+        start: longEvidenceStartForTemplate(refinementTemplate),
         end: researchRun.end,
         interval: refinementTemplate.interval,
-        targetRegime: templateTargetRegime,
+        targetRegime: regimeRepairTarget,
         repairMode: "longer_history",
-        label: "Longer-history robustness run staged.",
+        label: regimeRepairTarget
+          ? `Longer-history evidence staged inside ${regimeLabel(regimeRepairTarget)}.`
+          : "Longer-history robustness run staged.",
       },
     }[preset];
     if (!presetConfig) {
@@ -906,6 +911,7 @@ function App() {
                       <Metric label="Fold share" value={percent(refinementTemplate.evidence?.single_fold_profit_share)} />
                       <Metric label="OOS net" value={formatMoney(refinementTemplate.evidence?.oos_net_profit)} />
                       <Metric label="OOS trades" value={refinementTemplate.evidence?.oos_trade_count ?? 0} />
+                      <TemplateUtilizationMetrics backtest={refinementTemplate.backtest} pattern={refinementTemplate.pattern} />
                       <RegimeEvidenceMetrics pattern={refinementTemplate.pattern} />
                     </div>
                     <div className="warning-row">
@@ -1263,7 +1269,7 @@ function GuideView({ setActiveModule }) {
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
-    ["5", "Use Refine further", "Use Best by market first, then click Refine further to stage the locked repair plan and sync IG costs when validation is missing."],
+    ["5", "Use Refine further", "Use Best by market first, then click Refine further to stage the locked repair plan. If a best regime exists, refinement stays on that market and grades that regime only."],
     ["6", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
     ["7", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, and regime gates are clear."],
   ];
@@ -1283,6 +1289,9 @@ function GuideView({ setActiveModule }) {
     ["Paper score", "A stricter score that weights capital fit, OOS trades, OOS profit, fold stability, cost stress, and Sharpe sample size before headline profit."],
     ["End balance", "Projected account balance after compounding from the selected account size."],
     ["Return", "Projected percentage return for that account scenario."],
+    ["Edge active days", "Estimated days the best/target regime actually has capital at work. Sparse specialists can be useful portfolio slots if OOS and folds improve."],
+    ["Capital use", "Active days divided by the available history. Low use means the capital can be scheduled elsewhere when this template is flat."],
+    ["Net/active day", "Net profit divided by active days, useful for comparing small-window specialists without pretending they trade all year."],
     ["OOS net", "Walk-forward out-of-sample net profit after costs."],
     ["Fold win", "Share of walk-forward folds that made money."],
     ["Fold share", "How much positive fold profit came from the best fold. High values mean fragility."],
@@ -1293,7 +1302,7 @@ function GuideView({ setActiveModule }) {
     ["Warning colours", "Red blocks paper promotion, orange needs repair, blue is a specialist/regime identity, and grey is diagnostic."],
   ];
   const repairs = [
-    ["Too few trades / low OOS", "Auto-refine runs a deeper longer-history retest. Target-regime refinements sample more active settings, but thin OOS evidence still caps the score."],
+    ["Too few trades / low OOS", "Auto-refine runs a deeper longer-history retest. If a best regime exists, the retest grades that regime only and forces the rest flat."],
     ["Fragile folds", "Use Longer history and Evidence first. The result needs to work across several walk-forward folds."],
     ["Single-month profit", "Use Exclude month. The run removes the dominant month from saved bars and retests."],
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
@@ -1964,6 +1973,22 @@ function RegimeEvidenceMetrics({ pattern }) {
   );
 }
 
+function TemplateUtilizationMetrics({ backtest, pattern }) {
+  const profile = templateUtilizationProfile(backtest, pattern);
+  if (!profile.available) {
+    return null;
+  }
+  const activeLabel = profile.mode === "target" ? "Target active days" : profile.mode === "edge" ? "Edge active days" : "Active days";
+  return (
+    <>
+      <Metric label={activeLabel} value={profile.activeDays} />
+      <Metric label="Idle days" value={profile.idleDays} />
+      <Metric label="Capital use" value={percent(profile.activeShare)} />
+      <Metric label="Net/active day" value={formatMoney(profile.netPerActiveDay)} />
+    </>
+  );
+}
+
 function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
   const backtest = trial.backtest ?? {};
   const accountSize = testingAccountSizeForSource(trial);
@@ -2011,6 +2036,7 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
         <Metric label={`${accountLabel} fit`} value={capital} />
         <Metric label="End balance" value={formatMoney(accountScenario?.projected_final_balance)} />
         <Metric label="Return" value={`${round(accountScenario?.projected_return_pct)}%`} />
+        <TemplateUtilizationMetrics backtest={backtest} pattern={pattern} />
         <Metric label="Daily Sharpe" value={round(backtest.daily_pnl_sharpe)} />
         <Metric label="Days" value={backtest.sharpe_observations ?? 0} />
         <Metric label="DSR" value={percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
@@ -2182,6 +2208,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther }) {
         <Metric label={`${accountLabel} fit`} value={capital} />
         <Metric label="End balance" value={formatMoney(accountScenario?.projected_final_balance)} />
         <Metric label="Return" value={`${round(accountScenario?.projected_return_pct)}%`} />
+        <TemplateUtilizationMetrics backtest={candidate.audit?.backtest} pattern={pattern} />
         <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
         <Metric label="Sharpe days" value={candidate.audit?.backtest?.sharpe_observations ?? 0} />
         <Metric label="Bar Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
@@ -2723,6 +2750,37 @@ function evidenceProfileForSource(source = {}) {
   };
 }
 
+function templateUtilizationProfile(backtest = {}, pattern = {}) {
+  const regimeEvidence = pattern?.regime_trade_evidence ?? {};
+  const inRegime = regimeEvidence?.in_regime ?? {};
+  const targeted = Boolean(pattern?.target_regime || regimeEvidence?.is_targeted);
+  const activeDaysFromRegime = numberOrZero(inRegime.active_days);
+  const useRegimeWindow = Boolean(regimeEvidence?.available && activeDaysFromRegime > 0);
+  const historyDays = Math.round(
+    numberOrZero(regimeEvidence.history_trading_days)
+      || numberOrZero(backtest.sample_trading_days)
+      || numberOrZero(backtest.sharpe_observations)
+  );
+  const activeDays = Math.round(
+    useRegimeWindow
+      ? activeDaysFromRegime
+      : numberOrZero(backtest.exposure) * historyDays
+  );
+  if (historyDays <= 0 || activeDays <= 0) {
+    return { available: false };
+  }
+  const netProfit = useRegimeWindow ? numberOrZero(inRegime.net_profit) : numberOrZero(backtest.net_profit);
+  return {
+    available: true,
+    targeted,
+    mode: targeted ? "target" : useRegimeWindow ? "edge" : "full",
+    activeDays,
+    idleDays: Math.max(0, historyDays - activeDays),
+    activeShare: historyDays > 0 ? activeDays / historyDays : 0,
+    netPerActiveDay: netProfit / Math.max(1, activeDays),
+  };
+}
+
 function numberOrZero(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
@@ -2803,9 +2861,11 @@ function repairActionsForTemplate(template) {
     add({
       id: "more-trades",
       preset: "more_trades",
-      title: "Fix too few trades",
-      detail: "Use longer history and a deeper locked-family retest so the edge has more chances to prove itself.",
-      button: "Stage retest",
+      title: dominantRegime ? "Fix target OOS" : "Fix too few trades",
+      detail: dominantRegime
+        ? `Extend history and grade only ${regimeLabel(dominantRegime)} so the specialist has more out-of-sample chances.`
+        : "Use longer history and a deeper locked-family retest so the edge has more chances to prove itself.",
+      button: dominantRegime ? "Target OOS" : "Stage retest",
       primary: actions.length === 0,
     });
   }
@@ -2847,7 +2907,9 @@ function repairActionsForTemplate(template) {
       id: "fold-repair",
       preset: "longer_history",
       title: "Fix fragile folds",
-      detail: "Extend the window and keep the strategy family locked so fold evidence has more calendar variety.",
+      detail: dominantRegime
+        ? `Extend the window inside ${regimeLabel(dominantRegime)} and keep the strategy family locked so fold evidence has more calendar variety.`
+        : "Extend the window and keep the strategy family locked so fold evidence has more calendar variety.",
       button: "Longer history",
       primary: actions.length === 0,
     });
@@ -2961,7 +3023,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   if (capitalBlocked) {
     budget = 120;
     stress = Math.max(stress, 2.5);
-    start = earlierDate(start, "2024-01-01");
+    start = earlierDate(start, longEvidenceStartForTemplate(template));
     objective = "balanced";
     riskProfile = "conservative";
     repairMode = "capital_fit";
@@ -2970,7 +3032,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   }
   if (tooFewTrades) {
     budget = 120;
-    start = earlierDate(start, "2024-01-01");
+    start = earlierDate(start, longEvidenceStartForTemplate(template));
     addStep("Deep locked-family retest over longer history");
     if (targetRegime) {
       runTargetRegime = targetRegime;
@@ -2998,7 +3060,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   }
   if (fragileFolds) {
     budget = Math.max(budget, 120);
-    start = earlierDate(start, "2024-01-01");
+    start = earlierDate(start, longEvidenceStartForTemplate(template));
     addStep("Use longer-history fold and OOS evidence");
   }
   if (scanBias) {
@@ -3061,6 +3123,15 @@ function earlierDate(current, candidate) {
     return candidate;
   }
   return String(current) < String(candidate) ? current : candidate;
+}
+
+function longEvidenceStartForTemplate(template = {}) {
+  const family = String(template.family || template.parameters?.family || "");
+  const interval = intervalValue(template.interval || template.parameters?.timeframe || template.parameters?.interval);
+  if (interval === "1day" || ["calendar_turnaround_tuesday", "month_end_seasonality"].includes(family)) {
+    return "2020-01-01";
+  }
+  return "2024-01-01";
 }
 
 function readinessIssueCodes(readiness) {
