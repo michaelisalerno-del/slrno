@@ -66,6 +66,7 @@ const FALLBACK_ENGINES = [
 ];
 
 const CANDLE_INTERVALS = [
+  { value: "market_default", label: "Market default" },
   { value: "5min", label: "5 minute" },
   { value: "15min", label: "15 minute" },
   { value: "30min", label: "30 minute" },
@@ -150,7 +151,7 @@ function App() {
     engine: "adaptive_ig_v1",
     start: "2025-01-01",
     end: "2026-04-01",
-    interval: "5min",
+    interval: "market_default",
     search_preset: "balanced",
     trading_style: "research_ideas",
     objective: "profit_first",
@@ -413,7 +414,7 @@ function App() {
       family,
       style: String(parameters.style || searchAudit.trading_style || "find_anything_robust"),
       objective: String(parameters.objective || searchAudit.objective || "profit_first"),
-      interval: normalizeInterval(parameters.timeframe || researchRun.interval),
+      interval: intervalValue(parameters.timeframe || researchRun.interval),
       risk_profile: String(searchAudit.risk_profile || researchRun.risk_profile),
       recipe: researchRecipeLabel(parameters.research_recipe),
       warnings: warningCodesForSource(source),
@@ -503,9 +504,9 @@ function App() {
         stress: 2.5,
         start: researchRun.start,
         end: researchRun.end,
-        interval: refinementTemplate.interval,
+        interval: "market_default",
         repairMode: "cross_market",
-        label: "Cross-market robustness run staged.",
+        label: "Cross-market robustness run staged using each market default timeframe.",
       },
       regime_scan: {
         marketIds: selectedMarket,
@@ -2117,6 +2118,13 @@ function shortDateTime(value) {
 }
 
 function normalizeInterval(value) {
+  if (value === "market_default") {
+    return "Market default";
+  }
+  return intervalValue(value);
+}
+
+function intervalValue(value) {
   if (value === "1h") {
     return "1hour";
   }
@@ -2547,6 +2555,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     budget = Math.max(budget, 120);
     stress = Math.max(stress, 2.5);
     addStep("Cross-check the locked family across enabled markets");
+    addStep("Use each market default candle timeframe");
   }
   if (costStress) {
     stress = Math.max(stress, 3.0);
@@ -2558,7 +2567,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
 
   const runPatch = {
     market_id: marketIds[0] || researchRun.market_id,
-    interval: template.interval,
+    interval: marketIds.length > 1 ? "market_default" : template.interval,
     start,
     end: researchRun.end,
     trading_style: template.style,

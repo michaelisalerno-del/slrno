@@ -66,6 +66,44 @@ def test_research_run_passes_cost_stress_multiplier_to_adaptive_search(tmp_path,
     assert store.get_run(run_id)["config"]["cost_stress_multiplier"] == 3.0
 
 
+def test_market_default_interval_uses_each_market_timeframe(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    registry = MarketRegistry(tmp_path / "markets.sqlite3")
+    registry.upsert(_market("OK", "OK.INDX"))
+    registry.upsert(MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD.FOREX", "", True, "", "Spot Gold", "Gold", "5min", 3.0, 1.5, 2))
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", registry)
+
+    class CaptureProvider:
+        cache = FakeCache()
+
+        async def historical_bars(self, symbol: str, interval: str, _start: str, _end: str) -> list[OHLCBar]:
+            calls.append((symbol, interval))
+            start = datetime(2025, 1, 1, tzinfo=UTC)
+            return [
+                OHLCBar(symbol=symbol, timestamp=start + timedelta(days=index), open=100 + index, high=101 + index, low=99 + index, close=100 + index, volume=10)
+                for index in range(3)
+            ]
+
+    monkeypatch.setattr(main, "EODHDProvider", lambda _token: CaptureProvider())
+    monkeypatch.setattr(main, "run_adaptive_search", lambda *args, **kwargs: SimpleNamespace(evaluations=[_evaluation("accepted")], regime_scan={}))
+    payload = main.ResearchRunPayload(start="2025-01-01", end="2025-01-10", market_ids=["OK", "XAUUSD"], interval="market_default", search_budget=2)
+    run_id = store.create_run("MULTI", main._research_run_config(payload, [registry.get("OK"), registry.get("XAUUSD")]), status="running")
+
+    asyncio.run(main._execute_research_run(run_id, payload, "token"))
+
+    assert calls == [("OK.INDX", "5min"), ("XAUUSD.FOREX", "1day")]
+    assert [item["interval"] for item in store.get_run(run_id)["config"]["market_statuses"]] == ["5min", "1day"]
+
+
+def test_daily_market_default_uses_daily_minimum_bar_floor():
+    market = MarketMapping("WTI", "US Crude", "commodity", "COMMODITY:WTI", "", True, "", "US Crude", "WTI", "1day", 3.5, 2.0, 750)
+
+    assert main._minimum_bars_for_interval(market, "1day") == 250
+    assert main._minimum_bars_for_interval(market, "5min") == 750
+
+
 def test_research_run_excludes_months_before_snapshot_and_search(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     registry = MarketRegistry(tmp_path / "markets.sqlite3")

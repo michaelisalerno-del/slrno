@@ -442,7 +442,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
         )
 
     for market in selected_markets:
-        interval = payload.interval or market.default_timeframe
+        interval = _run_interval_for_market(payload, market)
         market_status: dict[str, object] = {
             "market_id": market.market_id,
             "name": market.name,
@@ -481,12 +481,13 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                 }
             )
             persist_status()
-        if len(bars) < market.min_backtest_bars:
+        required_bars = _minimum_bars_for_interval(market, interval)
+        if len(bars) < required_bars:
             _mark_market_failed(
                 market_status,
                 market_failures,
                 market,
-                f"{market.market_id} skipped: need at least {market.min_backtest_bars} bars; received {len(bars)}",
+                f"{market.market_id} skipped: need at least {required_bars} {interval} bars; received {len(bars)}",
                 bar_count=len(bars),
             )
             persist_status()
@@ -721,6 +722,25 @@ def _bar_month_key(bar: object) -> str:
     if timestamp is None:
         return ""
     return timestamp.strftime("%Y-%m")
+
+
+def _run_interval_for_market(payload: ResearchRunPayload, market: MarketMapping) -> str:
+    requested = str(payload.interval or "").strip()
+    if not requested or requested == "market_default":
+        if market.asset_class == "commodity" and market.default_timeframe in {"1min", "1m", "5min", "5m", "15min", "15m", "30min", "30m", "1hour", "1h"}:
+            return "1day"
+        return market.default_timeframe
+    return requested
+
+
+def _minimum_bars_for_interval(market: MarketMapping, interval: str) -> int:
+    if interval in {"1day", "1d", "day", "daily"}:
+        return min(market.min_backtest_bars, 250)
+    if interval in {"1week", "1w", "weekly"}:
+        return min(market.min_backtest_bars, 80)
+    if interval in {"1month", "1mo", "monthly"}:
+        return min(market.min_backtest_bars, 36)
+    return market.min_backtest_bars
 
 
 def _research_run_config(
