@@ -746,7 +746,7 @@ def _cost_aware_score(
         profit_weight, sharpe_weight = 0.24, 0.24
     else:
         profit_weight, sharpe_weight = 0.30, 0.16
-    evidence_mode = config.repair_mode == "evidence_first"
+    evidence_mode = config.repair_mode in {"evidence_first", "auto_refine"}
     if evidence_mode:
         profit_weight *= 0.85
         sharpe_weight *= 0.75
