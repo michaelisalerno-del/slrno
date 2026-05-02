@@ -49,6 +49,8 @@ research_critic = ResearchCritic.default()
 
 CRITIQUE_TRIAL_SAMPLE_LIMIT = 80
 CRITIQUE_CANDIDATE_SAMPLE_LIMIT = 24
+INTRADAY_INTERVALS = {"1min", "1m", "5min", "5m", "15min", "15m", "30min", "30m", "1hour", "1h", "60min", "60m"}
+DAILY_FALLBACK_ASSET_CLASSES = {"index", "share", "commodity"}
 
 
 class EODHDSettings(BaseModel):
@@ -477,6 +479,36 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             )
             persist_status()
             continue
+        required_bars = _minimum_bars_for_interval(market, interval)
+        if _should_try_daily_fallback(market, interval, len(bars), required_bars):
+            fallback_interval = "1day"
+            fallback_start = _run_start_for_market(payload, market, fallback_interval)
+            try:
+                fallback_bars = await provider.historical_bars(market.eodhd_symbol, fallback_interval, fallback_start, payload.end)
+            except Exception as exc:
+                market_status["fallback_error"] = _public_error(exc)
+            else:
+                fallback_required = _minimum_bars_for_interval(market, fallback_interval)
+                if _should_use_daily_fallback(len(bars), required_bars, len(fallback_bars), fallback_required):
+                    market_status.update(
+                        {
+                            "requested_interval": interval,
+                            "requested_start": market_status.get("requested_start", start),
+                            "interval": fallback_interval,
+                            "start": fallback_start,
+                            "data_source_status": "eodhd_daily_fallback",
+                            "fallback_reason": (
+                                f"EODHD returned {len(bars)} {interval} bars; "
+                                f"using {len(fallback_bars)} {fallback_interval} bars"
+                            ),
+                            "intraday_bar_count": len(bars),
+                            "fallback_bar_count": len(fallback_bars),
+                        }
+                    )
+                    interval = fallback_interval
+                    start = fallback_start
+                    bars = fallback_bars
+                    required_bars = fallback_required
         excluded_months = _normalized_excluded_months(payload.excluded_months)
         if excluded_months:
             original_bar_count = len(bars)
@@ -489,7 +521,6 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                 }
             )
             persist_status()
-        required_bars = _minimum_bars_for_interval(market, interval)
         if len(bars) < required_bars:
             _mark_market_failed(
                 market_status,
@@ -744,6 +775,24 @@ def _run_interval_for_market(payload: ResearchRunPayload, market: MarketMapping)
             return "1day"
         return market.default_timeframe
     return requested
+
+
+def _should_try_daily_fallback(market: MarketMapping, interval: str, bar_count: int, required_bars: int) -> bool:
+    if interval not in INTRADAY_INTERVALS:
+        return False
+    if market.asset_class not in DAILY_FALLBACK_ASSET_CLASSES:
+        return False
+    if _is_eodhd_monthly_commodity(market):
+        return False
+    return bar_count < required_bars
+
+
+def _should_use_daily_fallback(original_count: int, original_required: int, fallback_count: int, fallback_required: int) -> bool:
+    if original_count >= original_required or fallback_count <= 0:
+        return False
+    if fallback_count >= fallback_required:
+        return True
+    return original_count == 0
 
 
 def _is_eodhd_monthly_commodity(market: MarketMapping) -> bool:

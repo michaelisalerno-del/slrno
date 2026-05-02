@@ -1683,7 +1683,8 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
             {marketStatuses.map((item) => (
               <div className="status" key={`${item.market_id}-${item.status}`}>
                 <strong>{item.market_id} · <span className={`badge ${statusBadgeClass(item.status)}`}>{item.status}</span></strong>
-                <span>{item.eodhd_symbol} · {normalizeInterval(item.interval)} · {item.data_source_status || "EODHD primary symbol"}</span>
+                <span>{item.eodhd_symbol} · {normalizeInterval(item.interval)} · {marketDataSourceLabel(item.data_source_status)}</span>
+                {item.fallback_reason && <small>{item.fallback_reason}</small>}
                 {item.bar_count !== undefined && <small>{marketStatusLine(item)}</small>}
                 {item.error && <small>{item.error}</small>}
               </div>
@@ -2281,6 +2282,13 @@ function marketStatusLine(item) {
     return `${bars} loaded so far`;
   }
   return `${bars} loaded`;
+}
+
+function marketDataSourceLabel(value) {
+  return {
+    eodhd_primary_symbol: "EODHD primary symbol",
+    eodhd_daily_fallback: "EODHD daily fallback",
+  }[value] ?? value ?? "EODHD primary symbol";
 }
 
 function boundedProgress(value, status = "") {
