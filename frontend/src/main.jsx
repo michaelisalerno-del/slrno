@@ -508,8 +508,10 @@ function App() {
       return;
     }
     const family = refinementTemplate.family ? [refinementTemplate.family] : [];
-    const selectedMarket = refinementTemplate.market_id ? [refinementTemplate.market_id] : activeMarketIds;
-    const allMarketIds = enabledMarkets.map((item) => item.market_id);
+    const sourceMarket = String(refinementTemplate.market_id || activeMarketIds[0] || researchRun.market_id || "").trim();
+    const selectedMarket = sourceMarket ? [sourceMarket] : [];
+    const allMarketIds = enabledMarkets.map((item) => item.market_id).filter(Boolean);
+    const discoveryMarketIds = allMarketIds.filter((marketId) => marketId !== sourceMarket);
     const dominantMonth = refinementTemplate.pattern?.dominant_profit_month?.key;
     const templateTargetRegime = templateSpecificRegime(refinementTemplate);
     const regimeRepairTarget = regimeRefineTarget(refinementTemplate);
@@ -559,15 +561,17 @@ function App() {
         label: "Higher-cost robustness run staged.",
       },
       cross_market: {
-        marketIds: allMarketIds.length ? allMarketIds : selectedMarket,
+        marketIds: discoveryMarketIds.length ? discoveryMarketIds : selectedMarket,
         budget: "120",
         stress: 2.5,
         start: researchRun.start,
         end: researchRun.end,
         interval: "market_default",
-        targetRegime: "",
-        repairMode: "cross_market",
-        label: "Cross-market robustness run staged using each market default timeframe.",
+        targetRegime: regimeRepairTarget,
+        repairMode: "cross_market_discovery",
+        label: regimeRepairTarget
+          ? `Similar-edge discovery staged across other markets, scored inside ${regimeLabel(regimeRepairTarget)}. These become separate leads, not proof for this template.`
+          : "Similar-edge discovery staged across other markets. These become separate leads, not proof for this template.",
       },
       regime_scan: {
         marketIds: selectedMarket,
@@ -869,6 +873,12 @@ function App() {
                             <span>Trades outside {regimeLabel(autoRefinementPlan.targetRegime)} are forced flat. The search is scored on the selected regime, with full-history gated evidence kept for context.</span>
                           </div>
                         )}
+                        {autoRefinementPlan.crossMarketDiscovery && (
+                          <div className="auto-refine-target">
+                            <strong>Cross-market discovery is separate</strong>
+                            <span>Auto-refine stays on this template's source market. If a winning regime is known, it stays gated to that regime. Use Find similar elsewhere to create independent leads; those scores are not blended into this template.</span>
+                          </div>
+                        )}
                         <div className="auto-refine-steps">
                           {autoRefinementPlan.steps.map((step) => (
                             <span key={step}>{step}</span>
@@ -902,7 +912,7 @@ function App() {
                       <button type="button" className="secondary" onClick={() => applyRobustnessPreset("focused")}><RefreshCw size={16} /> Same market</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("evidence_first")}>Evidence first</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("higher_costs")}>Higher costs</button>
-                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Cross-market</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Find similar elsewhere</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("longer_history")}>Longer history</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("regime_scan")}>Regime repair</button>
                     </div>
@@ -1201,7 +1211,7 @@ function GuideView({ setActiveModule }) {
     ["Daily Sharpe", "Annualized daily Sharpe. Useful, but only after sample size and robustness checks."],
     ["Days", "Daily observations used for Sharpe. Promotion normally needs at least 120."],
     ["DSR", "Deflated Sharpe probability, adjusted for repeated scans."],
-    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £2,000 working account scenario."],
+    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £2,000 working account scenario. If blocked, the tile names the first sizing/risk reason."],
     ["End balance", "Projected account balance after compounding from the selected account size."],
     ["Return", "Projected percentage return for that account scenario."],
     ["OOS net", "Walk-forward out-of-sample net profit after costs."],
@@ -1219,7 +1229,7 @@ function GuideView({ setActiveModule }) {
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
     ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
     ["Missing IG validation", "Use Sync costs, then rerun. Do not promote stale or generic cost evidence."],
-    ["Multiple-testing haircut", "Use Evidence first and Cross-market. A lucky scan must survive stricter retests."],
+    ["Multiple-testing haircut", "Use Evidence first for this template. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
     ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
   ];
   const gates = [
@@ -1870,6 +1880,7 @@ function TrialCard({ trial, onRefineTemplate }) {
   const marketId = trialMarketId(trial);
   const interval = trialIntervalLabel(trial);
   const scoreBasis = scoreBasisLabel(trial.parameters?.search_audit);
+  const discoveryLabel = discoveryBadgeLabel(trial.parameters?.search_audit);
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -1878,6 +1889,7 @@ function TrialCard({ trial, onRefineTemplate }) {
             <strong>{trial.strategy_name}</strong>
             <div className="badge-group">
               {marketId && <span className="badge market-badge">{marketId}</span>}
+              {discoveryLabel && <span className="badge muted-badge">{discoveryLabel}</span>}
               <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
             </div>
           </div>
@@ -2029,10 +2041,12 @@ function CandidateCard({ candidate, onRefineTemplate }) {
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(candidate);
   const scoreBasis = scoreBasisLabel(candidate.audit?.candidate?.parameters?.search_audit);
+  const discoveryLabel = discoveryBadgeLabel(candidate.audit?.candidate?.parameters?.search_audit);
   return (
     <div className="candidate-card">
       <div className="label-row">
         <span className="badge muted-badge">Research only</span>
+        {discoveryLabel && <span className="badge muted-badge">{discoveryLabel}</span>}
         <span className={`badge ${tierBadgeClass(candidate.promotion_tier || candidate.audit?.promotion_tier)}`}>
           {tierLabel(candidate.promotion_tier || candidate.audit?.promotion_tier)}
         </span>
@@ -2679,9 +2693,9 @@ function repairActionsForTemplate(template) {
     add({
       id: "scan-bias",
       preset: "cross_market",
-      title: "Cross-check markets",
-      detail: "Retest the locked family across enabled markets so one lucky scan does not dominate the decision.",
-      button: "Cross-market",
+      title: "Find similar edges elsewhere",
+      detail: "Run a separate discovery search across other enabled markets. Any winners become new leads and do not validate or improve this template's score.",
+      button: "Find elsewhere",
       primary: actions.length === 0,
     });
   }
@@ -2718,8 +2732,10 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const verdict = pattern.regime_verdict;
   const targetRegime = regimeRefineTarget(template);
   const family = template.family ? [template.family] : [];
-  const selectedMarket = template.market_id ? [template.market_id] : activeMarketIds.length ? activeMarketIds : [researchRun.market_id];
+  const sourceMarket = String(template.market_id || activeMarketIds[0] || researchRun.market_id || "").trim();
+  const selectedMarket = sourceMarket ? [sourceMarket] : [];
   const allMarketIds = enabledMarkets.map((item) => item.market_id).filter(Boolean);
+  const discoveryMarketCount = allMarketIds.filter((marketId) => marketId !== sourceMarket).length;
   const steps = [];
   const addStep = (step) => {
     if (!steps.includes(step)) {
@@ -2745,6 +2761,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const fragileFolds = hasAny("profits_not_consistent_across_folds", "high_sharpe_weak_folds", "unstable_folds", "weak_oos_economics", "weak_oos_evidence", "no_walk_forward_folds", "one_fold_dependency");
   const scanBias = hasAny("multiple_testing_haircut", "isolated_parameter_peak");
   const crossMarket = hasAny("known_edge_needs_cross_market_validation", "multiple_testing_haircut");
+  const crossMarketDiscovery = crossMarket && discoveryMarketCount > 0;
   const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
   const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
 
@@ -2801,12 +2818,10 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     stress = Math.max(stress, 2.5);
     addStep("Use evidence-first ranking to reduce scan bias");
   }
-  if (crossMarket && allMarketIds.length > 1) {
-    marketIds = allMarketIds;
-    budget = Math.max(budget, 120);
+  if (crossMarketDiscovery) {
     stress = Math.max(stress, 2.5);
-    addStep("Cross-check the locked family across enabled markets");
-    addStep("Use each market default candle timeframe");
+    addStep("Keep auto-refine on the source market only");
+    addStep("Use Find similar elsewhere as a separate discovery run");
   }
   if (costStress) {
     stress = Math.max(stress, 3.0);
@@ -2838,6 +2853,8 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     ? `Regime-specific refine: results are scored inside ${regimeLabel(runTargetRegime)} with full-history gated evidence kept alongside.`
     : tooFewTrades && includeRegimeScans
     ? "Tests both the broader trade-count repair and the winning-regime specialist path."
+    : crossMarketDiscovery
+    ? "Keeps this template on its source market; cross-market results are separate discovery leads."
     : "Combines the active blockers into one locked-family repair run.";
   return {
     marketIds,
@@ -2846,6 +2863,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     syncCosts,
     summary,
     targetRegime: runTargetRegime,
+    crossMarketDiscovery,
     stageMessage: `Auto-refine staged: ${steps.slice(0, 3).join("; ")}.`,
   };
 }
@@ -2879,6 +2897,7 @@ function repairModeLabel(value) {
     more_trades: "More trades",
     cost_stress: "Cost stress",
     cross_market: "Cross-market",
+    cross_market_discovery: "Similar-edge discovery",
     regime_repair: "Regime repair",
     month_exclusion: "Month exclusion",
     longer_history: "Longer history",
@@ -2891,11 +2910,51 @@ function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) 
   if (!scenario) {
     return "Unknown";
   }
-  return scenario.feasible ? "OK" : "Blocked";
+  if (scenario.feasible) {
+    return "OK";
+  }
+  const reasons = capitalBlockReasons(scenario);
+  if (reasons.length === 0) {
+    return "Blocked";
+  }
+  const shown = reasons.slice(0, 2).join(" + ");
+  const overflow = reasons.length > 2 ? ` +${reasons.length - 2}` : "";
+  return `Blocked: ${shown}${overflow}`;
 }
 
 function accountScenarioFor(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
   return (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
+}
+
+function capitalBlockReasons(scenario = {}) {
+  return arrayValue(scenario.violations).map((violation) => capitalBlockReason(violation, scenario)).filter(Boolean);
+}
+
+function capitalBlockReason(violation, scenario = {}) {
+  const accountSize = Number(scenario.account_size ?? WORKING_ACCOUNT_SIZE);
+  const halfAccount = accountSize * 0.5;
+  const values = {
+    risk: formatMoney(scenario.estimated_stop_loss),
+    riskBudget: formatMoney(scenario.risk_budget),
+    margin: formatMoney(scenario.estimated_margin),
+    marginLimit: formatMoney(halfAccount),
+    account: formatMoney(accountSize),
+    drawdown: formatMoney(scenario.historical_max_drawdown),
+    drawdownLimit: formatMoney(accountSize * 0.25),
+    dailyLoss: formatMoney(scenario.worst_daily_loss),
+    dailyLimit: formatMoney(scenario.daily_loss_limit),
+    minStake: round(scenario.min_deal_size),
+    stake: round(scenario.requested_stake),
+  };
+  return {
+    missing_reference_price: "missing price",
+    below_ig_min_deal_size: `IG min ${values.minStake} > stake ${values.stake}`,
+    risk_budget_exceeded: `risk ${values.risk} > ${values.riskBudget}`,
+    margin_too_large: `margin ${values.margin} > ${values.marginLimit}`,
+    insufficient_account_for_margin: `margin ${values.margin} > ${values.account}`,
+    historical_drawdown_too_large: `drawdown ${values.drawdown} > ${values.drawdownLimit}`,
+    historical_daily_loss_stop_breached: `daily loss ${values.dailyLoss} > ${values.dailyLimit}`,
+  }[violation] ?? humanWarnings([violation])[0];
 }
 
 function optionalNumber(value) {
@@ -2933,7 +2992,7 @@ function humanWarnings(warnings = []) {
     needs_ig_price_validation: "Needs IG price validation",
     not_paper_ready_research_lead: "Research lead only",
     calendar_effect_needs_longer_history: "Needs longer calendar history",
-    known_edge_needs_cross_market_validation: "Needs cross-market validation",
+    known_edge_needs_cross_market_validation: "Needs independent market check",
     high_sharpe_low_trade_count: "High Sharpe, low trades",
     high_sharpe_short_sample: "High Sharpe, short sample",
     high_sharpe_weak_folds: "High Sharpe, weak folds",
@@ -3005,6 +3064,13 @@ function regimeCountsLabel(counts = {}) {
 function scoreBasisLabel(audit = {}) {
   if (audit?.grade_mode === "target_regime" && audit.grade_regime) {
     return `graded on ${regimeLabel(audit.grade_regime)}`;
+  }
+  return "";
+}
+
+function discoveryBadgeLabel(audit = {}) {
+  if (audit?.repair_mode === "cross_market_discovery") {
+    return "Discovery lead";
   }
   return "";
 }
