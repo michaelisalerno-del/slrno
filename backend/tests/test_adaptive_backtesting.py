@@ -511,6 +511,34 @@ def test_warnings_flag_weak_oos_and_fold_concentration():
     assert "one_fold_dependency" in warnings
 
 
+def test_warnings_accept_recent_ig_price_validation():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = IGCostProfile(**{**public_ig_cost_profile(market).as_dict(), "confidence": "ig_recent_epic_price_profile"})
+    backtest = BacktestResult(
+        net_profit=600,
+        sharpe=1.0,
+        max_drawdown=100,
+        win_rate=0.55,
+        trade_count=40,
+        exposure=0.3,
+        turnover=40,
+        train_profit=800,
+        test_profit=100,
+        gross_profit=900,
+        total_cost=300,
+        daily_pnl_sharpe=1.0,
+        sharpe_observations=140,
+        expectancy_per_trade=15,
+        average_cost_per_trade=7.5,
+        net_cost_ratio=2,
+        cost_to_gross_ratio=0.333,
+    )
+
+    warnings = _warnings(backtest, (backtest,), backtest, BacktestConfig(), "mean_reversion", profile)
+
+    assert "needs_ig_price_validation" not in warnings
+
+
 def test_turnaround_tuesday_signals_after_down_monday():
     bars = [
         OHLCBar("TEST", datetime(2026, 1, 2, 16), 100, 101, 99, 100),

@@ -137,6 +137,39 @@ class IGDemoProvider:
             raise ValueError(_ig_error_message(exc.response, f"IG price lookup failed for {epic}")) from exc
         return [_ig_price_bar(epic, row) for row in payload.get("prices", [])]
 
+    async def recent_price_snapshot(self, epic: str, resolution: str = "MINUTE_5", max_points: int = 10) -> dict[str, object] | None:
+        import httpx
+
+        headers = await self._authenticated_headers()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.get(
+                    f"{self.base_url}/prices/{epic}",
+                    headers={**headers, "Version": "3"},
+                    params={"resolution": resolution, "max": max(1, min(50, int(max_points)))},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(_ig_error_message(exc.response, f"IG recent price lookup failed for {epic}")) from exc
+        prices = payload.get("prices") if isinstance(payload.get("prices"), list) else []
+        for row in reversed(prices):
+            close = row.get("closePrice") if isinstance(row, dict) else {}
+            if not isinstance(close, dict):
+                continue
+            bid = _safe_optional_float(close.get("bid"))
+            offer = _safe_optional_float(close.get("ask") or close.get("offer"))
+            if bid is None or offer is None:
+                continue
+            return {
+                "bid": bid,
+                "offer": offer,
+                "snapshot_time": str(row.get("snapshotTimeUTC") or row.get("snapshotTime") or ""),
+                "resolution": resolution,
+                "source": "ig_prices_recent",
+            }
+        return None
+
     async def positions(self) -> list[Position]:
         import httpx
 
@@ -222,6 +255,13 @@ def _optional_float(value: object) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _safe_optional_float(value: object) -> float | None:
+    try:
+        return _optional_float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _ig_price_bar(epic: str, row: dict[str, object]) -> OHLCBar:

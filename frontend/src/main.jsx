@@ -2461,6 +2461,9 @@ function costBadge(profile, market) {
   if (confidence === "ig_live_epic_cost_profile") {
     return { label: "IG live EPIC cost profile", className: "good" };
   }
+  if (confidence === "ig_recent_epic_price_profile") {
+    return { label: "IG recent EPIC price profile", className: "good" };
+  }
   if (confidence === "eodhd_ig_cost_envelope") {
     return { label: "EODHD bars with IG cost envelope", className: "warn" };
   }
