@@ -79,6 +79,8 @@ const SEARCH_PRESETS = [
   { id: "balanced", label: "Balanced", budget: 54 },
   { id: "deep", label: "Deep", budget: 120 },
 ];
+const MULTI_MARKET_TOTAL_TRIAL_CAPS = { quick: 96, balanced: 216, deep: 480 };
+const MULTI_MARKET_MIN_TRIALS_PER_MARKET = { quick: 6, balanced: 9, deep: 12 };
 
 const STYLE_OPTIONS = [
   { id: "find_anything_robust", label: "Find anything robust" },
@@ -358,14 +360,17 @@ function App() {
     const market_ids = marketIdsOverride.length ? marketIdsOverride : [runConfig.market_id];
     const preset = SEARCH_PRESETS.find((item) => item.id === runConfig.search_preset) ?? selectedPreset;
     const engine = engines.find((item) => item.id === runConfig.engine) ?? selectedEngine;
-    const budget = runConfig.search_budget === "" ? preset.budget : Number(runConfig.search_budget);
-    const plannedTrials = budget * market_ids.length;
+    const manualBudget = runConfig.search_budget !== "";
+    const budget = manualBudget ? Number(runConfig.search_budget) : preset.budget;
+    const effectiveBudget = effectiveSearchBudget(preset.id, budget, market_ids.length, manualBudget);
+    const plannedTrials = effectiveBudget * market_ids.length;
     const regimeScanNote = runConfig.include_regime_scans ? " plus capped regime-specialist scans" : "";
     const targetRegimeNote = runConfig.target_regime ? `, ${regimeLabel(runConfig.target_regime)} only` : "";
+    const speedNote = effectiveBudget < budget ? " (auto-capped for multi-market speed)" : "";
     setMessage(launchMessage);
     setResearchState({
       status: "running",
-      detail: `${engine.label}: ${budget} strategy trials per market, ${plannedTrials} base total${regimeScanNote}${targetRegimeNote}.`,
+      detail: `${engine.label}: ${effectiveBudget} strategy trials per market, ${plannedTrials} base total${speedNote}${regimeScanNote}${targetRegimeNote}.`,
       progress: 2,
     });
     try {
@@ -373,7 +378,7 @@ function App() {
         ...runConfig,
         market_id: market_ids[0],
         market_ids,
-        search_budget: budget,
+        search_budget: manualBudget ? budget : null,
         regime_scan_budget_per_regime: runConfig.regime_scan_budget_per_regime === "" ? null : Number(runConfig.regime_scan_budget_per_regime),
         target_regime: runConfig.target_regime || null,
         excluded_months: uniqueMonths(runConfig.excluded_months),
@@ -2309,7 +2314,7 @@ function researchStateFromRun(detail, plannedTrials = plannedTrialsForRun(detail
 function plannedTrialsForRun(detail) {
   const config = detail?.config ?? {};
   const preset = SEARCH_PRESETS.find((item) => item.id === config.search_preset) ?? SEARCH_PRESETS[1];
-  const budget = Number(config.search_budget || preset?.budget || 0);
+  const budget = Number(config.effective_search_budget || config.search_budget || preset?.budget || 0);
   const marketIds = Array.isArray(config.market_ids) ? config.market_ids.filter(Boolean) : [];
   const marketCount = Math.max(1, marketIds.length || (detail?.market_id && detail.market_id !== "MULTI" ? 1 : 0));
   return Math.max(1, budget) * marketCount;
@@ -3233,6 +3238,15 @@ function regimeVerdictLabel(value) {
 
 function gatedMetricLabel(pattern = {}, fallback, targeted) {
   return pattern?.target_regime ? targeted : fallback;
+}
+
+function effectiveSearchBudget(presetId, budget, marketCount, manualBudget) {
+  if (manualBudget || marketCount <= 1) {
+    return budget;
+  }
+  const totalCap = MULTI_MARKET_TOTAL_TRIAL_CAPS[presetId] ?? MULTI_MARKET_TOTAL_TRIAL_CAPS.balanced;
+  const minimum = MULTI_MARKET_MIN_TRIALS_PER_MARKET[presetId] ?? MULTI_MARKET_MIN_TRIALS_PER_MARKET.balanced;
+  return Math.min(budget, Math.max(minimum, Math.floor(totalCap / Math.max(1, marketCount))));
 }
 
 function regimeCountsLabel(counts = {}) {

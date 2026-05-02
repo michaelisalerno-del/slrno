@@ -8,7 +8,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .adaptive_research import AdaptiveSearchConfig, available_research_engines, run_adaptive_search
+from .adaptive_research import SEARCH_PRESETS, AdaptiveSearchConfig, available_research_engines, run_adaptive_search
 from .bar_patterns import analyze_market_regimes
 from .broker_preview import broker_order_preview
 from .capital import (
@@ -51,6 +51,16 @@ CRITIQUE_TRIAL_SAMPLE_LIMIT = 80
 CRITIQUE_CANDIDATE_SAMPLE_LIMIT = 24
 INTRADAY_INTERVALS = {"1min", "1m", "5min", "5m", "15min", "15m", "30min", "30m", "1hour", "1h", "60min", "60m"}
 DAILY_FALLBACK_ASSET_CLASSES = {"index", "share", "commodity"}
+MULTI_MARKET_TOTAL_TRIAL_CAPS = {
+    "quick": 96,
+    "balanced": 216,
+    "deep": 480,
+}
+MULTI_MARKET_MIN_TRIALS_PER_MARKET = {
+    "quick": 6,
+    "balanced": 9,
+    "deep": 12,
+}
 
 
 class EODHDSettings(BaseModel):
@@ -434,6 +444,7 @@ def _run_research_job(run_id: int, payload_data: dict[str, object], api_token: s
 
 async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_token: str) -> None:
     selected_markets = _selected_markets(payload.market_ids or [payload.market_id])
+    effective_search_budget = _effective_search_budget(payload, len(selected_markets))
     provider = EODHDProvider(api_token)
     market_statuses: list[dict[str, object]] = []
     market_failures: list[dict[str, object]] = []
@@ -458,6 +469,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             "status": "loading",
             "data_source_status": "eodhd_primary_symbol",
             "cost_source_status": "ig_cost_model",
+            "effective_search_budget": effective_search_budget or _preset_budget(payload.search_preset),
         }
         if start != payload.start:
             market_status["requested_start"] = payload.start
@@ -555,7 +567,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         preset=payload.search_preset,
                         trading_style=payload.trading_style,
                         objective=payload.objective,
-                        search_budget=payload.search_budget,
+                        search_budget=effective_search_budget,
                         risk_profile=payload.risk_profile,
                         strategy_families=tuple(payload.strategy_families),
                         cost_stress_multiplier=max(1.0, payload.cost_stress_multiplier),
@@ -748,6 +760,22 @@ def _selected_markets(market_ids: list[str]) -> list[MarketMapping]:
     return selected
 
 
+def _effective_search_budget(payload: ResearchRunPayload, market_count: int) -> int | None:
+    if payload.search_budget is not None:
+        return max(6, min(500, int(payload.search_budget)))
+    if market_count <= 1:
+        return None
+    preset_budget = _preset_budget(payload.search_preset)
+    total_cap = MULTI_MARKET_TOTAL_TRIAL_CAPS.get(payload.search_preset, MULTI_MARKET_TOTAL_TRIAL_CAPS["balanced"])
+    minimum = MULTI_MARKET_MIN_TRIALS_PER_MARKET.get(payload.search_preset, MULTI_MARKET_MIN_TRIALS_PER_MARKET["balanced"])
+    capped = max(minimum, total_cap // max(1, market_count))
+    return min(preset_budget, capped)
+
+
+def _preset_budget(search_preset: str) -> int:
+    return SEARCH_PRESETS.get(search_preset, SEARCH_PRESETS["balanced"])
+
+
 def _normalized_excluded_months(months: list[str] | tuple[str, ...] | None) -> set[str]:
     output: set[str] = set()
     for month in months or []:
@@ -842,6 +870,11 @@ def _research_run_config(
     market_statuses: list[dict[str, object]] | None = None,
     market_failures: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    effective_search_budget = _effective_search_budget(payload, len(selected_markets))
+    preset_budget = _preset_budget(payload.search_preset)
+    search_budget_mode = "manual" if payload.search_budget is not None else "preset"
+    if payload.search_budget is None and len(selected_markets) > 1 and (effective_search_budget or preset_budget) < preset_budget:
+        search_budget_mode = "auto_multi_market_cap"
     return {
         "start": payload.start,
         "end": payload.end,
@@ -852,6 +885,8 @@ def _research_run_config(
         "trading_style": payload.trading_style,
         "objective": payload.objective,
         "search_budget": payload.search_budget,
+        "effective_search_budget": effective_search_budget or preset_budget,
+        "search_budget_mode": search_budget_mode,
         "risk_profile": payload.risk_profile,
         "strategy_families": payload.strategy_families,
         "cost_stress_multiplier": payload.cost_stress_multiplier,
