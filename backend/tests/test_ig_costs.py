@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.ig_costs import backtest_config_from_profile, profile_badge, profile_from_ig_market, public_ig_cost_profile
+from app.ig_costs import backtest_config_from_profile, profile_badge, profile_from_ig_market, public_ig_cost_profile, select_ig_market_candidate
 from app.market_registry import MarketMapping
 
 
@@ -43,3 +43,42 @@ def test_ig_market_payload_sets_live_spread_and_rules():
     assert profile.margin_percent == 3.33
     assert config.instrument_currency == "USD"
     assert config.account_currency == "GBP"
+
+
+def test_select_ig_market_candidate_prefers_named_market_match():
+    market = MarketMapping(
+        "NAS100",
+        "Nasdaq 100",
+        "index",
+        "NDX.INDX",
+        "",
+        ig_name="US Tech 100",
+        ig_search_terms="US Tech 100,Nasdaq,NASDAQ 100",
+    )
+
+    selected = select_ig_market_candidate(
+        market,
+        [
+            {"epic": "CS.D.UNRELATED.IP", "name": "US Treasury Bond", "type": "BOND"},
+            {"epic": "IX.D.NASDAQ.IFMM.IP", "name": "US Tech 100", "type": "INDICES"},
+        ],
+    )
+
+    assert selected is not None
+    assert selected["epic"] == "IX.D.NASDAQ.IFMM.IP"
+
+
+def test_profile_from_ig_market_stores_reference_midpoint():
+    market = MarketMapping("NAS100", "Nasdaq 100", "index", "NDX.INDX", "IX.D.NASDAQ.IFMM.IP")
+
+    profile = profile_from_ig_market(
+        market,
+        {
+            "instrument": {"epic": "IX.D.NASDAQ.IFMM.IP", "type": "INDICES"},
+            "snapshot": {"bid": 10_000, "offer": 10_002},
+            "dealingRules": {},
+        },
+    )
+
+    assert profile.reference_price == 10_001
+    assert profile.confidence == "ig_live_epic_cost_profile"

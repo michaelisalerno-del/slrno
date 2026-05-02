@@ -50,6 +50,7 @@ ROBUSTNESS_BLOCKING_WARNINGS = {
     "regime_gated_backtest_negative",
     "regime_gated_oos_negative",
     "shock_regime_dependency",
+    "target_regime_low_oos_trades",
 }
 
 

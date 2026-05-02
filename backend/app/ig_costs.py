@@ -18,6 +18,7 @@ class IGCostProfile:
     account_currency: str = "GBP"
     bid: float | None = None
     offer: float | None = None
+    reference_price: float | None = None
     spread_points: float | None = None
     spread_bps: float = 2.0
     slippage_bps: float = 1.0
@@ -91,6 +92,7 @@ def profile_from_ig_market(market: MarketMapping, payload: dict[str, Any], accou
         account_currency=account_currency or "GBP",
         bid=bid,
         offer=offer,
+        reference_price=midpoint,
         spread_points=spread_points,
         spread_bps=round(max(0.0, spread_bps), 6),
         slippage_bps=round(max(0.0, slippage_bps), 6),
@@ -145,6 +147,13 @@ def profile_badge(profile: IGCostProfile | dict[str, object] | None) -> str:
     }.get(confidence, "Needs IG price validation")
 
 
+def select_ig_market_candidate(market: MarketMapping, candidates: list[dict[str, object]]) -> dict[str, object] | None:
+    viable = [candidate for candidate in candidates if str(candidate.get("epic") or "").strip()]
+    if not viable:
+        return None
+    return max(viable, key=lambda candidate: _ig_candidate_score(market, candidate))
+
+
 def _optional_float(value: object) -> float | None:
     if value in (None, ""):
         return None
@@ -152,6 +161,49 @@ def _optional_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _ig_candidate_score(market: MarketMapping, candidate: dict[str, object]) -> tuple[int, int]:
+    candidate_name = _normalize_search_text(candidate.get("name"))
+    candidate_type = _normalize_search_text(candidate.get("type"))
+    phrases = [
+        market.market_id,
+        market.name,
+        market.ig_name,
+        *(part.strip() for part in market.ig_search_terms.split(",")),
+    ]
+    normalized_phrases = [_normalize_search_text(phrase) for phrase in phrases if _normalize_search_text(phrase)]
+    score = 0
+    if candidate_name in normalized_phrases:
+        score += 100
+    for phrase in normalized_phrases:
+        if phrase and (phrase in candidate_name or candidate_name in phrase):
+            score += 40
+    market_tokens = set(" ".join(normalized_phrases).split())
+    candidate_tokens = set(candidate_name.split())
+    score += 5 * len(market_tokens & candidate_tokens)
+    if _asset_class_matches(market.asset_class, candidate_type):
+        score += 15
+    # Prefer less generic names when scores tie.
+    return score, len(candidate_name)
+
+
+def _normalize_search_text(value: object) -> str:
+    return " ".join("".join(character.lower() if character.isalnum() else " " for character in str(value or "")).split())
+
+
+def _asset_class_matches(asset_class: str, candidate_type: str) -> bool:
+    asset = asset_class.lower()
+    candidate = candidate_type.lower()
+    if asset == "forex":
+        return "currenc" in candidate or "forex" in candidate
+    if asset == "index":
+        return "indice" in candidate or "index" in candidate
+    if asset == "commodity":
+        return "commod" in candidate
+    if asset == "share":
+        return "share" in candidate or "equit" in candidate
+    return bool(asset and asset in candidate)
 
 
 def _rule_value(value: object) -> float | None:
