@@ -72,7 +72,7 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert "positive_fold_rate" in best.candidate.parameters["evidence_profile"]
     assert "parameter_stability_score" in best.candidate.parameters
     assert "net_cost_ratio" in best.backtest.__dict__
-    assert best.backtest.starting_cash == 2000
+    assert best.backtest.starting_cash == 3000
     assert best.backtest.compounded_position_sizing is False
     assert "compounded_projection_return_pct" in best.backtest.__dict__
     assert best.backtest.cost_to_gross_ratio >= 0
