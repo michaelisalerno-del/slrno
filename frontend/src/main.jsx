@@ -172,6 +172,9 @@ function App() {
   const selectedEngine = engines.find((engine) => engine.id === researchRun.engine) ?? engines[0] ?? FALLBACK_ENGINES[0];
   const selectedPreset = SEARCH_PRESETS.find((preset) => preset.id === researchRun.search_preset) ?? SEARCH_PRESETS[1];
   const refinementRepairActions = refinementTemplate ? repairActionsForTemplate(refinementTemplate) : [];
+  const autoRefinementPlan = refinementTemplate
+    ? autoRefinementPlanForTemplate(refinementTemplate, researchRun, enabledMarkets, activeMarketIds)
+    : null;
 
   const loadModule = React.useCallback(async (moduleId = activeModule) => {
     setLoadingModule(moduleId);
@@ -301,24 +304,30 @@ function App() {
 
   async function submitResearchRun(event) {
     event.preventDefault();
-    const market_ids = activeMarketIds.length ? activeMarketIds : [researchRun.market_id];
-    const budget = researchRun.search_budget === "" ? selectedPreset.budget : Number(researchRun.search_budget);
+    await launchResearchRun(researchRun, activeMarketIds);
+  }
+
+  async function launchResearchRun(runConfig = researchRun, marketIdsOverride = activeMarketIds, launchMessage = "Launching adaptive IG-aware search...") {
+    const market_ids = marketIdsOverride.length ? marketIdsOverride : [runConfig.market_id];
+    const preset = SEARCH_PRESETS.find((item) => item.id === runConfig.search_preset) ?? selectedPreset;
+    const engine = engines.find((item) => item.id === runConfig.engine) ?? selectedEngine;
+    const budget = runConfig.search_budget === "" ? preset.budget : Number(runConfig.search_budget);
     const plannedTrials = budget * market_ids.length;
-    const regimeScanNote = researchRun.include_regime_scans ? " plus capped regime-specialist scans" : "";
-    setMessage("Launching adaptive IG-aware search...");
+    const regimeScanNote = runConfig.include_regime_scans ? " plus capped regime-specialist scans" : "";
+    setMessage(launchMessage);
     setResearchState({
       status: "running",
-      detail: `${selectedEngine.label}: ${budget} strategy trials per market, ${plannedTrials} base total${regimeScanNote}.`,
+      detail: `${engine.label}: ${budget} strategy trials per market, ${plannedTrials} base total${regimeScanNote}.`,
     });
     try {
       const result = await createResearchRun({
-        ...researchRun,
+        ...runConfig,
         market_id: market_ids[0],
         market_ids,
         search_budget: budget,
-        regime_scan_budget_per_regime: researchRun.regime_scan_budget_per_regime === "" ? null : Number(researchRun.regime_scan_budget_per_regime),
-        excluded_months: uniqueMonths(researchRun.excluded_months),
-        repair_mode: researchRun.repair_mode || "standard",
+        regime_scan_budget_per_regime: runConfig.regime_scan_budget_per_regime === "" ? null : Number(runConfig.regime_scan_budget_per_regime),
+        excluded_months: uniqueMonths(runConfig.excluded_months),
+        repair_mode: runConfig.repair_mode || "standard",
         product_mode: "spread_bet",
       });
       setActiveTab("results");
@@ -335,6 +344,48 @@ function App() {
       setMessage(error.message);
       await loadModule("backtests").catch(() => undefined);
     }
+  }
+
+  function stageAutoRefinement() {
+    if (!autoRefinementPlan) {
+      return;
+    }
+    applyAutoRefinementPlan(autoRefinementPlan);
+    setMessage(autoRefinementPlan.stageMessage);
+  }
+
+  async function runAutoRefinement() {
+    if (!autoRefinementPlan) {
+      return;
+    }
+    const runConfig = applyAutoRefinementPlan(autoRefinementPlan);
+    try {
+      if (autoRefinementPlan.syncCosts) {
+        setMessage("Auto-refine: syncing IG cost profiles...");
+        const result = await syncIgCosts({ market_ids: autoRefinementPlan.marketIds });
+        setCostProfiles((current) => {
+          const next = { ...current };
+          for (const profile of result.profiles ?? []) {
+            next[profile.market_id] = profile;
+          }
+          return next;
+        });
+      }
+      await launchResearchRun(runConfig, autoRefinementPlan.marketIds, "Launching auto-refine run...");
+    } catch (error) {
+      setResearchState({ status: "error", detail: error.message });
+      setMessage(error.message);
+    }
+  }
+
+  function applyAutoRefinementPlan(plan) {
+    const runConfig = { ...researchRun, ...plan.runPatch };
+    setActiveMarketIds(plan.marketIds);
+    for (const marketId of plan.marketIds) {
+      loadCostProfile(marketId).catch(() => undefined);
+    }
+    setResearchRun(runConfig);
+    return runConfig;
   }
 
   async function scheduleResearch() {
@@ -724,6 +775,26 @@ function App() {
                         ? humanWarnings(refinementTemplate.warnings).slice(0, 10).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>)
                         : <span className="muted">No active blockers were attached to this template.</span>}
                     </div>
+                    {autoRefinementPlan && (
+                      <div className="auto-refine-card">
+                        <div className="auto-refine-heading">
+                          <div>
+                            <strong><Sparkles size={16} /> Auto-refine plan</strong>
+                            <span>{autoRefinementPlan.summary}</span>
+                          </div>
+                          <span className="badge muted-badge">{autoRefinementPlan.marketIds.length} market{autoRefinementPlan.marketIds.length === 1 ? "" : "s"}</span>
+                        </div>
+                        <div className="auto-refine-steps">
+                          {autoRefinementPlan.steps.map((step) => (
+                            <span key={step}>{step}</span>
+                          ))}
+                        </div>
+                        <div className="button-row">
+                          <button type="button" className="secondary" onClick={runAutoRefinement}><Sparkles size={16} /> Run auto-refine</button>
+                          <button type="button" className="ghost" onClick={stageAutoRefinement}>Stage only</button>
+                        </div>
+                      </div>
+                    )}
                     <div className="repair-plan">
                       {refinementRepairActions.map((action) => (
                         <div className="repair-action" key={action.id}>
@@ -1022,7 +1093,7 @@ function GuideView({ setActiveModule }) {
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
     ["4", "Read evidence first", "Focus on net profit after costs, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
-    ["5", "Use repair actions", "Click Refine on a trial or candidate, then use the suggested repair buttons to stage the correct retest."],
+    ["5", "Use Auto-refine", "Click Refine on a trial or candidate, then run the Auto-refine plan so the app combines the required repairs."],
     ["6", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
     ["7", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, and regime gates are clear."],
   ];
@@ -1048,7 +1119,7 @@ function GuideView({ setActiveModule }) {
     ["Net/cost", "How much net profit remains for each pound of cost."],
   ];
   const repairs = [
-    ["Too few trades", "Use More trades or Longer history to collect more evidence before trusting the result."],
+    ["Too few trades", "Auto-refine runs a deeper longer-history retest. If the edge only wins in one regime, it also compares regime specialists."],
     ["Fragile folds", "Use Longer history and Evidence first. The result needs to work across several walk-forward folds."],
     ["Single-month profit", "Use Exclude month. The run removes the dominant month from saved bars and retests."],
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
@@ -2393,6 +2464,135 @@ function repairActionsForTemplate(template) {
   return actions.slice(0, 5);
 }
 
+function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [], activeMarketIds = []) {
+  const warnings = new Set(template.warnings ?? []);
+  const pattern = template.pattern ?? {};
+  const dominantMonth = pattern.dominant_profit_month?.key;
+  const dominantRegime = pattern.dominant_profit_regime?.key;
+  const dominantMonthShare = Number(pattern.dominant_profit_month?.positive_profit_share ?? 0);
+  const dominantRegimeShare = Number(pattern.dominant_profit_regime?.positive_profit_share ?? 0);
+  const verdict = pattern.regime_verdict;
+  const family = template.family ? [template.family] : [];
+  const selectedMarket = template.market_id ? [template.market_id] : activeMarketIds.length ? activeMarketIds : [researchRun.market_id];
+  const allMarketIds = enabledMarkets.map((item) => item.market_id).filter(Boolean);
+  const steps = [];
+  const addStep = (step) => {
+    if (!steps.includes(step)) {
+      steps.push(step);
+    }
+  };
+  const hasAny = (...codes) => codes.some((code) => warnings.has(code));
+  const tooFewTrades = hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "calendar_effect_needs_longer_history");
+  const regimeDependent =
+    hasAny(
+      "profit_concentrated_single_regime",
+      "headline_sharpe_not_regime_robust",
+      "regime_gated_backtest_negative",
+      "regime_gated_oos_negative",
+      "insufficient_regime_sample",
+      "high_volatility_only_edge",
+      "fails_normal_volatility_regime",
+      "shock_regime_dependency",
+    ) ||
+    dominantRegimeShare >= 0.5 ||
+    ["headline_only", "regime_specific", "thin_regime_sample"].includes(verdict);
+  const monthDependent = hasAny("profit_concentrated_single_month", "best_trades_dominate") || dominantMonthShare >= 0.45;
+  const fragileFolds = hasAny("profits_not_consistent_across_folds", "high_sharpe_weak_folds", "unstable_folds", "weak_oos_economics", "weak_oos_evidence", "no_walk_forward_folds", "one_fold_dependency");
+  const scanBias = hasAny("multiple_testing_haircut", "isolated_parameter_peak");
+  const crossMarket = hasAny("known_edge_needs_cross_market_validation", "multiple_testing_haircut");
+  const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
+  const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
+
+  let marketIds = selectedMarket;
+  let budget = 54;
+  let start = researchRun.start;
+  let stress = 2.0;
+  let includeRegimeScans = false;
+  let regimeScanBudget = "";
+  const excludedMonths = [];
+
+  if (syncCosts) {
+    addStep("Refresh IG costs, spread, slippage, margin, and minimum stake");
+  }
+  if (tooFewTrades) {
+    budget = 120;
+    start = earlierDate(researchRun.start, "2024-01-01");
+    addStep("Deep locked-family retest over longer history");
+    if (dominantRegime || regimeDependent) {
+      includeRegimeScans = true;
+      regimeScanBudget = "";
+      addStep(dominantRegime ? `Compare more trades with ${regimeLabel(dominantRegime)} specialists` : "Compare more trades with regime specialists");
+    }
+  }
+  if (regimeDependent && !includeRegimeScans) {
+    includeRegimeScans = true;
+    regimeScanBudget = "";
+    addStep(dominantRegime ? `Run regime-gated specialists around ${regimeLabel(dominantRegime)}` : "Run regime-gated specialist checks");
+  }
+  if (monthDependent && dominantMonth) {
+    excludedMonths.push(dominantMonth);
+    addStep(`Exclude ${dominantMonth} and require the edge to survive`);
+  }
+  if (fragileFolds) {
+    budget = Math.max(budget, 120);
+    start = earlierDate(start, "2024-01-01");
+    addStep("Use longer-history fold and OOS evidence");
+  }
+  if (scanBias) {
+    stress = Math.max(stress, 2.5);
+    addStep("Use evidence-first ranking to reduce scan bias");
+  }
+  if (crossMarket && allMarketIds.length > 1) {
+    marketIds = allMarketIds;
+    budget = Math.max(budget, 120);
+    stress = Math.max(stress, 2.5);
+    addStep("Cross-check the locked family across enabled markets");
+  }
+  if (costStress) {
+    stress = Math.max(stress, 3.0);
+    addStep("Stress costs before trusting the net edge");
+  }
+  if (steps.length === 0) {
+    addStep("Focused locked-family confirmation");
+  }
+
+  const runPatch = {
+    market_id: marketIds[0] || researchRun.market_id,
+    interval: template.interval,
+    start,
+    end: researchRun.end,
+    trading_style: template.style,
+    objective: "profit_first",
+    risk_profile: template.risk_profile,
+    search_preset: budget >= 120 ? "deep" : "balanced",
+    search_budget: String(budget),
+    strategy_families: family,
+    cost_stress_multiplier: stress,
+    include_regime_scans: includeRegimeScans,
+    regime_scan_budget_per_regime: regimeScanBudget,
+    excluded_months: uniqueMonths(excludedMonths),
+    repair_mode: "auto_refine",
+  };
+  const summary = tooFewTrades && includeRegimeScans
+    ? "Tests both the broader trade-count repair and the winning-regime specialist path."
+    : "Combines the active blockers into one locked-family repair run.";
+  return {
+    marketIds,
+    runPatch,
+    steps: steps.slice(0, 6),
+    syncCosts,
+    summary,
+    stageMessage: `Auto-refine staged: ${steps.slice(0, 3).join("; ")}.`,
+  };
+}
+
+function earlierDate(current, candidate) {
+  if (!current) {
+    return candidate;
+  }
+  return String(current) < String(candidate) ? current : candidate;
+}
+
 function readinessIssues(readiness) {
   return humanWarnings([...(readiness.blockers ?? []), ...(readiness.validation_warnings ?? [])]);
 }
@@ -2418,6 +2618,7 @@ function repairModeLabel(value) {
     regime_repair: "Regime repair",
     month_exclusion: "Month exclusion",
     longer_history: "Longer history",
+    auto_refine: "Auto-refine",
   }[value] ?? value ?? "Standard search";
 }
 

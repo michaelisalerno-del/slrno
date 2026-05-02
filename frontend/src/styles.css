@@ -729,6 +729,56 @@ button.ghost {
   align-items: center;
 }
 
+.auto-refine-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #b7cef6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.auto-refine-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auto-refine-heading div {
+  display: grid;
+  gap: 4px;
+}
+
+.auto-refine-heading strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auto-refine-heading span,
+.auto-refine-steps span {
+  color: #5b6674;
+  font-size: 12px;
+}
+
+.auto-refine-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.auto-refine-steps span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid #dbe6f4;
+  border-radius: 999px;
+  background: #f6f8fa;
+  font-weight: 700;
+}
+
 .repair-plan {
   display: grid;
   gap: 8px;
