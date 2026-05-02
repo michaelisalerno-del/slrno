@@ -1211,7 +1211,7 @@ function GuideView({ setActiveModule }) {
     ["Daily Sharpe", "Annualized daily Sharpe. Useful, but only after sample size and robustness checks."],
     ["Days", "Daily observations used for Sharpe. Promotion normally needs at least 120."],
     ["DSR", "Deflated Sharpe probability, adjusted for repeated scans."],
-    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £2,000 working account scenario."],
+    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £2,000 working account scenario. If blocked, the tile names the first sizing/risk reason."],
     ["End balance", "Projected account balance after compounding from the selected account size."],
     ["Return", "Projected percentage return for that account scenario."],
     ["OOS net", "Walk-forward out-of-sample net profit after costs."],
@@ -2910,11 +2910,51 @@ function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) 
   if (!scenario) {
     return "Unknown";
   }
-  return scenario.feasible ? "OK" : "Blocked";
+  if (scenario.feasible) {
+    return "OK";
+  }
+  const reasons = capitalBlockReasons(scenario);
+  if (reasons.length === 0) {
+    return "Blocked";
+  }
+  const shown = reasons.slice(0, 2).join(" + ");
+  const overflow = reasons.length > 2 ? ` +${reasons.length - 2}` : "";
+  return `Blocked: ${shown}${overflow}`;
 }
 
 function accountScenarioFor(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
   return (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
+}
+
+function capitalBlockReasons(scenario = {}) {
+  return arrayValue(scenario.violations).map((violation) => capitalBlockReason(violation, scenario)).filter(Boolean);
+}
+
+function capitalBlockReason(violation, scenario = {}) {
+  const accountSize = Number(scenario.account_size ?? WORKING_ACCOUNT_SIZE);
+  const halfAccount = accountSize * 0.5;
+  const values = {
+    risk: formatMoney(scenario.estimated_stop_loss),
+    riskBudget: formatMoney(scenario.risk_budget),
+    margin: formatMoney(scenario.estimated_margin),
+    marginLimit: formatMoney(halfAccount),
+    account: formatMoney(accountSize),
+    drawdown: formatMoney(scenario.historical_max_drawdown),
+    drawdownLimit: formatMoney(accountSize * 0.25),
+    dailyLoss: formatMoney(scenario.worst_daily_loss),
+    dailyLimit: formatMoney(scenario.daily_loss_limit),
+    minStake: round(scenario.min_deal_size),
+    stake: round(scenario.requested_stake),
+  };
+  return {
+    missing_reference_price: "missing price",
+    below_ig_min_deal_size: `IG min ${values.minStake} > stake ${values.stake}`,
+    risk_budget_exceeded: `risk ${values.risk} > ${values.riskBudget}`,
+    margin_too_large: `margin ${values.margin} > ${values.marginLimit}`,
+    insufficient_account_for_margin: `margin ${values.margin} > ${values.account}`,
+    historical_drawdown_too_large: `drawdown ${values.drawdown} > ${values.drawdownLimit}`,
+    historical_daily_loss_stop_breached: `daily loss ${values.dailyLoss} > ${values.dailyLimit}`,
+  }[violation] ?? humanWarnings([violation])[0];
 }
 
 function optionalNumber(value) {
