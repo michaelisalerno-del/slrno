@@ -676,6 +676,7 @@ def _annotate_evaluations(
     output: list[CandidateEvaluation] = []
     for rank, (evaluation, stability, diagnostics) in enumerate(ranked, start=1):
         tier = evaluation.promotion_tier
+        grade = _grade_profile(evaluation)
         parameters = {
             **evaluation.candidate.parameters,
             "promotion_tier": tier,
@@ -690,6 +691,13 @@ def _annotate_evaluations(
                 "regime_scan_enabled": config.include_regime_scans,
                 "regime_scan": bool(evaluation.candidate.parameters.get("regime_scan")),
                 "target_regime": evaluation.candidate.parameters.get("target_regime"),
+                "grade_mode": grade.get("mode"),
+                "grade_regime": grade.get("target_regime"),
+                "graded_net_profit": round(float(grade.get("net_profit") or 0.0), 4),
+                "graded_test_profit": round(float(grade.get("test_profit") or 0.0), 4),
+                "graded_daily_pnl_sharpe": round(float(grade.get("daily_pnl_sharpe") or 0.0), 4),
+                "graded_sharpe_days": int(float(grade.get("sharpe_days") or 0.0)),
+                "graded_trade_count": int(float(grade.get("trade_count") or 0.0)),
             },
             "parameter_stability_score": stability,
             "sharpe_diagnostics": diagnostics,
@@ -763,18 +771,24 @@ def _cost_aware_score(
     config: AdaptiveSearchConfig,
 ) -> float:
     backtest = evaluation.backtest
+    grade = _grade_profile(evaluation)
     stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
-    profit_target = max(250.0, abs(backtest.total_cost) * 0.75, abs(backtest.max_drawdown) * 0.25)
-    profit_component = _clamp(backtest.test_profit / profit_target, 0.0, 1.0)
-    net_component = _clamp(backtest.net_profit / profit_target, 0.0, 1.0)
+    grade_net_profit = float(grade["net_profit"])
+    grade_test_profit = float(grade["test_profit"])
+    grade_cost = float(grade["total_cost"])
+    grade_drawdown = float(grade["max_drawdown"])
+    grade_net_cost_ratio = float(grade["net_cost_ratio"])
+    profit_target = max(250.0, abs(grade_cost) * 0.75, abs(grade_drawdown) * 0.25)
+    profit_component = _clamp(grade_test_profit / profit_target, 0.0, 1.0)
+    net_component = _clamp(grade_net_profit / profit_target, 0.0, 1.0)
     stress_component = _clamp(stress_net_profit / profit_target, 0.0, 1.0)
-    deflated_sharpe_component = _clamp(float(diagnostics.get("deflated_sharpe_probability") or 0.0), 0.0, 1.0)
-    net_cost_component = _clamp(backtest.net_cost_ratio, 0.0, 1.0)
-    expectancy_component = _expectancy_efficiency(backtest)
+    deflated_sharpe_component = _grade_sharpe_component(grade, diagnostics)
+    net_cost_component = _clamp(grade_net_cost_ratio, 0.0, 1.0)
+    expectancy_component = _grade_expectancy_efficiency(grade)
     fold_component = _positive_fold_rate(evaluation.fold_results)
     concentration_penalty = _profit_concentration(evaluation.fold_results)
-    drawdown_component = 1.0 - _clamp(backtest.max_drawdown / 3_500.0, 0.0, 1.0)
-    churn_penalty = _churn_penalty(backtest)
+    drawdown_component = 1.0 - _clamp(grade_drawdown / 3_500.0, 0.0, 1.0)
+    churn_penalty = _grade_churn_penalty(grade, backtest)
     if config.objective == "profit_first":
         profit_weight, sharpe_weight = 0.36, 0.10
     elif config.objective == "sharpe_first":
@@ -814,17 +828,115 @@ def _trial_ranking_key(
         "reject": 0,
     }.get(evaluation.promotion_tier, 0)
     stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
+    grade = _grade_profile(evaluation)
     return (
         float(tier_rank),
-        float(evaluation.backtest.test_profit),
+        float(grade["test_profit"]),
         float(stress_net_profit),
-        float(evaluation.backtest.net_profit),
-        float(diagnostics.get("deflated_sharpe_probability") or 0.0),
-        float(evaluation.backtest.net_cost_ratio),
+        float(grade["net_profit"]),
+        float(_grade_sharpe_component(grade, diagnostics)),
+        float(grade["net_cost_ratio"]),
         float(stability),
-        -float(evaluation.backtest.max_drawdown),
-        -float(_churn_penalty(evaluation.backtest)),
+        -float(grade["max_drawdown"]),
+        -float(_grade_churn_penalty(grade, evaluation.backtest)),
     )
+
+
+def _grade_profile(evaluation: CandidateEvaluation) -> dict[str, object]:
+    targeted = _target_regime_grade_profile(evaluation)
+    if targeted:
+        return targeted
+    backtest = evaluation.backtest
+    return {
+        "mode": "full_period",
+        "target_regime": None,
+        "net_profit": float(backtest.net_profit),
+        "test_profit": float(backtest.test_profit),
+        "daily_pnl_sharpe": float(backtest.daily_pnl_sharpe),
+        "sharpe_days": int(backtest.sharpe_observations),
+        "trade_count": int(backtest.trade_count),
+        "max_drawdown": float(backtest.max_drawdown),
+        "gross_profit": float(backtest.gross_profit),
+        "total_cost": float(backtest.total_cost),
+        "expectancy_per_trade": float(backtest.expectancy_per_trade),
+        "average_cost_per_trade": float(backtest.average_cost_per_trade),
+        "net_cost_ratio": float(backtest.net_cost_ratio),
+        "cost_to_gross_ratio": float(backtest.cost_to_gross_ratio),
+    }
+
+
+def _target_regime_grade_profile(evaluation: CandidateEvaluation) -> dict[str, object] | None:
+    parameters = evaluation.candidate.parameters
+    target_regime = str(parameters.get("target_regime") or "").strip()
+    if not target_regime:
+        return None
+    analysis = parameters.get("bar_pattern_analysis")
+    if not isinstance(analysis, dict):
+        return None
+    evidence = analysis.get("regime_trade_evidence")
+    if not isinstance(evidence, dict) or not evidence.get("available"):
+        return None
+    in_regime = evidence.get("in_regime")
+    if not isinstance(in_regime, dict):
+        return None
+    trade_count = int(_safe_float(in_regime.get("trade_count")))
+    net_profit = _safe_float(in_regime.get("net_profit"))
+    gross_profit = _safe_float(in_regime.get("gross_profit"))
+    total_cost = _safe_float(in_regime.get("cost"))
+    return {
+        "mode": "target_regime",
+        "target_regime": target_regime,
+        "net_profit": net_profit,
+        "test_profit": _safe_float(in_regime.get("test_profit")),
+        "daily_pnl_sharpe": _safe_float(in_regime.get("daily_pnl_sharpe")),
+        "sharpe_days": int(_safe_float(in_regime.get("sharpe_days"))),
+        "trade_count": trade_count,
+        "max_drawdown": _safe_float(in_regime.get("max_drawdown")),
+        "gross_profit": gross_profit,
+        "total_cost": total_cost,
+        "expectancy_per_trade": net_profit / max(1, trade_count),
+        "average_cost_per_trade": total_cost / max(1, trade_count),
+        "net_cost_ratio": net_profit / max(1.0, total_cost),
+        "cost_to_gross_ratio": total_cost / max(1e-9, abs(gross_profit)),
+        "regime_trading_days": int(_safe_float(evidence.get("regime_trading_days"))),
+        "regime_history_share": _safe_float(evidence.get("regime_history_share")),
+        "regime_episodes": int(_safe_float(evidence.get("regime_episodes"))),
+    }
+
+
+def _grade_sharpe_component(grade: dict[str, object], diagnostics: dict[str, object]) -> float:
+    if grade.get("mode") == "target_regime":
+        sharpe_component = _clamp(_safe_float(grade.get("daily_pnl_sharpe")) / 2.0, 0.0, 1.0)
+        sample_component = _clamp(
+            min(
+                _safe_float(grade.get("sharpe_days")) / float(MIN_PROMOTION_SHARPE_DAYS),
+                _safe_float(grade.get("trade_count")) / 25.0,
+            ),
+            0.0,
+            1.0,
+        )
+        return sharpe_component * sample_component
+    return _clamp(float(diagnostics.get("deflated_sharpe_probability") or 0.0), 0.0, 1.0)
+
+
+def _grade_expectancy_efficiency(grade: dict[str, object]) -> float:
+    trade_count = int(_safe_float(grade.get("trade_count")))
+    if trade_count <= 0:
+        return 0.0
+    average_cost = _safe_float(grade.get("average_cost_per_trade"))
+    expectancy = _safe_float(grade.get("expectancy_per_trade"))
+    if average_cost <= 0:
+        return 1.0 if expectancy > 0 else 0.0
+    return _clamp(expectancy / max(1.0, average_cost), 0.0, 1.0)
+
+
+def _grade_churn_penalty(grade: dict[str, object], backtest: BacktestResult) -> float:
+    if grade.get("mode") != "target_regime":
+        return _churn_penalty(backtest)
+    cost_drag = _clamp((_safe_float(grade.get("cost_to_gross_ratio")) - 0.35) / 0.65, 0.0, 1.0)
+    turnover_drag = _clamp((_safe_float(grade.get("trade_count")) - 160) / 640, 0.0, 1.0)
+    poor_expectancy_drag = 1.0 if _safe_float(grade.get("trade_count")) > 0 and _safe_float(grade.get("expectancy_per_trade")) <= 0 else 0.0
+    return _clamp(0.55 * cost_drag + 0.30 * turnover_drag + 0.15 * poor_expectancy_drag, 0.0, 1.0)
 
 
 def _parameter_stability_score(evaluation: CandidateEvaluation, evaluations: tuple[CandidateEvaluation, ...]) -> float:
@@ -1135,3 +1247,10 @@ def _stable_seed(market_id: str, timeframe: str, seed: int, style: str) -> int:
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0

@@ -166,6 +166,7 @@ function App() {
     repair_mode: "standard",
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready.", progress: 0 });
+  const activePollRunIdRef = React.useRef(null);
 
   const eodhdStatus = providerStatus(status, "eodhd");
   const igStatus = providerStatus(status, "ig");
@@ -205,6 +206,7 @@ function App() {
         setEngines((summary.engines ?? []).length ? summary.engines : FALLBACK_ENGINES);
         setSpreadBetEngines(summary.spread_bet_engines ?? []);
         setResearchRuns(summary.runs ?? []);
+        resumeLatestActiveRun(summary.runs ?? []);
       } else if (moduleId === "paper") {
         setPaper(await getPaperSummary());
       } else if (moduleId === "broker") {
@@ -309,6 +311,49 @@ function App() {
     await launchResearchRun(researchRun, activeMarketIds);
   }
 
+  async function loadRunDetail(runId, resumeActive = true) {
+    const detail = await getResearchRun(runId);
+    const plannedTrials = plannedTrialsForRun(detail);
+    setRunDetail(detail);
+    setResearchState(researchStateFromRun(detail, plannedTrials));
+    if (resumeActive && isActiveRun(detail) && activePollRunIdRef.current !== detail.id) {
+      resumePollingRun(detail, plannedTrials);
+    }
+    return detail;
+  }
+
+  function resumeLatestActiveRun(runs = []) {
+    const activeRun = runs.find((run) => isActiveRun(run));
+    if (!activeRun || activePollRunIdRef.current === activeRun.id) {
+      return;
+    }
+    loadRunDetail(activeRun.id).catch((error) => setMessage(error.message));
+  }
+
+  function resumePollingRun(detail, plannedTrials = plannedTrialsForRun(detail)) {
+    const runId = detail.id;
+    activePollRunIdRef.current = runId;
+    setActiveTab("results");
+    setResearchState(researchStateFromRun(detail, plannedTrials));
+    pollResearchRun(runId, plannedTrials)
+      .then(async (finishedDetail) => {
+        setResearchState(researchStateFromRun(finishedDetail, plannedTrials));
+        if (!isActiveRun(finishedDetail)) {
+          setMessage(runCompletionMessage(runId, finishedDetail));
+        }
+        const summary = await getBacktestsSummary(includeArchivedRuns).catch(() => null);
+        if (summary) {
+          setResearchRuns(summary.runs ?? []);
+        }
+      })
+      .catch((error) => setMessage(error.message))
+      .finally(() => {
+        if (activePollRunIdRef.current === runId) {
+          activePollRunIdRef.current = null;
+        }
+      });
+  }
+
   async function launchResearchRun(runConfig = researchRun, marketIdsOverride = activeMarketIds, launchMessage = "Launching adaptive IG-aware search...") {
     const market_ids = marketIdsOverride.length ? marketIdsOverride : [runConfig.market_id];
     const preset = SEARCH_PRESETS.find((item) => item.id === runConfig.search_preset) ?? selectedPreset;
@@ -338,6 +383,7 @@ function App() {
       setActiveTab("results");
       setMessage(`Run ${result.run_id} started: ${budget} base trials per market${regimeScanNote}.`);
       const detail = await pollResearchRun(result.run_id, plannedTrials);
+      activePollRunIdRef.current = null;
       setResearchState({
         status: detail.status,
         detail: runStateDetail(detail, plannedTrials),
@@ -817,6 +863,12 @@ function App() {
                             <span className="badge muted-badge">{autoRefinementPlan.marketIds.length} market{autoRefinementPlan.marketIds.length === 1 ? "" : "s"}</span>
                           </div>
                         </div>
+                        {autoRefinementPlan.targetRegime && (
+                          <div className="auto-refine-target">
+                            <strong>Auto-refine target: {regimeLabel(autoRefinementPlan.targetRegime)} only</strong>
+                            <span>Trades outside {regimeLabel(autoRefinementPlan.targetRegime)} are forced flat. The search is scored on the selected regime, with full-history gated evidence kept for context.</span>
+                          </div>
+                        )}
                         <div className="auto-refine-steps">
                           {autoRefinementPlan.steps.map((step) => (
                             <span key={step}>{step}</span>
@@ -984,7 +1036,7 @@ function App() {
               <ResultsView
                 runDetail={runDetail}
                 researchRuns={researchRuns}
-                loadRun={async (id) => setRunDetail(await getResearchRun(id))}
+                loadRun={loadRunDetail}
                 deleteRun={deleteRun}
                 archiveRun={archiveRun}
                 archiveRuns={archiveRuns}
@@ -1814,6 +1866,7 @@ function TrialCard({ trial, onRefineTemplate }) {
   const evidence = evidenceProfileForSource(trial);
   const marketId = trialMarketId(trial);
   const interval = trialIntervalLabel(trial);
+  const scoreBasis = scoreBasisLabel(trial.parameters?.search_audit);
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -1825,7 +1878,7 @@ function TrialCard({ trial, onRefineTemplate }) {
               <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
             </div>
           </div>
-          <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`].filter(Boolean).join(" · ")}</span>
+          <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`, scoreBasis].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="button-row trial-actions">
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
@@ -1969,6 +2022,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(candidate);
+  const scoreBasis = scoreBasisLabel(candidate.audit?.candidate?.parameters?.search_audit);
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -1981,7 +2035,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         <strong>{candidate.strategy_name}</strong>
         <span className={`badge ${readinessBadgeClass(readiness.status)}`}>{readinessLabel(readiness.status)}</span>
       </div>
-      <span>{candidate.market_id} · score {round(candidate.robustness_score)}</span>
+      <span>{[candidate.market_id, `score ${round(candidate.robustness_score)}`, scoreBasis].filter(Boolean).join(" · ")}</span>
       {researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe) && (
         <small>{researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe)}</small>
       )}
@@ -2141,6 +2195,27 @@ function SecretBadge({ status }) {
 
 function providerStatus(statuses, provider) {
   return statuses.find((item) => item.provider === provider);
+}
+
+function isActiveRun(run) {
+  return ["created", "running"].includes(run?.status);
+}
+
+function researchStateFromRun(detail, plannedTrials = plannedTrialsForRun(detail)) {
+  return {
+    status: isActiveRun(detail) ? "running" : detail?.status || "idle",
+    detail: runStateDetail(detail, plannedTrials),
+    progress: runProgress(detail, plannedTrials),
+  };
+}
+
+function plannedTrialsForRun(detail) {
+  const config = detail?.config ?? {};
+  const preset = SEARCH_PRESETS.find((item) => item.id === config.search_preset) ?? SEARCH_PRESETS[1];
+  const budget = Number(config.search_budget || preset?.budget || 0);
+  const marketIds = Array.isArray(config.market_ids) ? config.market_ids.filter(Boolean) : [];
+  const marketCount = Math.max(1, marketIds.length || (detail?.market_id && detail.market_id !== "MULTI" ? 1 : 0));
+  return Math.max(1, budget) * marketCount;
 }
 
 function runProgress(detail, plannedTrials = 0) {
@@ -2500,22 +2575,7 @@ function regimeRefineTarget(template) {
     return specific;
   }
   const pattern = template?.pattern ?? {};
-  const dominant = String(pattern.dominant_profit_regime?.key || "").trim();
-  const share = Number(pattern.dominant_profit_regime?.positive_profit_share ?? 0);
-  const warnings = new Set(template?.warnings ?? []);
-  const verdict = pattern.regime_verdict;
-  if (
-    dominant &&
-    (share >= 0.5 ||
-      ["headline_only", "regime_specific", "thin_regime_sample"].includes(verdict) ||
-      warnings.has("profit_concentrated_single_regime") ||
-      warnings.has("headline_sharpe_not_regime_robust") ||
-      warnings.has("high_volatility_only_edge") ||
-      warnings.has("shock_regime_dependency"))
-  ) {
-    return dominant;
-  }
-  return "";
+  return String(pattern.dominant_profit_regime?.key || "").trim();
 }
 
 function repairActionsForTemplate(template) {
@@ -2685,10 +2745,14 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   let start = researchRun.start;
   let stress = 2.0;
   let includeRegimeScans = false;
-  let runTargetRegime = templateSpecificRegime(template);
+  let runTargetRegime = targetRegime;
   let regimeScanBudget = "";
   const excludedMonths = [];
 
+  if (runTargetRegime) {
+    addStep(`Auto-refine target: ${regimeLabel(runTargetRegime)} only`);
+    addStep(`Force flat outside ${regimeLabel(runTargetRegime)}`);
+  }
   if (syncCosts) {
     addStep("Refresh IG costs, spread, slippage, margin, and minimum stake");
   }
@@ -2733,7 +2797,6 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     marketIds = allMarketIds;
     budget = Math.max(budget, 120);
     stress = Math.max(stress, 2.5);
-    runTargetRegime = "";
     addStep("Cross-check the locked family across enabled markets");
     addStep("Use each market default candle timeframe");
   }
@@ -2925,6 +2988,13 @@ function regimeCountsLabel(counts = {}) {
     return "No regime labels yet";
   }
   return entries.map(([regime, count]) => `${regimeLabel(regime)} ${count}d`).join(" · ");
+}
+
+function scoreBasisLabel(audit = {}) {
+  if (audit?.grade_mode === "target_regime" && audit.grade_regime) {
+    return `graded on ${regimeLabel(audit.grade_regime)}`;
+  }
+  return "";
 }
 
 function regimePresetBudget(preset) {

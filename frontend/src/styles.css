@@ -822,6 +822,24 @@ button.ghost {
   font-size: 12px;
 }
 
+.auto-refine-target {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid #adddea;
+  border-radius: 8px;
+  background: #e6f6fb;
+}
+
+.auto-refine-target strong {
+  color: #0b4f6c;
+}
+
+.auto-refine-target span {
+  color: #275a6e;
+  font-size: 13px;
+}
+
 .auto-refine-steps {
   display: flex;
   flex-wrap: wrap;
