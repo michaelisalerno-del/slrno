@@ -737,6 +737,37 @@ button.ghost {
   font-weight: 700;
 }
 
+.warning-chip.blocker {
+  color: #7f1d1d;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.warning-chip.repair {
+  color: #7c2d12;
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.warning-chip.specialist {
+  color: #164e63;
+  background: #ecfeff;
+  border-color: #a5f3fc;
+}
+
+.warning-chip.info {
+  color: #374151;
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.warning-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
 .plugin span,
 .engine span,
 .status span,
