@@ -112,7 +112,7 @@ def run_adaptive_search(
     backtest_base = backtest_config_from_profile(
         cost_profile,
         starting_cash=WORKING_ACCOUNT_SIZE_GBP,
-        compound_position_size=True,
+        compound_position_size=False,
     )
     folds = _adaptive_folds(len(bars))
     evaluations: list[CandidateEvaluation] = []

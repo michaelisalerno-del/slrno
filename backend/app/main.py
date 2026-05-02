@@ -899,6 +899,10 @@ def _summary_backtest(backtest: dict[str, object]) -> dict[str, object]:
     keep = {
         "cost_confidence",
         "cost_to_gross_ratio",
+        "compounded_projection_final_equity",
+        "compounded_projection_max_drawdown",
+        "compounded_projection_return_pct",
+        "compounded_position_sizing",
         "daily_pnl_sample_sharpe",
         "daily_pnl_sharpe",
         "estimated_slippage_bps",
