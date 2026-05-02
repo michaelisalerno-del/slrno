@@ -5,7 +5,7 @@ from datetime import date
 from math import erf, log, sqrt
 from random import Random
 
-from .bar_patterns import analyze_strategy_patterns, eligible_specialist_regimes, gate_signals_to_regimes
+from .bar_patterns import analyze_strategy_patterns, eligible_specialist_regimes, gate_signals_to_regimes, market_regime_context
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from .capital import WORKING_ACCOUNT_SIZE_GBP
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_badge
@@ -28,6 +28,7 @@ REGIME_SCAN_PRESET_BUDGETS = {
     "deep": 18,
 }
 REGIME_SCAN_HARD_CAP = 96
+MAX_WALK_FORWARD_FOLDS = 36
 
 STYLE_FAMILIES = {
     "find_anything_robust": (
@@ -115,6 +116,7 @@ def run_adaptive_search(
     )
     folds = _adaptive_folds(len(bars))
     evaluations: list[CandidateEvaluation] = []
+    market_regime, regime_by_date = market_regime_context(bars)
     eligible_regimes = eligible_specialist_regimes(bars)
     target_regime = _target_regime(config.target_regime)
 
@@ -122,7 +124,7 @@ def run_adaptive_search(
         family = families[trial_index % len(families)]
         parameters = _sample_parameters(rng, family, config.risk_profile, trial_index)
         raw_signals = _generate_signals(bars, family, parameters)
-        signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}) if target_regime else raw_signals
+        signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}, regime_by_date=regime_by_date) if target_regime else raw_signals
         backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
         backtest = run_vector_backtest(bars, signals, backtest_config)
         fold_results = tuple(_fold_backtests(bars, signals, backtest_config, folds))
@@ -139,7 +141,15 @@ def run_adaptive_search(
         probabilities = _signals_to_probabilities(signals)
         metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
         score = balanced_score(backtest, fold_results, stress, backtest_config)
-        pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest, target_regime=target_regime)
+        pattern_analysis = analyze_strategy_patterns(
+            bars,
+            signals,
+            backtest_config,
+            backtest,
+            target_regime=target_regime,
+            market_regime=market_regime,
+            regime_by_date=regime_by_date,
+        )
         warnings = tuple(
             sorted(
                 set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
@@ -202,7 +212,7 @@ def run_adaptive_search(
                 family = families[global_index % len(families)]
                 parameters = _sample_parameters(rng, family, config.risk_profile, global_index)
                 raw_signals = _generate_signals(bars, family, parameters)
-                signals = gate_signals_to_regimes(bars, raw_signals, {target_regime})
+                signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}, regime_by_date=regime_by_date)
                 backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
                 backtest = run_vector_backtest(bars, signals, backtest_config)
                 fold_results = tuple(_fold_backtests(bars, signals, backtest_config, folds))
@@ -219,7 +229,15 @@ def run_adaptive_search(
                 probabilities = _signals_to_probabilities(signals)
                 metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
                 score = balanced_score(backtest, fold_results, stress, backtest_config)
-                pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest, target_regime=target_regime)
+                pattern_analysis = analyze_strategy_patterns(
+                    bars,
+                    signals,
+                    backtest_config,
+                    backtest,
+                    target_regime=target_regime,
+                    market_regime=market_regime,
+                    regime_by_date=regime_by_date,
+                )
                 warnings = tuple(
                     sorted(
                         set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
@@ -598,7 +616,16 @@ def _adaptive_folds(total_bars: int) -> tuple[WalkForwardFold, ...]:
     train = max(20, min(500, total_bars // 4))
     test = max(10, min(150, total_bars // 10))
     config = WalkForwardConfig(train_bars=train, test_bars=test, step_bars=test, holdout_fraction=0.2)
-    return tuple(walk_forward_splits(total_bars, config))
+    return _sample_folds(tuple(walk_forward_splits(total_bars, config)), MAX_WALK_FORWARD_FOLDS)
+
+
+def _sample_folds(folds: tuple[WalkForwardFold, ...], limit: int) -> tuple[WalkForwardFold, ...]:
+    if len(folds) <= limit:
+        return folds
+    if limit <= 1:
+        return folds[:1]
+    indexes = sorted({round(index * (len(folds) - 1) / (limit - 1)) for index in range(limit)})
+    return tuple(folds[index] for index in indexes)
 
 
 def _warnings(
