@@ -453,29 +453,8 @@ function App() {
   }
 
   function refineTemplate(source) {
-    const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
-    const searchAudit = parameters.search_audit ?? {};
-    const pattern = parameters.bar_pattern_analysis ?? {};
-    const family = parameters.family ? String(parameters.family) : String(source.strategy_family || source.family || "");
-    const marketId = String(source.market_id || parameters.market_id || researchRun.market_id);
-    const targetRegime = String(parameters.target_regime || pattern.target_regime || "");
-    const template = {
-      id: source.id ?? source.trial_id ?? source.strategy_name,
-      name: source.strategy_name,
-      market_id: marketId,
-      family,
-      style: String(parameters.style || searchAudit.trading_style || "find_anything_robust"),
-      objective: String(parameters.objective || searchAudit.objective || "profit_first"),
-      interval: intervalValue(parameters.timeframe || researchRun.interval),
-      risk_profile: String(searchAudit.risk_profile || researchRun.risk_profile),
-      target_regime: targetRegime,
-      recipe: researchRecipeLabel(parameters.research_recipe),
-      warnings: warningCodesForSource(source),
-      readiness: source.audit?.promotion_readiness ?? null,
-      pattern,
-      evidence: evidenceProfileForSource(source),
-      parameters,
-    };
+    const template = refinementTemplateFromSource(source, researchRun);
+    const marketId = template.market_id;
     setRefinementTemplate(template);
     if (marketId) {
       setActiveMarketIds([marketId]);
@@ -490,12 +469,69 @@ function App() {
       risk_profile: template.risk_profile,
       search_preset: "balanced",
       search_budget: current.search_budget || "54",
-      strategy_families: family ? [family] : [],
+      strategy_families: template.family ? [template.family] : [],
       cost_stress_multiplier: current.cost_stress_multiplier || 2.0,
-      target_regime: targetRegime,
+      target_regime: template.target_regime,
     }));
     setActiveTab("builder");
     setMessage(`Refining ${source.strategy_name} on ${marketId || "selected market"}.`);
+  }
+
+  async function refineFurther(source) {
+    const template = refinementTemplateFromSource(source, researchRun);
+    const plan = autoRefinementPlanForTemplate(template, researchRun, enabledMarkets, template.market_id ? [template.market_id] : activeMarketIds);
+    const runConfig = { ...researchRun, ...plan.runPatch };
+    setRefinementTemplate(template);
+    setActiveMarketIds(plan.marketIds);
+    for (const marketId of plan.marketIds) {
+      loadCostProfile(marketId).catch(() => undefined);
+    }
+    setResearchRun(runConfig);
+    setActiveTab("builder");
+    if (!plan.syncCosts) {
+      setMessage(`Refine further staged: ${plan.steps.slice(0, 3).join("; ")}.`);
+      return;
+    }
+    try {
+      setMessage("Refine further: syncing IG cost profiles...");
+      const result = await syncIgCosts({ market_ids: plan.marketIds });
+      setCostProfiles((current) => {
+        const next = { ...current };
+        for (const profile of result.profiles ?? []) {
+          next[profile.market_id] = profile;
+        }
+        return next;
+      });
+      setMessage(`Refine further staged and synced ${result.profile_count ?? 0} IG cost profile${result.profile_count === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setMessage(`Refine further staged, but IG validation still needs attention: ${error.message}`);
+    }
+  }
+
+  function refinementTemplateFromSource(source, currentRun = researchRun) {
+    const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
+    const searchAudit = parameters.search_audit ?? {};
+    const pattern = parameters.bar_pattern_analysis ?? {};
+    const family = parameters.family ? String(parameters.family) : String(source.strategy_family || source.family || "");
+    const marketId = String(source.market_id || parameters.market_id || currentRun.market_id);
+    const targetRegime = String(parameters.target_regime || pattern.target_regime || "");
+    return {
+      id: source.id ?? source.trial_id ?? source.strategy_name,
+      name: source.strategy_name,
+      market_id: marketId,
+      family,
+      style: String(parameters.style || searchAudit.trading_style || "find_anything_robust"),
+      objective: String(parameters.objective || searchAudit.objective || "profit_first"),
+      interval: intervalValue(parameters.timeframe || currentRun.interval),
+      risk_profile: String(searchAudit.risk_profile || currentRun.risk_profile),
+      target_regime: targetRegime,
+      recipe: researchRecipeLabel(parameters.research_recipe),
+      warnings: warningCodesForSource(source),
+      readiness: source.audit?.promotion_readiness ?? null,
+      pattern,
+      evidence: evidenceProfileForSource(source),
+      parameters,
+    };
   }
 
   function clearRefinementTemplate() {
@@ -780,7 +816,7 @@ function App() {
             </div>
             <button type="button" className="secondary" onClick={() => loadModule("research")}><RefreshCw size={16} /> Refresh</button>
           </div>
-          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} />
+          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} />
         </section>
       )}
 
@@ -851,9 +887,7 @@ function App() {
                       <RegimeEvidenceMetrics pattern={refinementTemplate.pattern} />
                     </div>
                     <div className="warning-row">
-                      {(refinementTemplate.warnings ?? []).length > 0
-                        ? humanWarnings(refinementTemplate.warnings).slice(0, 10).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>)
-                        : <span className="muted">No active blockers were attached to this template.</span>}
+                      <WarningChips warnings={refinementTemplate.warnings} limit={10} empty="No active blockers were attached to this template." />
                     </div>
                     {autoRefinementPlan && (
                       <div className="auto-refine-card">
@@ -1052,6 +1086,7 @@ function App() {
                 archiveRuns={archiveRuns}
                 deleteRuns={deleteRuns}
                 onRefineTemplate={refineTemplate}
+                onRefineFurther={refineFurther}
                 exportIncludeBars={exportIncludeBars}
               />
             )}
@@ -1195,7 +1230,7 @@ function GuideView({ setActiveModule }) {
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
-    ["5", "Use Auto-refine", "Click Refine on a trial or candidate, then run the Auto-refine plan so the app combines the required repairs."],
+    ["5", "Use Refine further", "Use Best by market first, then click Refine further to stage the locked repair plan and sync IG costs when validation is missing."],
     ["6", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
     ["7", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, and regime gates are clear."],
   ];
@@ -1221,6 +1256,7 @@ function GuideView({ setActiveModule }) {
     ["Gated OOS", "Out-of-sample profit after the regime gate is applied."],
     ["Cost/gross", "How much gross edge is consumed by trading friction."],
     ["Net/cost", "How much net profit remains for each pound of cost."],
+    ["Warning colours", "Red blocks paper promotion, orange needs repair, blue is a specialist/regime identity, and grey is diagnostic."],
   ];
   const repairs = [
     ["Too few trades", "Auto-refine runs a deeper longer-history retest. If the edge only wins in one regime, it also compares regime specialists."],
@@ -1228,7 +1264,7 @@ function GuideView({ setActiveModule }) {
     ["Single-month profit", "Use Exclude month. The run removes the dominant month from saved bars and retests."],
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
     ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
-    ["Missing IG validation", "Use Sync costs, then rerun. Do not promote stale or generic cost evidence."],
+    ["Missing IG validation", "Use Refine further or Sync costs, then rerun. Do not promote stale or generic cost evidence."],
     ["Multiple-testing haircut", "Use Evidence first for this template. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
     ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
   ];
@@ -1500,9 +1536,7 @@ function BrokerView({ summary, markets }) {
                 <Metric label="Risk" value={formatMoney(preview.planned_risk)} />
               </div>
               <div className="warning-row">
-                {(preview.rule_violations ?? []).length
-                  ? preview.rule_violations.map((warning) => <span className="warning-chip" key={warning}>{humanWarnings([warning])[0]}</span>)
-                  : <span className="badge good">Preview clear</span>}
+                {(preview.rule_violations ?? []).length ? <WarningChips warnings={preview.rule_violations} /> : <span className="badge good">Preview clear</span>}
               </div>
               <small className="muted">Live order placement is disabled for this preview.</small>
             </>
@@ -1567,24 +1601,26 @@ function moduleLabel(id) {
   return MODULES.find((item) => item[0] === id)?.[1] ?? id;
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, exportIncludeBars }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, exportIncludeBars }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
   const marketFailures = runDetail?.config?.market_failures ?? [];
   const [trialTierFilter, setTrialTierFilter] = React.useState("active");
   const [trialScanFilter, setTrialScanFilter] = React.useState("all");
+  const [trialMarketView, setTrialMarketView] = React.useState("overall");
   const [showAllRuns, setShowAllRuns] = React.useState(false);
   const [selectedRunIds, setSelectedRunIds] = React.useState([]);
   const qualitySummary = runQualitySummary(trials);
   const filteredTrials = trials
     .filter((trial) => tierMatchesFilter(trial.promotion_tier, trialTierFilter))
     .filter((trial) => trialScanMatchesFilter(trial, trialScanFilter));
+  const rankedTrials = trialMarketView === "market_best" ? bestTrialsByMarket(filteredTrials, 3) : filteredTrials;
   const visibleRuns = showAllRuns ? researchRuns : researchRuns.slice(0, 18);
   const selectedRuns = researchRuns.filter((run) => selectedRunIds.includes(run.id));
   const visibleDeletableRuns = visibleRuns.filter((run) => !["created", "running"].includes(run.status));
   const visibleNoisyRuns = visibleDeletableRuns.filter(isNoisyRun);
-  const visibleTrials = filteredTrials.slice(0, 20);
+  const visibleTrials = rankedTrials.slice(0, 20);
 
   React.useEffect(() => {
     setSelectedRunIds((current) => current.filter((id) => researchRuns.some((run) => run.id === id)));
@@ -1793,15 +1829,36 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
               </button>
             ))}
           </div>
+          <div className="segmented compact-filter">
+            {[
+              ["overall", "Best overall"],
+              ["market_best", "Best by market"],
+            ].map(([id, label]) => (
+              <button
+                className={trialMarketView === id ? "segment active" : "segment"}
+                key={id}
+                type="button"
+                onClick={() => setTrialMarketView(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="warning-legend">
+          <span className="warning-chip blocker">Paper blocker</span>
+          <span className="warning-chip repair">Needs repair</span>
+          <span className="warning-chip specialist">Specialist identity</span>
+          <span className="warning-chip info">Diagnostic</span>
         </div>
         <div className="trial-list">
-          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} />)}
+          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} />)}
         </div>
         {filteredTrials.length === 0 && trials.length > 0 && (
           <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
         )}
-        {filteredTrials.length > visibleTrials.length && (
-          <span className="muted">Showing top {visibleTrials.length} of {filteredTrials.length} trials in this filter.</span>
+        {rankedTrials.length > visibleTrials.length && (
+          <span className="muted">Showing top {visibleTrials.length} of {rankedTrials.length} trials in this view.</span>
         )}
       </section>
     </div>
@@ -1870,9 +1927,8 @@ function RegimeEvidenceMetrics({ pattern }) {
   );
 }
 
-function TrialCard({ trial, onRefineTemplate }) {
+function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
   const backtest = trial.backtest ?? {};
-  const warnings = humanWarnings(trial.warnings);
   const capital = accountFeasibility(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const accountScenario = accountScenarioFor(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
@@ -1897,6 +1953,9 @@ function TrialCard({ trial, onRefineTemplate }) {
           <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`, scoreBasis].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="button-row trial-actions">
+          <button type="button" className="secondary" onClick={() => onRefineFurther(trial)}>
+            <Sparkles size={16} /> Refine further
+          </button>
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
             <RefreshCw size={16} /> Refine
           </button>
@@ -1933,7 +1992,7 @@ function TrialCard({ trial, onRefineTemplate }) {
         <Metric label="Trades" value={backtest.trade_count ?? 0} />
       </div>
       <div className="warning-row">
-        {warnings.length ? warnings.slice(0, 8).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>) : <span className="muted">Clear</span>}
+        <WarningChips warnings={trial.warnings} limit={8} empty="Clear" />
       </div>
     </article>
   );
@@ -1966,7 +2025,7 @@ function ParetoCard({ item, onRefineTemplate }) {
   );
 }
 
-function CandidateView({ candidates, critique, onRefineTemplate }) {
+function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther }) {
   const visibleCandidates = candidates.slice(0, 24);
   const queue = candidateQueueSummary(candidates);
   return (
@@ -2001,7 +2060,7 @@ function CandidateView({ candidates, critique, onRefineTemplate }) {
       <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} />)}
+          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} />)}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
           {candidates.length > visibleCandidates.length && (
             <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
@@ -2033,9 +2092,9 @@ function CandidateView({ candidates, critique, onRefineTemplate }) {
   );
 }
 
-function CandidateCard({ candidate, onRefineTemplate }) {
+function CandidateCard({ candidate, onRefineTemplate, onRefineFurther }) {
   const readiness = candidateReadiness(candidate);
-  const issues = readinessIssues(readiness);
+  const issues = readinessIssueCodes(readiness);
   const capital = accountFeasibility(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const accountScenario = accountScenarioFor(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
@@ -2062,9 +2121,12 @@ function CandidateCard({ candidate, onRefineTemplate }) {
       )}
       <small>{nextActionLabel(readiness.next_action)}</small>
       <div className="warning-row">
-        {issues.length ? issues.slice(0, 8).map((warning) => <span className="warning-chip" key={warning}>{warning}</span>) : <span className="muted">Gate clear</span>}
+        <WarningChips warnings={issues} limit={8} empty="Gate clear" />
       </div>
       <div className="button-row">
+        <button type="button" className="secondary" onClick={() => onRefineFurther(candidate)}>
+          <Sparkles size={16} /> Refine further
+        </button>
         <button type="button" className="ghost" onClick={() => onRefineTemplate(candidate)}>
           <RefreshCw size={16} /> Refine
         </button>
@@ -2207,6 +2269,18 @@ function Metric({ label, value }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function WarningChips({ warnings = [], limit = 8, empty = "Clear" }) {
+  const codes = arrayValue(warnings).filter(Boolean).map(String);
+  if (codes.length === 0) {
+    return <span className="muted">{empty}</span>;
+  }
+  return codes.slice(0, limit).map((warning) => (
+    <span className={warningChipClass(warning)} key={warning} title={warningChipTitle(warning)}>
+      {humanWarnings([warning])[0]}
+    </span>
+  ));
 }
 
 function SecretBadge({ status }) {
@@ -2473,6 +2547,21 @@ function trialScanMatchesFilter(trial, filter) {
   }
   const specialist = Boolean(trial.parameters?.regime_scan);
   return filter === "specialist" ? specialist : !specialist;
+}
+
+function bestTrialsByMarket(trials = [], perMarket = 3) {
+  const grouped = new Map();
+  for (const trial of trials) {
+    const marketId = trialMarketId(trial) || "Unknown";
+    const group = grouped.get(marketId) ?? [];
+    if (group.length < perMarket) {
+      group.push(trial);
+      grouped.set(marketId, group);
+    }
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([, group]) => group);
 }
 
 function runQualitySummary(trials = []) {
@@ -2828,7 +2917,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   }
   if (crossMarketDiscovery) {
     stress = Math.max(stress, 2.5);
-    addStep("Keep auto-refine on the source market only");
+    addStep("Keep this refinement on the source market only");
     addStep("Use Find similar elsewhere as a separate discovery run");
   }
   if (costStress) {
@@ -2862,7 +2951,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     : tooFewTrades && includeRegimeScans
     ? "Tests both the broader trade-count repair and the winning-regime specialist path."
     : crossMarketDiscovery
-    ? "Keeps this template on its source market; cross-market results are separate discovery leads."
+    ? "Keeps this template on its source market; other markets are separate discovery leads."
     : "Combines the active blockers into one locked-family repair run.";
   return {
     marketIds,
@@ -2883,8 +2972,8 @@ function earlierDate(current, candidate) {
   return String(current) < String(candidate) ? current : candidate;
 }
 
-function readinessIssues(readiness) {
-  return humanWarnings([...(readiness.blockers ?? []), ...(readiness.validation_warnings ?? [])]);
+function readinessIssueCodes(readiness) {
+  return [...arrayValue(readiness.blockers), ...arrayValue(readiness.validation_warnings)];
 }
 
 function nextActionLabel(action) {
@@ -3034,6 +3123,87 @@ function humanWarnings(warnings = []) {
   };
   return (warnings ?? []).map((warning) => labels[warning] ?? warning);
 }
+
+function warningChipClass(warning) {
+  return `warning-chip ${warningSeverity(warning)}`;
+}
+
+function warningChipTitle(warning) {
+  return {
+    blocker: "Paper promotion blocker: fix this before paper trading.",
+    repair: "Needs repair or stronger evidence before promotion.",
+    specialist: "Specialist identity: acceptable only if the template is explicitly gated to that regime.",
+    info: "Diagnostic warning.",
+  }[warningSeverity(warning)];
+}
+
+function warningSeverity(warning) {
+  const code = String(warning);
+  if (PAPER_BLOCKER_WARNINGS.has(code)) {
+    return "blocker";
+  }
+  if (SPECIALIST_WARNINGS.has(code)) {
+    return "specialist";
+  }
+  if (REPAIR_WARNINGS.has(code)) {
+    return "repair";
+  }
+  return "info";
+}
+
+const PAPER_BLOCKER_WARNINGS = new Set([
+  "below_ig_min_deal_size",
+  "costs_overwhelm_edge",
+  "drawdown_too_high",
+  "historical_daily_loss_stop_breached",
+  "historical_drawdown_too_large",
+  "insufficient_account_for_margin",
+  "legacy_sharpe_diagnostics",
+  "limited_sharpe_sample",
+  "low_oos_trades",
+  "margin_too_large",
+  "missing_cost_profile",
+  "missing_reference_price",
+  "missing_spread_slippage",
+  "needs_ig_price_validation",
+  "negative_after_costs",
+  "negative_expectancy_after_costs",
+  "no_walk_forward_folds",
+  "regime_gated_backtest_negative",
+  "regime_gated_oos_negative",
+  "risk_budget_exceeded",
+  "short_sharpe_sample",
+  "too_few_trades",
+  "weak_oos_economics",
+  "weak_oos_evidence",
+]);
+
+const REPAIR_WARNINGS = new Set([
+  "best_trades_dominate",
+  "calendar_effect_needs_longer_history",
+  "fails_higher_slippage",
+  "funding_eats_swing_edge",
+  "headline_sharpe_not_regime_robust",
+  "high_sharpe_low_trade_count",
+  "high_sharpe_short_sample",
+  "high_sharpe_weak_folds",
+  "insufficient_regime_sample",
+  "isolated_parameter_peak",
+  "known_edge_needs_cross_market_validation",
+  "multiple_testing_haircut",
+  "one_fold_dependency",
+  "profit_concentrated_single_month",
+  "profits_not_consistent_across_folds",
+  "unstable_folds",
+  "weak_net_cost_efficiency",
+]);
+
+const SPECIALIST_WARNINGS = new Set([
+  "fails_normal_volatility_regime",
+  "high_volatility_only_edge",
+  "profit_concentrated_single_regime",
+  "shock_regime_dependency",
+]);
 
 function regimeLabel(value) {
   return {
