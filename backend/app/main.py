@@ -370,7 +370,15 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
                 markets.upsert(resolved_market)
         if provider is not None and resolved_market.ig_epic:
             try:
-                profile = profile_from_ig_market(resolved_market, await provider.market_details(resolved_market.ig_epic), account_currency)
+                market_details = await provider.market_details(resolved_market.ig_epic)
+                profile = profile_from_ig_market(resolved_market, market_details, account_currency)
+                if profile.confidence == "ig_live_epic_rules_no_spread":
+                    try:
+                        recent_price = await provider.recent_price_snapshot(resolved_market.ig_epic)
+                    except Exception:
+                        recent_price = None
+                    if recent_price is not None:
+                        profile = profile_from_ig_market(resolved_market, market_details, account_currency, recent_price=recent_price)
                 if resolution_note:
                     payload = profile.as_dict()
                     payload["notes"] = list(payload.get("notes", [])) + [resolution_note]

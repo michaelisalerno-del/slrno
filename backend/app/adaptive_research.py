@@ -9,7 +9,7 @@ from .bar_patterns import analyze_strategy_patterns, eligible_specialist_regimes
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from .capital import WORKING_ACCOUNT_SIZE_GBP
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_badge
-from .promotion_readiness import LIVE_VALIDATED_COST_CONFIDENCE, MIN_PROMOTION_SHARPE_DAYS
+from .promotion_readiness import LIVE_VALIDATED_COST_CONFIDENCE, MIN_PROMOTION_SHARPE_DAYS, PRICE_VALIDATED_COST_CONFIDENCES
 from .providers.base import OHLCBar
 from .research_lab import CandidateEvaluation, WalkForwardConfig, WalkForwardFold, walk_forward_splits
 from .research_labels import TripleBarrierConfig, triple_barrier_labels
@@ -698,7 +698,7 @@ def _warnings(
         warnings.append("calendar_effect_needs_longer_history")
     if family in CALENDAR_FAMILIES and _positive_fold_rate(folds) < 0.65:
         warnings.append("known_edge_needs_cross_market_validation")
-    if cost_profile.confidence != "ig_live_epic_cost_profile":
+    if cost_profile.confidence not in PRICE_VALIDATED_COST_CONFIDENCES:
         warnings.append("needs_ig_price_validation")
     return warnings
 
@@ -811,7 +811,7 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
     )
     if paper_ready and cost_profile.confidence == LIVE_VALIDATED_COST_CONFIDENCE and stability >= 0.55:
         return "validated_candidate"
-    if paper_ready and cost_profile.confidence == LIVE_VALIDATED_COST_CONFIDENCE:
+    if paper_ready and cost_profile.confidence in PRICE_VALIDATED_COST_CONFIDENCES:
         return "paper_candidate"
     if (
         viable_research_lead

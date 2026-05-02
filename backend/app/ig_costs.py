@@ -63,12 +63,22 @@ def public_ig_cost_profile(market: MarketMapping, account_currency: str = "GBP")
     )
 
 
-def profile_from_ig_market(market: MarketMapping, payload: dict[str, Any], account_currency: str = "GBP") -> IGCostProfile:
+def profile_from_ig_market(
+    market: MarketMapping,
+    payload: dict[str, Any],
+    account_currency: str = "GBP",
+    recent_price: dict[str, object] | None = None,
+) -> IGCostProfile:
     instrument = payload.get("instrument") or {}
     snapshot = payload.get("snapshot") or {}
     dealing_rules = payload.get("dealingRules") or {}
     bid = _optional_float(snapshot.get("bid"))
     offer = _optional_float(snapshot.get("offer") or snapshot.get("ask"))
+    recent_bid = _optional_float((recent_price or {}).get("bid"))
+    recent_offer = _optional_float((recent_price or {}).get("offer"))
+    if (bid is None or offer is None) and recent_bid is not None and recent_offer is not None:
+        bid = recent_bid
+        offer = recent_offer
     spread_points = _spread_points(bid, offer)
     midpoint = _midpoint(bid, offer)
     spread_bps = spread_points / midpoint * 10_000 if spread_points is not None and midpoint else market.spread_bps
@@ -81,8 +91,17 @@ def profile_from_ig_market(market: MarketMapping, payload: dict[str, Any], accou
     currency = _instrument_currency(instrument) or _default_currency(market)
     slippage_bps = max(market.slippage_bps, float(slippage_factor or 0.0))
     notes = ["Fetched from IG /markets/{epic}; spread is based on the latest bid/offer snapshot when present."]
-    if bid is None or offer is None:
+    if recent_bid is not None and recent_offer is not None and (snapshot.get("bid") is None or (snapshot.get("offer") or snapshot.get("ask")) is None):
+        notes.append(
+            "IG market details returned no live bid/offer, so recent IG /prices bid/ask history was used for price validation."
+        )
+        if recent_price and recent_price.get("snapshot_time"):
+            notes.append(f"Recent IG price snapshot time: {recent_price.get('snapshot_time')}.")
+    elif bid is None or offer is None:
         notes.append("IG returned market rules but no usable bid/offer snapshot, so registry spread bps remains in force.")
+    confidence = "ig_live_epic_cost_profile" if snapshot.get("bid") is not None and (snapshot.get("offer") or snapshot.get("ask")) is not None else (
+        "ig_recent_epic_price_profile" if bid is not None and offer is not None else "ig_live_epic_rules_no_spread"
+    )
     return IGCostProfile(
         market_id=market.market_id,
         epic=str(instrument.get("epic") or market.ig_epic),
@@ -106,8 +125,8 @@ def profile_from_ig_market(market: MarketMapping, payload: dict[str, Any], accou
         fx_conversion_bps=80.0,
         market_status=str(snapshot.get("marketStatus") or "unknown"),
         source="ig_markets_epic",
-        confidence="ig_live_epic_cost_profile" if bid is not None and offer is not None else "ig_live_epic_rules_no_spread",
-        validation_status="ig_rules_synced_needs_price_validation",
+        confidence=confidence,
+        validation_status="ig_price_validated" if confidence != "ig_live_epic_rules_no_spread" else "ig_rules_synced_needs_price_validation",
         notes=tuple(notes),
     )
 
@@ -141,6 +160,7 @@ def profile_badge(profile: IGCostProfile | dict[str, object] | None) -> str:
     confidence = profile.confidence if isinstance(profile, IGCostProfile) else str(profile.get("confidence", ""))
     return {
         "ig_live_epic_cost_profile": "IG live EPIC cost profile",
+        "ig_recent_epic_price_profile": "IG recent EPIC price profile",
         "ig_live_epic_rules_no_spread": "IG EPIC rules, public spread fallback",
         "ig_public_spread_baseline": "IG public spread baseline",
         "eodhd_ig_cost_envelope": "EODHD bars with IG cost envelope",

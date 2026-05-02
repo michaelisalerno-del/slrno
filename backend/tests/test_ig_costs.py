@@ -82,3 +82,25 @@ def test_profile_from_ig_market_stores_reference_midpoint():
 
     assert profile.reference_price == 10_001
     assert profile.confidence == "ig_live_epic_cost_profile"
+
+
+def test_profile_from_ig_market_uses_recent_ig_price_when_live_snapshot_missing():
+    market = MarketMapping("NAS100", "Nasdaq 100", "index", "NDX.INDX", "IX.D.NASDAQ.CASH.IP", spread_bps=2.0)
+
+    profile = profile_from_ig_market(
+        market,
+        {
+            "instrument": {"epic": "IX.D.NASDAQ.CASH.IP", "type": "INDICES"},
+            "snapshot": {"marketStatus": "EDITS_ONLY"},
+            "dealingRules": {"minDealSize": {"value": 0.01}},
+        },
+        recent_price={"bid": 27_677.1, "offer": 27_679.1, "snapshot_time": "2026-05-01T20:15:00"},
+    )
+
+    assert profile.bid == 27_677.1
+    assert profile.offer == 27_679.1
+    assert profile.reference_price == 27_678.1
+    assert profile.spread_bps > 0
+    assert profile.confidence == "ig_recent_epic_price_profile"
+    assert profile.validation_status == "ig_price_validated"
+    assert profile_badge(profile) == "IG recent EPIC price profile"

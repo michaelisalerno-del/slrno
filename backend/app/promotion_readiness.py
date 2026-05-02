@@ -8,8 +8,13 @@ from typing import Any
 
 MIN_PROMOTION_SHARPE_DAYS = 120
 LIVE_VALIDATED_COST_CONFIDENCE = "ig_live_epic_cost_profile"
-ACCEPTED_COST_CONFIDENCES = {
+RECENT_VALIDATED_COST_CONFIDENCE = "ig_recent_epic_price_profile"
+PRICE_VALIDATED_COST_CONFIDENCES = {
     LIVE_VALIDATED_COST_CONFIDENCE,
+    RECENT_VALIDATED_COST_CONFIDENCE,
+}
+ACCEPTED_COST_CONFIDENCES = {
+    *PRICE_VALIDATED_COST_CONFIDENCES,
     "ig_live_epic_rules_no_spread",
     "ig_public_spread_baseline",
     "eodhd_ig_cost_envelope",
@@ -87,7 +92,7 @@ def promotion_readiness(
     cost_confidence = _cost_confidence(backtest, parameters)
     if cost_confidence not in ACCEPTED_COST_CONFIDENCES:
         blockers.append("missing_cost_profile")
-    elif cost_confidence != LIVE_VALIDATED_COST_CONFIDENCE:
+    elif cost_confidence not in PRICE_VALIDATED_COST_CONFIDENCES:
         validation_warnings.append("needs_ig_price_validation")
 
     for warning in sorted((COST_BLOCKING_WARNINGS | ROBUSTNESS_BLOCKING_WARNINGS | FRESH_SAMPLE_WARNINGS) & warning_set):
@@ -119,7 +124,7 @@ def promotion_readiness(
             "has_spread_slippage": spread_bps > 0.0 and slippage_bps > 0.0,
             "has_realistic_costs": total_cost > 0.0 if trade_count > 0 else True,
             "cost_confidence": cost_confidence,
-            "ig_price_validated": cost_confidence == LIVE_VALIDATED_COST_CONFIDENCE,
+            "ig_price_validated": cost_confidence in PRICE_VALIDATED_COST_CONFIDENCES,
         },
     }
 
