@@ -98,8 +98,8 @@ const OBJECTIVES = [
 const MODULES = [
   ["cockpit", "Cockpit", Home],
   ["guide", "Guide", BookOpen],
-  ["research", "Research", Sparkles],
   ["backtests", "Backtests", BarChart3],
+  ["research", "Research", Sparkles],
   ["paper", "Paper Trading", LineChart],
   ["broker", "Broker", Wallet],
   ["risk", "Risk", LockKeyhole],
@@ -153,7 +153,7 @@ function App() {
     end: "2026-04-01",
     interval: "market_default",
     search_preset: "balanced",
-    trading_style: "research_ideas",
+    trading_style: "find_anything_robust",
     objective: "profit_first",
     search_budget: "",
     risk_profile: "balanced",
@@ -1236,8 +1236,8 @@ function GuideView({ setActiveModule }) {
   ];
   const modules = [
     ["Cockpit", "The home view for system status, provider health, current mode, and next actions."],
-    ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Backtests", "Run builder, run history, trial cards, regime evidence, repair workflow, archives, and exports."],
+    ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Broker", "Order previews only. Live order placement remains disabled."],
     ["Risk", "Capital scenarios, £3k working account size, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
   ];
