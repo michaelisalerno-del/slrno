@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.adaptive_research import AdaptiveSearchConfig, _cost_aware_score, _generate_signals, _promotion_tier, _warnings, balanced_score, run_adaptive_search
+from app.adaptive_research import AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _generate_signals, _promotion_tier, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import IGCostProfile, public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -75,6 +75,13 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert best.backtest.starting_cash == 2000
     assert best.backtest.compounded_position_sizing is True
     assert best.backtest.cost_to_gross_ratio >= 0
+
+
+def test_adaptive_folds_are_capped_for_large_intraday_histories():
+    folds = _adaptive_folds(162_006)
+
+    assert len(folds) == 36
+    assert folds[0].test_start < folds[-1].test_start
 
 
 def test_balanced_score_prefers_same_profit_with_less_cost_churn():

@@ -738,6 +738,8 @@ def _run_interval_for_market(payload: ResearchRunPayload, market: MarketMapping)
     if _is_eodhd_monthly_commodity(market):
         return "1month"
     if not requested or requested == "market_default":
+        if market.asset_class == "forex":
+            return "1hour"
         if market.asset_class == "commodity" and market.default_timeframe in {"1min", "1m", "5min", "5m", "15min", "15m", "30min", "30m", "1hour", "1h"}:
             return "1day"
         return market.default_timeframe

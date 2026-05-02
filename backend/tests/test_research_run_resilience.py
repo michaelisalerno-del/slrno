@@ -70,6 +70,7 @@ def test_market_default_interval_uses_each_market_timeframe(tmp_path, monkeypatc
     store = ResearchStore(tmp_path / "research.sqlite3")
     registry = MarketRegistry(tmp_path / "markets.sqlite3")
     registry.upsert(_market("OK", "OK.INDX"))
+    registry.upsert(MarketMapping("EURUSD", "EUR/USD", "forex", "EURUSD.FOREX", "", True, "", "EUR/USD", "EURUSD", "5min", 1.2, 0.8, 2))
     registry.upsert(MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD.FOREX", "", True, "", "Spot Gold", "Gold", "5min", 3.0, 1.5, 2))
     registry.upsert(MarketMapping("COPPER", "Copper", "commodity", "COMMODITY:COPPER", "", True, "", "Copper", "Copper", "1day", 4.0, 2.0, 2))
     calls: list[tuple[str, str, str]] = []
@@ -89,15 +90,15 @@ def test_market_default_interval_uses_each_market_timeframe(tmp_path, monkeypatc
 
     monkeypatch.setattr(main, "EODHDProvider", lambda _token: CaptureProvider())
     monkeypatch.setattr(main, "run_adaptive_search", lambda *args, **kwargs: SimpleNamespace(evaluations=[_evaluation("accepted")], regime_scan={}))
-    payload = main.ResearchRunPayload(start="2025-01-01", end="2026-04-01", market_ids=["OK", "XAUUSD", "COPPER"], interval="market_default", search_budget=2)
-    run_id = store.create_run("MULTI", main._research_run_config(payload, [registry.get("OK"), registry.get("XAUUSD"), registry.get("COPPER")]), status="running")
+    payload = main.ResearchRunPayload(start="2025-01-01", end="2026-04-01", market_ids=["OK", "EURUSD", "XAUUSD", "COPPER"], interval="market_default", search_budget=2)
+    run_id = store.create_run("MULTI", main._research_run_config(payload, [registry.get("OK"), registry.get("EURUSD"), registry.get("XAUUSD"), registry.get("COPPER")]), status="running")
 
     asyncio.run(main._execute_research_run(run_id, payload, "token"))
 
-    assert calls == [("OK.INDX", "5min", "2025-01-01"), ("XAUUSD.FOREX", "1day", "2025-01-01"), ("COMMODITY:COPPER", "1month", "2020-04-01")]
+    assert calls == [("OK.INDX", "5min", "2025-01-01"), ("EURUSD.FOREX", "1hour", "2025-01-01"), ("XAUUSD.FOREX", "1day", "2025-01-01"), ("COMMODITY:COPPER", "1month", "2020-04-01")]
     statuses = store.get_run(run_id)["config"]["market_statuses"]
-    assert [item["interval"] for item in statuses] == ["5min", "1day", "1month"]
-    assert statuses[2]["history_expanded"] is True
+    assert [item["interval"] for item in statuses] == ["5min", "1hour", "1day", "1month"]
+    assert statuses[3]["history_expanded"] is True
 
 
 def test_daily_market_default_uses_daily_minimum_bar_floor():

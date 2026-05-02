@@ -138,7 +138,7 @@ function App() {
     ig_epic: "",
     ig_name: "GBP/USD",
     ig_search_terms: "GBP/USD,GBPUSD",
-    default_timeframe: "5min",
+    default_timeframe: "1hour",
     spread_bps: 1.4,
     slippage_bps: 0.9,
     min_backtest_bars: 750,

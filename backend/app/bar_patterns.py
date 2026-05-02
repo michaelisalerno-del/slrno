@@ -31,6 +31,15 @@ class DailyRegime:
 
 def analyze_market_regimes(bars: list[OHLCBar]) -> dict[str, object]:
     days = _daily_regimes(bars)
+    return _market_regime_payload(bars, days)
+
+
+def market_regime_context(bars: list[OHLCBar]) -> tuple[dict[str, object], dict[date, str]]:
+    days = _daily_regimes(bars)
+    return _market_regime_payload(bars, days), {day.date: day.regime for day in days}
+
+
+def _market_regime_payload(bars: list[OHLCBar], days: list[DailyRegime]) -> dict[str, object]:
     regime_counts = Counter(day.regime for day in days)
     return {
         "schema": "market_regime_v1",
@@ -50,11 +59,13 @@ def analyze_strategy_patterns(
     config: BacktestConfig,
     backtest: BacktestResult,
     target_regime: str | None = None,
+    market_regime: dict[str, object] | None = None,
+    regime_by_date: dict[date, str] | None = None,
 ) -> dict[str, object]:
     if len(bars) != len(signals):
         raise ValueError("bars and signals must have the same length")
-    market_regime = analyze_market_regimes(bars)
-    regime_by_date = _regime_by_date(bars)
+    if market_regime is None or regime_by_date is None:
+        market_regime, regime_by_date = market_regime_context(bars)
     pnl_rows = _pnl_rows(bars, signals, config, regime_by_date)
     trades = _trade_ledger(bars, pnl_rows)
     monthly_summary = _group_summary(pnl_rows, "month", config.train_fraction)
@@ -108,11 +119,13 @@ def gate_signals_to_regimes(
     bars: list[OHLCBar],
     signals: list[int],
     allowed_regimes: set[str] | list[str] | tuple[str, ...],
+    regime_by_date: dict[date, str] | None = None,
 ) -> list[int]:
     if len(bars) != len(signals):
         raise ValueError("bars and signals must have the same length")
     allowed = {str(regime) for regime in allowed_regimes if regime}
-    regime_by_date = _regime_by_date(bars)
+    if regime_by_date is None:
+        regime_by_date = _regime_by_date(bars)
     return [
         signal if index + 1 < len(bars) and regime_by_date.get(bars[index + 1].timestamp.date(), "unknown") in allowed else 0
         for index, signal in enumerate(signals)
