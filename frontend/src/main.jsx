@@ -49,8 +49,8 @@ import {
 } from "./api";
 import "./styles.css";
 
-const WORKING_ACCOUNT_SIZE = 2000;
-const WORKING_ACCOUNT_LABEL = "£2k";
+const WORKING_ACCOUNT_SIZE = 3000;
+const WORKING_ACCOUNT_LABEL = "£3k";
 
 const FALLBACK_ENGINES = [
   {
@@ -1239,21 +1239,21 @@ function GuideView({ setActiveModule }) {
     ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Backtests", "Run builder, run history, trial cards, regime evidence, repair workflow, archives, and exports."],
     ["Broker", "Order previews only. Live order placement remains disabled."],
-    ["Risk", "Capital scenarios, £2k working account size, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
+    ["Risk", "Capital scenarios, £3k working account size, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
   ];
   const metrics = [
     ["Net", "Profit after spread, slippage, funding, FX, and other modelled costs."],
     ["Daily Sharpe", "Annualized daily Sharpe. Useful, but only after sample size and robustness checks."],
     ["Days", "Daily observations used for Sharpe. Promotion normally needs at least 120."],
     ["DSR", "Deflated Sharpe probability, adjusted for repeated scans."],
-    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £2,000 working account scenario. If blocked, the tile names the first sizing/risk reason."],
+    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £3,000 working account scenario. If blocked, the tile names the first sizing/risk reason."],
     ["End balance", "Projected account balance after compounding from the selected account size."],
     ["Return", "Projected percentage return for that account scenario."],
     ["OOS net", "Walk-forward out-of-sample net profit after costs."],
     ["Fold win", "Share of walk-forward folds that made money."],
     ["Fold share", "How much positive fold profit came from the best fold. High values mean fragility."],
-    ["Gated net", "Profit after forcing the strategy flat outside allowed regimes."],
-    ["Gated OOS", "Out-of-sample profit after the regime gate is applied."],
+    ["Gated net", "Profit after forcing the strategy flat outside allowed regimes. In target-regime refinements this is labelled Target net because the whole run is already gated."],
+    ["Gated OOS", "Out-of-sample profit after the regime gate is applied. In target-regime refinements this can match the run OOS by design."],
     ["Cost/gross", "How much gross edge is consumed by trading friction."],
     ["Net/cost", "How much net profit remains for each pound of cost."],
     ["Warning colours", "Red blocks paper promotion, orange needs repair, blue is a specialist/regime identity, and grey is diagnostic."],
@@ -1275,7 +1275,7 @@ function GuideView({ setActiveModule }) {
     "Enough trades and enough walk-forward evidence.",
     "No one fold, month, or rare regime carries the whole result.",
     "Regime-gated retest remains positive.",
-    "£2,000 capital scenario is feasible under margin, stop, and drawdown checks.",
+    "£3,000 capital scenario is feasible under margin, stop, and drawdown checks.",
     "Live trading remains locked; good candidates go to paper/demo review first.",
   ];
   return (
@@ -1392,7 +1392,7 @@ function GuideView({ setActiveModule }) {
       <section className="lab-section">
         <h3>Simple Decision Rule</h3>
         <p className="guide-rule">
-          Prefer candidates with positive out-of-sample net profit after realistic costs, feasible £2,000 sizing,
+          Prefer candidates with positive out-of-sample net profit after realistic costs, feasible £3,000 sizing,
           enough trades, fresh Sharpe days, stable folds, tolerable drawdown, and regime evidence that survives the
           gated retest. Treat headline Sharpe as supporting evidence, not permission to trade.
         </p>
@@ -1976,8 +1976,8 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
         <Metric label="Costs" value={formatMoney(backtest.total_cost)} />
         <Metric label="Expectancy" value={formatMoney(backtest.expectancy_per_trade)} />
         <Metric label="Net/cost" value={formatRatio(backtest.net_cost_ratio)} />
-        <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
-        <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <Metric label={gatedMetricLabel(pattern, "Gated net", "Target net")} value={formatMoney(gated.net_profit)} />
+        <Metric label={gatedMetricLabel(pattern, "Gated OOS", "Target OOS")} value={formatMoney(gated.test_profit)} />
         <RegimeEvidenceMetrics pattern={pattern} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
@@ -2144,8 +2144,8 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther }) {
         <Metric label="Costs" value={formatMoney(candidate.audit?.backtest?.total_cost)} />
         <Metric label="Expectancy" value={formatMoney(candidate.audit?.backtest?.expectancy_per_trade)} />
         <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
-        <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
-        <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <Metric label={gatedMetricLabel(pattern, "Gated net", "Target net")} value={formatMoney(gated.net_profit)} />
+        <Metric label={gatedMetricLabel(pattern, "Gated OOS", "Target OOS")} value={formatMoney(gated.test_profit)} />
         <RegimeEvidenceMetrics pattern={pattern} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
@@ -3229,6 +3229,10 @@ function regimeVerdictLabel(value) {
     research_only: "Research only",
     unavailable: "Unavailable",
   }[value] ?? value ?? "n/a";
+}
+
+function gatedMetricLabel(pattern = {}, fallback, targeted) {
+  return pattern?.target_regime ? targeted : fallback;
 }
 
 function regimeCountsLabel(counts = {}) {
