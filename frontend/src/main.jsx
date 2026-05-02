@@ -863,6 +863,12 @@ function App() {
                             <span className="badge muted-badge">{autoRefinementPlan.marketIds.length} market{autoRefinementPlan.marketIds.length === 1 ? "" : "s"}</span>
                           </div>
                         </div>
+                        {autoRefinementPlan.targetRegime && (
+                          <div className="auto-refine-target">
+                            <strong>Auto-refine target: {regimeLabel(autoRefinementPlan.targetRegime)} only</strong>
+                            <span>Trades outside {regimeLabel(autoRefinementPlan.targetRegime)} are forced flat. The search is scored on the selected regime, with full-history gated evidence kept for context.</span>
+                          </div>
+                        )}
                         <div className="auto-refine-steps">
                           {autoRefinementPlan.steps.map((step) => (
                             <span key={step}>{step}</span>
@@ -2567,22 +2573,7 @@ function regimeRefineTarget(template) {
     return specific;
   }
   const pattern = template?.pattern ?? {};
-  const dominant = String(pattern.dominant_profit_regime?.key || "").trim();
-  const share = Number(pattern.dominant_profit_regime?.positive_profit_share ?? 0);
-  const warnings = new Set(template?.warnings ?? []);
-  const verdict = pattern.regime_verdict;
-  if (
-    dominant &&
-    (share >= 0.5 ||
-      ["headline_only", "regime_specific", "thin_regime_sample"].includes(verdict) ||
-      warnings.has("profit_concentrated_single_regime") ||
-      warnings.has("headline_sharpe_not_regime_robust") ||
-      warnings.has("high_volatility_only_edge") ||
-      warnings.has("shock_regime_dependency"))
-  ) {
-    return dominant;
-  }
-  return "";
+  return String(pattern.dominant_profit_regime?.key || "").trim();
 }
 
 function repairActionsForTemplate(template) {
@@ -2752,10 +2743,14 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   let start = researchRun.start;
   let stress = 2.0;
   let includeRegimeScans = false;
-  let runTargetRegime = templateSpecificRegime(template);
+  let runTargetRegime = targetRegime;
   let regimeScanBudget = "";
   const excludedMonths = [];
 
+  if (runTargetRegime) {
+    addStep(`Auto-refine target: ${regimeLabel(runTargetRegime)} only`);
+    addStep(`Force flat outside ${regimeLabel(runTargetRegime)}`);
+  }
   if (syncCosts) {
     addStep("Refresh IG costs, spread, slippage, margin, and minimum stake");
   }
@@ -2800,7 +2795,6 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     marketIds = allMarketIds;
     budget = Math.max(budget, 120);
     stress = Math.max(stress, 2.5);
-    runTargetRegime = "";
     addStep("Cross-check the locked family across enabled markets");
     addStep("Use each market default candle timeframe");
   }
