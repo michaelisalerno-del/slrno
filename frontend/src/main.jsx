@@ -166,6 +166,7 @@ function App() {
     repair_mode: "standard",
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready.", progress: 0 });
+  const activePollRunIdRef = React.useRef(null);
 
   const eodhdStatus = providerStatus(status, "eodhd");
   const igStatus = providerStatus(status, "ig");
@@ -205,6 +206,7 @@ function App() {
         setEngines((summary.engines ?? []).length ? summary.engines : FALLBACK_ENGINES);
         setSpreadBetEngines(summary.spread_bet_engines ?? []);
         setResearchRuns(summary.runs ?? []);
+        resumeLatestActiveRun(summary.runs ?? []);
       } else if (moduleId === "paper") {
         setPaper(await getPaperSummary());
       } else if (moduleId === "broker") {
@@ -309,6 +311,49 @@ function App() {
     await launchResearchRun(researchRun, activeMarketIds);
   }
 
+  async function loadRunDetail(runId, resumeActive = true) {
+    const detail = await getResearchRun(runId);
+    const plannedTrials = plannedTrialsForRun(detail);
+    setRunDetail(detail);
+    setResearchState(researchStateFromRun(detail, plannedTrials));
+    if (resumeActive && isActiveRun(detail) && activePollRunIdRef.current !== detail.id) {
+      resumePollingRun(detail, plannedTrials);
+    }
+    return detail;
+  }
+
+  function resumeLatestActiveRun(runs = []) {
+    const activeRun = runs.find((run) => isActiveRun(run));
+    if (!activeRun || activePollRunIdRef.current === activeRun.id) {
+      return;
+    }
+    loadRunDetail(activeRun.id).catch((error) => setMessage(error.message));
+  }
+
+  function resumePollingRun(detail, plannedTrials = plannedTrialsForRun(detail)) {
+    const runId = detail.id;
+    activePollRunIdRef.current = runId;
+    setActiveTab("results");
+    setResearchState(researchStateFromRun(detail, plannedTrials));
+    pollResearchRun(runId, plannedTrials)
+      .then(async (finishedDetail) => {
+        setResearchState(researchStateFromRun(finishedDetail, plannedTrials));
+        if (!isActiveRun(finishedDetail)) {
+          setMessage(runCompletionMessage(runId, finishedDetail));
+        }
+        const summary = await getBacktestsSummary(includeArchivedRuns).catch(() => null);
+        if (summary) {
+          setResearchRuns(summary.runs ?? []);
+        }
+      })
+      .catch((error) => setMessage(error.message))
+      .finally(() => {
+        if (activePollRunIdRef.current === runId) {
+          activePollRunIdRef.current = null;
+        }
+      });
+  }
+
   async function launchResearchRun(runConfig = researchRun, marketIdsOverride = activeMarketIds, launchMessage = "Launching adaptive IG-aware search...") {
     const market_ids = marketIdsOverride.length ? marketIdsOverride : [runConfig.market_id];
     const preset = SEARCH_PRESETS.find((item) => item.id === runConfig.search_preset) ?? selectedPreset;
@@ -338,6 +383,7 @@ function App() {
       setActiveTab("results");
       setMessage(`Run ${result.run_id} started: ${budget} base trials per market${regimeScanNote}.`);
       const detail = await pollResearchRun(result.run_id, plannedTrials);
+      activePollRunIdRef.current = null;
       setResearchState({
         status: detail.status,
         detail: runStateDetail(detail, plannedTrials),
@@ -984,7 +1030,7 @@ function App() {
               <ResultsView
                 runDetail={runDetail}
                 researchRuns={researchRuns}
-                loadRun={async (id) => setRunDetail(await getResearchRun(id))}
+                loadRun={loadRunDetail}
                 deleteRun={deleteRun}
                 archiveRun={archiveRun}
                 archiveRuns={archiveRuns}
@@ -2141,6 +2187,27 @@ function SecretBadge({ status }) {
 
 function providerStatus(statuses, provider) {
   return statuses.find((item) => item.provider === provider);
+}
+
+function isActiveRun(run) {
+  return ["created", "running"].includes(run?.status);
+}
+
+function researchStateFromRun(detail, plannedTrials = plannedTrialsForRun(detail)) {
+  return {
+    status: isActiveRun(detail) ? "running" : detail?.status || "idle",
+    detail: runStateDetail(detail, plannedTrials),
+    progress: runProgress(detail, plannedTrials),
+  };
+}
+
+function plannedTrialsForRun(detail) {
+  const config = detail?.config ?? {};
+  const preset = SEARCH_PRESETS.find((item) => item.id === config.search_preset) ?? SEARCH_PRESETS[1];
+  const budget = Number(config.search_budget || preset?.budget || 0);
+  const marketIds = Array.isArray(config.market_ids) ? config.market_ids.filter(Boolean) : [];
+  const marketCount = Math.max(1, marketIds.length || (detail?.market_id && detail.market_id !== "MULTI" ? 1 : 0));
+  return Math.max(1, budget) * marketCount;
 }
 
 function runProgress(detail, plannedTrials = 0) {
