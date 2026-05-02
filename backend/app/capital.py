@@ -15,6 +15,11 @@ class CapitalScenario:
     account_size: float
     risk_budget: float
     daily_loss_limit: float
+    compounding_enabled: bool
+    source_starting_cash: float
+    projected_final_balance: float
+    projected_net_profit: float
+    projected_return_pct: float
     requested_stake: float
     effective_stake: float
     min_deal_size: float
@@ -31,6 +36,11 @@ class CapitalScenario:
             "account_size": self.account_size,
             "risk_budget": self.risk_budget,
             "daily_loss_limit": self.daily_loss_limit,
+            "compounding_enabled": self.compounding_enabled,
+            "source_starting_cash": self.source_starting_cash,
+            "projected_final_balance": self.projected_final_balance,
+            "projected_net_profit": self.projected_net_profit,
+            "projected_return_pct": self.projected_return_pct,
             "requested_stake": self.requested_stake,
             "effective_stake": self.effective_stake,
             "min_deal_size": self.min_deal_size,
@@ -61,13 +71,32 @@ def capital_scenarios(
     stop_points = price * stop_bps / 10_000
     estimated_stop_loss = abs(stop_points * effective_stake)
     estimated_margin = abs(price * effective_stake * margin_percent / 100)
-    historical_max_drawdown = _positive_float(backtest.get("max_drawdown"), 0.0)
-    worst_daily_loss = _worst_daily_loss(backtest.get("daily_pnl_curve"))
+    source_starting_cash = _positive_float(backtest.get("starting_cash"), 0.0)
+    compounding_enabled = bool(backtest.get("compounded_position_sizing"))
+    net_profit = _float(backtest.get("net_profit"), 0.0)
+    return_pct = _float(
+        backtest.get("return_pct"),
+        (net_profit / source_starting_cash) * 100 if source_starting_cash > 0 else 0.0,
+    )
+    source_max_drawdown = _positive_float(backtest.get("max_drawdown"), 0.0)
+    source_worst_daily_loss = _worst_daily_loss(backtest.get("daily_pnl_curve"))
 
     output: list[dict[str, object]] = []
     for account_size in CAPITAL_SCENARIOS_GBP:
         risk_budget = account_size * RISK_PER_TRADE_FRACTION
         daily_loss_limit = account_size * DAILY_LOSS_FRACTION
+        projected_net_profit = account_size * return_pct / 100 if compounding_enabled and source_starting_cash > 0 else net_profit
+        projected_final_balance = account_size + projected_net_profit
+        historical_max_drawdown = (
+            account_size * source_max_drawdown / source_starting_cash
+            if compounding_enabled and source_starting_cash > 0
+            else source_max_drawdown
+        )
+        worst_daily_loss = (
+            account_size * source_worst_daily_loss / source_starting_cash
+            if compounding_enabled and source_starting_cash > 0
+            else source_worst_daily_loss
+        )
         violations: list[str] = []
         if not has_reference_price:
             violations.append("missing_reference_price")
@@ -88,6 +117,11 @@ def capital_scenarios(
                 account_size=account_size,
                 risk_budget=round(risk_budget, 4),
                 daily_loss_limit=round(daily_loss_limit, 4),
+                compounding_enabled=compounding_enabled,
+                source_starting_cash=round(source_starting_cash, 4),
+                projected_final_balance=round(projected_final_balance, 4),
+                projected_net_profit=round(projected_net_profit, 4),
+                projected_return_pct=round(return_pct, 4) if compounding_enabled and source_starting_cash > 0 else round((projected_net_profit / account_size) * 100, 4),
                 requested_stake=round(requested_stake, 6),
                 effective_stake=round(effective_stake, 6),
                 min_deal_size=round(min_deal_size, 6),
@@ -122,6 +156,15 @@ def _positive_float(*values: object) -> float:
             continue
         if number > 0:
             return number
+    return 0.0
+
+
+def _float(*values: object) -> float:
+    for value in values:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            continue
     return 0.0
 
 

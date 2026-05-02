@@ -1184,7 +1184,7 @@ function GuideView({ setActiveModule }) {
     ["1", "Connect providers", "Use Settings for EODHD bars and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
-    ["4", "Read evidence first", "Focus on net profit after costs, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
+    ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
     ["5", "Use Auto-refine", "Click Refine on a trial or candidate, then run the Auto-refine plan so the app combines the required repairs."],
     ["6", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
     ["7", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, and regime gates are clear."],
@@ -1194,7 +1194,7 @@ function GuideView({ setActiveModule }) {
     ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Backtests", "Run builder, run history, trial cards, regime evidence, repair workflow, archives, and exports."],
     ["Broker", "Order previews only. Live order placement remains disabled."],
-    ["Risk", "Capital scenarios, £2k working account size, 1% planned risk, and 5% daily loss envelope."],
+    ["Risk", "Capital scenarios, £2k working account size, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
   ];
   const metrics = [
     ["Net", "Profit after spread, slippage, funding, FX, and other modelled costs."],
@@ -1202,6 +1202,8 @@ function GuideView({ setActiveModule }) {
     ["Days", "Daily observations used for Sharpe. Promotion normally needs at least 120."],
     ["DSR", "Deflated Sharpe probability, adjusted for repeated scans."],
     [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £2,000 working account scenario."],
+    ["End balance", "Projected account balance after compounding from the selected account size."],
+    ["Return", "Projected percentage return for that account scenario."],
     ["OOS net", "Walk-forward out-of-sample net profit after costs."],
     ["Fold win", "Share of walk-forward folds that made money."],
     ["Fold share", "How much positive fold profit came from the best fold. High values mean fragility."],
@@ -1861,6 +1863,7 @@ function TrialCard({ trial, onRefineTemplate }) {
   const backtest = trial.backtest ?? {};
   const warnings = humanWarnings(trial.warnings);
   const capital = accountFeasibility(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
+  const accountScenario = accountScenarioFor(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(trial);
@@ -1892,6 +1895,8 @@ function TrialCard({ trial, onRefineTemplate }) {
       </div>
       <div className="trial-metrics">
         <Metric label={`${WORKING_ACCOUNT_LABEL} fit`} value={capital} />
+        <Metric label="End balance" value={formatMoney(accountScenario?.projected_final_balance)} />
+        <Metric label="Return" value={`${round(accountScenario?.projected_return_pct)}%`} />
         <Metric label="Daily Sharpe" value={round(backtest.daily_pnl_sharpe)} />
         <Metric label="Days" value={backtest.sharpe_observations ?? 0} />
         <Metric label="DSR" value={percent(trial.parameters?.sharpe_diagnostics?.deflated_sharpe_probability)} />
@@ -2019,6 +2024,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssues(readiness);
   const capital = accountFeasibility(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
+  const accountScenario = accountScenarioFor(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(candidate);
@@ -2050,6 +2056,8 @@ function CandidateCard({ candidate, onRefineTemplate }) {
       </div>
       <div className="mini-metrics">
         <Metric label={`${WORKING_ACCOUNT_LABEL} fit`} value={capital} />
+        <Metric label="End balance" value={formatMoney(accountScenario?.projected_final_balance)} />
+        <Metric label="Return" value={`${round(accountScenario?.projected_return_pct)}%`} />
         <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
         <Metric label="Sharpe days" value={candidate.audit?.backtest?.sharpe_observations ?? 0} />
         <Metric label="Bar Sharpe" value={round(candidate.audit?.backtest?.sharpe)} />
@@ -2879,11 +2887,15 @@ function repairModeLabel(value) {
 }
 
 function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
-  const scenario = (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
+  const scenario = accountScenarioFor(scenarios, accountSize);
   if (!scenario) {
     return "Unknown";
   }
   return scenario.feasible ? "OK" : "Blocked";
+}
+
+function accountScenarioFor(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
+  return (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
 }
 
 function optionalNumber(value) {

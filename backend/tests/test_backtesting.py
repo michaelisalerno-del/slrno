@@ -61,6 +61,33 @@ def test_intraday_sharpe_reports_annualization_context():
     assert "2 daily PnL observations" in result.sharpe_annualization_note
 
 
+def test_compound_position_sizing_scales_new_entries_with_equity():
+    start = datetime(2026, 1, 1, 9)
+    closes = [100, 110, 110, 120]
+    bars = [
+        OHLCBar("TEST", start + timedelta(hours=index), close, close, close, close)
+        for index, close in enumerate(closes)
+    ]
+    signals = [1, 0, 1, 0]
+
+    fixed = run_vector_backtest(
+        bars,
+        signals,
+        BacktestConfig(starting_cash=100, position_size=1, spread_bps=0, slippage_bps=0),
+    )
+    compounded = run_vector_backtest(
+        bars,
+        signals,
+        BacktestConfig(starting_cash=100, position_size=1, compound_position_size=True, spread_bps=0, slippage_bps=0),
+    )
+
+    assert fixed.net_profit == 20
+    assert compounded.net_profit == 21
+    assert compounded.final_equity == 121
+    assert compounded.compounded_position_sizing is True
+    assert compounded.max_effective_position_size == 1.1
+
+
 def test_vector_backtest_validates_input_lengths():
     bar = OHLCBar("TEST", datetime(2026, 1, 1), 1, 1, 1, 1)
 

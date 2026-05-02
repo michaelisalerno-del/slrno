@@ -7,6 +7,7 @@ from random import Random
 
 from .bar_patterns import analyze_strategy_patterns, eligible_specialist_regimes, gate_signals_to_regimes
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
+from .capital import WORKING_ACCOUNT_SIZE_GBP
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_badge
 from .promotion_readiness import LIVE_VALIDATED_COST_CONFIDENCE, MIN_PROMOTION_SHARPE_DAYS
 from .providers.base import OHLCBar
@@ -107,7 +108,11 @@ def run_adaptive_search(
     families = config.strategy_families or STYLE_FAMILIES.get(config.trading_style, STYLE_FAMILIES["find_anything_robust"])
     rng = Random(_stable_seed(market_id, timeframe, config.seed, config.trading_style))
     labels = triple_barrier_labels(bars, TripleBarrierConfig())
-    backtest_base = backtest_config_from_profile(cost_profile)
+    backtest_base = backtest_config_from_profile(
+        cost_profile,
+        starting_cash=WORKING_ACCOUNT_SIZE_GBP,
+        compound_position_size=True,
+    )
     folds = _adaptive_folds(len(bars))
     evaluations: list[CandidateEvaluation] = []
     eligible_regimes = eligible_specialist_regimes(bars)
