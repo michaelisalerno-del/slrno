@@ -18,6 +18,7 @@ from .capital import (
     WORKING_ACCOUNT_SIZE_GBP,
     capital_scenarios,
     capital_summary,
+    scenario_account_sizes,
 )
 from .config import allowed_origins
 from .evidence_export import build_research_export_zip
@@ -112,6 +113,7 @@ class ResearchRunPayload(BaseModel):
     target_regime: str | None = None
     excluded_months: list[str] = Field(default_factory=list)
     repair_mode: str = "standard"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -637,6 +639,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         regime_scan_budget_per_regime=payload.regime_scan_budget_per_regime,
                         target_regime=payload.target_regime,
                         repair_mode=payload.repair_mode,
+                        account_size=payload.account_size,
                     ),
                 )
                 market_evaluations = list(result.evaluations)
@@ -957,6 +960,7 @@ def _research_run_config(
         "target_regime": payload.target_regime,
         "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
         "repair_mode": payload.repair_mode,
+        "account_size": payload.account_size,
         "product_mode": payload.product_mode,
         "research_only": True,
         "ig_validation_required": True,
@@ -1012,7 +1016,7 @@ def _trial_with_capital(trial: dict[str, object]) -> dict[str, object]:
     backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
     market_id = str(parameters.get("market_id") or "")
     profile = research_store.get_cost_profile(market_id) if market_id else None
-    scenarios = capital_scenarios(backtest, parameters, profile)
+    scenarios = capital_scenarios(backtest, parameters, profile, account_sizes=_scenario_sizes_for_parameters(parameters))
     return {**trial, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
 
 
@@ -1023,8 +1027,13 @@ def _candidate_with_capital(candidate: dict[str, object]) -> dict[str, object]:
     backtest = audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
     market_id = str(candidate.get("market_id") or parameters.get("market_id") or "")
     profile = research_store.get_cost_profile(market_id) if market_id else None
-    scenarios = capital_scenarios(backtest, parameters, profile)
+    scenarios = capital_scenarios(backtest, parameters, profile, account_sizes=_scenario_sizes_for_parameters(parameters))
     return {**candidate, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
+
+
+def _scenario_sizes_for_parameters(parameters: dict[str, object]) -> tuple[float, ...]:
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    return scenario_account_sizes(parameters.get("testing_account_size") or search_audit.get("testing_account_size"))
 
 
 def _candidate_summary_payload(candidate: dict[str, object]) -> dict[str, object]:
@@ -1104,6 +1113,7 @@ def _paper_track_candidates(limit: int = 50) -> list[dict[str, object]]:
                 "current_regime": (pattern.get("market_regime") or {}).get("current_regime") if isinstance(pattern.get("market_regime"), dict) else None,
                 "dominant_profit_regime": (pattern.get("dominant_profit_regime") or {}).get("key") if isinstance(pattern.get("dominant_profit_regime"), dict) else None,
                 "capital_summary": candidate.get("capital_summary"),
+                "testing_account_size": _testing_account_size(parameters),
                 "next_action": readiness.get("next_action"),
             }
         )
@@ -1125,10 +1135,21 @@ def _candidate_queue_summary(candidates: list[dict[str, object]]) -> dict[str, i
             summary["blocked"] += 1
         if any(warning in blockers for warning in ("legacy_sharpe_diagnostics", "missing_cost_profile", "missing_spread_slippage", "short_sharpe_sample", "limited_sharpe_sample")):
             summary["needs_fresh_run"] += 1
+        candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+        parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+        testing_account = _testing_account_size(parameters)
         capital = candidate.get("capital_summary") if isinstance(candidate.get("capital_summary"), dict) else {}
-        if WORKING_ACCOUNT_SIZE_GBP in (capital.get("blocked_accounts") or []):
+        if testing_account in (capital.get("blocked_accounts") or []):
             summary["capital_infeasible"] += 1
     return summary
+
+
+def _testing_account_size(parameters: dict[str, object]) -> float:
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    try:
+        return float(parameters.get("testing_account_size") or search_audit.get("testing_account_size") or WORKING_ACCOUNT_SIZE_GBP)
+    except (TypeError, ValueError):
+        return WORKING_ACCOUNT_SIZE_GBP
 
 
 def _cockpit_next_actions(runs: list[dict[str, object]]) -> list[dict[str, str]]:

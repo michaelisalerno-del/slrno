@@ -50,7 +50,6 @@ import {
 import "./styles.css";
 
 const WORKING_ACCOUNT_SIZE = 3000;
-const WORKING_ACCOUNT_LABEL = "£3k";
 
 const FALLBACK_ENGINES = [
   {
@@ -166,6 +165,7 @@ function App() {
     target_regime: "",
     excluded_months: [],
     repair_mode: "standard",
+    account_size: String(WORKING_ACCOUNT_SIZE),
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready.", progress: 0 });
   const activePollRunIdRef = React.useRef(null);
@@ -364,13 +364,14 @@ function App() {
     const budget = manualBudget ? Number(runConfig.search_budget) : preset.budget;
     const effectiveBudget = effectiveSearchBudget(preset.id, budget, market_ids.length, manualBudget);
     const plannedTrials = effectiveBudget * market_ids.length;
+    const testingCapital = optionalNumber(runConfig.account_size) ?? WORKING_ACCOUNT_SIZE;
     const regimeScanNote = runConfig.include_regime_scans ? " plus capped regime-specialist scans" : "";
     const targetRegimeNote = runConfig.target_regime ? `, ${regimeLabel(runConfig.target_regime)} only` : "";
     const speedNote = effectiveBudget < budget ? " (auto-capped for multi-market speed)" : "";
     setMessage(launchMessage);
     setResearchState({
       status: "running",
-      detail: `${engine.label}: ${effectiveBudget} strategy trials per market, ${plannedTrials} base total${speedNote}${regimeScanNote}${targetRegimeNote}.`,
+      detail: `${engine.label}: ${effectiveBudget} strategy trials per market, ${plannedTrials} base total${speedNote}${regimeScanNote}${targetRegimeNote}, graded on ${accountSizeLabel(testingCapital)}.`,
       progress: 2,
     });
     try {
@@ -383,6 +384,7 @@ function App() {
         target_regime: runConfig.target_regime || null,
         excluded_months: uniqueMonths(runConfig.excluded_months),
         repair_mode: runConfig.repair_mode || "standard",
+        account_size: testingCapital,
         product_mode: "spread_bet",
       });
       setActiveTab("results");
@@ -579,6 +581,20 @@ function App() {
         repairMode: "evidence_first",
         label: "Evidence-first retest staged with a smaller locked search and stricter fold ranking.",
       },
+      capital_fit: {
+        marketIds: selectedMarket,
+        budget: "120",
+        stress: 2.5,
+        start: earlierDate(researchRun.start, "2024-01-01"),
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
+        repairMode: "capital_fit",
+        objective: "balanced",
+        riskProfile: "conservative",
+        accountSize: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
+        label: `Capital-fit retest staged for ${accountSizeLabel(optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE)} with smaller stakes, stops, and stricter drawdown ranking.`,
+      },
       more_trades: {
         marketIds: selectedMarket,
         budget: "120",
@@ -667,8 +683,8 @@ function App() {
       start: presetConfig.start,
       end: presetConfig.end,
       trading_style: refinementTemplate.style,
-      objective: "profit_first",
-      risk_profile: refinementTemplate.risk_profile,
+      objective: presetConfig.objective ?? "profit_first",
+      risk_profile: presetConfig.riskProfile ?? refinementTemplate.risk_profile,
       search_preset: presetConfig.budget === "120" ? "deep" : "balanced",
       search_budget: presetConfig.budget,
       strategy_families: family,
@@ -678,6 +694,7 @@ function App() {
       target_regime: presetConfig.targetRegime || "",
       excluded_months: presetConfig.excludedMonths ?? [],
       repair_mode: presetConfig.repairMode ?? "standard",
+      account_size: presetConfig.accountSize ?? current.account_size,
     }));
     setMessage(presetConfig.label);
   }
@@ -949,6 +966,7 @@ function App() {
                     </div>
                     <div className="button-row robustness-actions">
                       <button type="button" className="secondary" onClick={() => applyRobustnessPreset("focused")}><RefreshCw size={16} /> Same market</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("capital_fit")}>Capital fit</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("evidence_first")}>Evidence first</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("higher_costs")}>Higher costs</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Find similar elsewhere</button>
@@ -1013,6 +1031,16 @@ function App() {
                     <option value="balanced">Balanced</option>
                     <option value="aggressive">Aggressive</option>
                   </select>
+                  <label>Testing capital (£)</label>
+                  <input
+                    value={researchRun.account_size}
+                    onChange={(event) => setResearchRun({ ...researchRun, account_size: event.target.value })}
+                    type="number"
+                    min="100"
+                    max="1000000"
+                    step="50"
+                    placeholder={String(WORKING_ACCOUNT_SIZE)}
+                  />
                   <label>Cost stress</label>
                   <input value={researchRun.cost_stress_multiplier} onChange={(event) => setResearchRun({ ...researchRun, cost_stress_multiplier: Number(event.target.value) })} type="number" min="1" max="5" step="0.25" />
                   <label className="checkbox-line">
@@ -1244,14 +1272,15 @@ function GuideView({ setActiveModule }) {
     ["Backtests", "Run builder, run history, trial cards, regime evidence, repair workflow, archives, and exports."],
     ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Broker", "Order previews only. Live order placement remains disabled."],
-    ["Risk", "Capital scenarios, £3k working account size, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
+    ["Risk", "Capital scenarios, selected testing capital, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
   ];
   const metrics = [
     ["Net", "Profit after spread, slippage, funding, FX, and other modelled costs."],
     ["Daily Sharpe", "Annualized daily Sharpe. Useful, but only after sample size and robustness checks."],
     ["Days", "Daily observations used for Sharpe. Promotion normally needs at least 120."],
     ["DSR", "Deflated Sharpe probability, adjusted for repeated scans."],
-    [`${WORKING_ACCOUNT_LABEL} fit`, "Whether the candidate is feasible for the current £3,000 working account scenario. If blocked, the tile names the first sizing/risk reason."],
+    ["Testing capital fit", "Whether the candidate is feasible for the account size selected in the run. If blocked, the tile names the first sizing/risk reason."],
+    ["Paper score", "A stricter score that weights capital fit, OOS trades, OOS profit, fold stability, cost stress, and Sharpe sample size before headline profit."],
     ["End balance", "Projected account balance after compounding from the selected account size."],
     ["Return", "Projected percentage return for that account scenario."],
     ["OOS net", "Walk-forward out-of-sample net profit after costs."],
@@ -1270,6 +1299,7 @@ function GuideView({ setActiveModule }) {
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
     ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
     ["Missing IG validation", "Use Refine further or Sync costs, then rerun. Do not promote stale or generic cost evidence."],
+    ["Capital fit blocked", "Use Capital fit. It reruns the same market and family with conservative sizing, smaller stops, and ranking weighted toward the selected account size."],
     ["Multiple-testing haircut", "Use Evidence first for this template. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
     ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
   ];
@@ -1280,7 +1310,7 @@ function GuideView({ setActiveModule }) {
     "Enough trades and enough walk-forward evidence.",
     "No one fold, month, or rare regime carries the whole result.",
     "Regime-gated retest remains positive.",
-    "£3,000 capital scenario is feasible under margin, stop, and drawdown checks.",
+    "Selected testing capital scenario is feasible under margin, stop, and drawdown checks.",
     "Live trading remains locked; good candidates go to paper/demo review first.",
   ];
   return (
@@ -1397,7 +1427,7 @@ function GuideView({ setActiveModule }) {
       <section className="lab-section">
         <h3>Simple Decision Rule</h3>
         <p className="guide-rule">
-          Prefer candidates with positive out-of-sample net profit after realistic costs, feasible £3,000 sizing,
+          Prefer candidates with positive out-of-sample net profit after realistic costs, feasible selected-account sizing,
           enough trades, fresh Sharpe days, stable folds, tolerable drawdown, and regime evidence that survives the
           gated retest. Treat headline Sharpe as supporting evidence, not permission to trade.
         </p>
@@ -1435,7 +1465,7 @@ function PaperView({ summary }) {
               <Metric label="Allowed" value={(candidate.allowed_regimes ?? []).map(regimeLabel).join(" / ") || "n/a"} />
               <Metric label="Blocked" value={(candidate.blocked_regimes ?? []).map(regimeLabel).join(" / ") || "none"} />
               <Metric label="Best regime" value={regimeLabel(candidate.dominant_profit_regime)} />
-              <Metric label={WORKING_ACCOUNT_LABEL} value={(candidate.capital_summary?.feasible_accounts ?? []).includes(WORKING_ACCOUNT_SIZE) ? "OK" : "Blocked"} />
+              <Metric label={accountSizeLabel(candidate.testing_account_size)} value={(candidate.capital_summary?.feasible_accounts ?? []).includes(Number(candidate.testing_account_size ?? WORKING_ACCOUNT_SIZE)) ? "OK" : "Blocked"} />
             </div>
           </div>
         ))}
@@ -1620,7 +1650,8 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
   const filteredTrials = trials
     .filter((trial) => tierMatchesFilter(trial.promotion_tier, trialTierFilter))
     .filter((trial) => trialScanMatchesFilter(trial, trialScanFilter));
-  const rankedTrials = trialMarketView === "market_best" ? bestTrialsByMarket(filteredTrials, 3) : filteredTrials;
+  const displayRankedTrials = sortTrialsForDisplay(filteredTrials);
+  const rankedTrials = trialMarketView === "market_best" ? bestTrialsByMarket(displayRankedTrials, 3) : displayRankedTrials;
   const visibleRuns = showAllRuns ? researchRuns : researchRuns.slice(0, 18);
   const selectedRuns = researchRuns.filter((run) => selectedRunIds.includes(run.id));
   const visibleDeletableRuns = visibleRuns.filter((run) => !["created", "running"].includes(run.status));
@@ -1935,14 +1966,17 @@ function RegimeEvidenceMetrics({ pattern }) {
 
 function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
   const backtest = trial.backtest ?? {};
-  const capital = accountFeasibility(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
-  const accountScenario = accountScenarioFor(trial.capital_scenarios, WORKING_ACCOUNT_SIZE);
+  const accountSize = testingAccountSizeForSource(trial);
+  const accountLabel = accountSizeLabel(accountSize);
+  const capital = accountFeasibility(trial.capital_scenarios, accountSize);
+  const accountScenario = accountScenarioFor(trial.capital_scenarios, accountSize);
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(trial);
   const marketId = trialMarketId(trial);
   const interval = trialIntervalLabel(trial);
-  const scoreBasis = scoreBasisLabel(trial.parameters?.search_audit);
+  const searchAudit = trial.parameters?.search_audit ?? {};
+  const scoreBasis = scoreBasisLabel(searchAudit);
   const discoveryLabel = discoveryBadgeLabel(trial.parameters?.search_audit);
   return (
     <article className="trial-card">
@@ -1972,7 +2006,9 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
         </div>
       </div>
       <div className="trial-metrics">
-        <Metric label={`${WORKING_ACCOUNT_LABEL} fit`} value={capital} />
+        <Metric label="Paper score" value={round(searchAudit.paper_readiness_score)} />
+        <Metric label={`${accountLabel} score`} value={percent(searchAudit.working_capital_score)} />
+        <Metric label={`${accountLabel} fit`} value={capital} />
         <Metric label="End balance" value={formatMoney(accountScenario?.projected_final_balance)} />
         <Metric label="Return" value={`${round(accountScenario?.projected_return_pct)}%`} />
         <Metric label="Daily Sharpe" value={round(backtest.daily_pnl_sharpe)} />
@@ -2101,12 +2137,15 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
 function CandidateCard({ candidate, onRefineTemplate, onRefineFurther }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssueCodes(readiness);
-  const capital = accountFeasibility(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
-  const accountScenario = accountScenarioFor(candidate.capital_scenarios, WORKING_ACCOUNT_SIZE);
+  const accountSize = testingAccountSizeForSource(candidate);
+  const accountLabel = accountSizeLabel(accountSize);
+  const capital = accountFeasibility(candidate.capital_scenarios, accountSize);
+  const accountScenario = accountScenarioFor(candidate.capital_scenarios, accountSize);
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(candidate);
-  const scoreBasis = scoreBasisLabel(candidate.audit?.candidate?.parameters?.search_audit);
+  const searchAudit = candidate.audit?.candidate?.parameters?.search_audit ?? {};
+  const scoreBasis = scoreBasisLabel(searchAudit);
   const discoveryLabel = discoveryBadgeLabel(candidate.audit?.candidate?.parameters?.search_audit);
   return (
     <div className="candidate-card">
@@ -2138,7 +2177,9 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther }) {
         </button>
       </div>
       <div className="mini-metrics">
-        <Metric label={`${WORKING_ACCOUNT_LABEL} fit`} value={capital} />
+        <Metric label="Paper score" value={round(searchAudit.paper_readiness_score)} />
+        <Metric label={`${accountLabel} score`} value={percent(searchAudit.working_capital_score)} />
+        <Metric label={`${accountLabel} fit`} value={capital} />
         <Metric label="End balance" value={formatMoney(accountScenario?.projected_final_balance)} />
         <Metric label="Return" value={`${round(accountScenario?.projected_return_pct)}%`} />
         <Metric label="Daily Sharpe (ann.)" value={round(candidate.audit?.backtest?.daily_pnl_sharpe)} />
@@ -2558,6 +2599,22 @@ function trialScanMatchesFilter(trial, filter) {
   return filter === "specialist" ? specialist : !specialist;
 }
 
+function sortTrialsForDisplay(trials = []) {
+  return [...trials].sort((left, right) => trialDisplayScore(right) - trialDisplayScore(left));
+}
+
+function trialDisplayScore(trial = {}) {
+  const audit = trial.parameters?.search_audit ?? {};
+  const capitalFeasible = audit.working_capital_feasible ? 1 : 0;
+  const paperScore = Number(audit.paper_readiness_score ?? 0);
+  const capitalScore = Number(audit.working_capital_score ?? 0) * 100;
+  const evidence = evidenceProfileForSource(trial);
+  const oosTrades = Math.min(18, Number(evidence.oos_trade_count ?? 0));
+  const oosNet = Number(evidence.oos_net_profit ?? 0) > 0 ? 1 : 0;
+  const tierScore = { validated_candidate: 400, paper_candidate: 350, research_candidate: 250, watchlist: 150, reject: 0 }[trial.promotion_tier] ?? 0;
+  return tierScore + capitalFeasible * 120 + paperScore * 2 + capitalScore + oosTrades * 2 + oosNet * 20 + Number(trial.robustness_score ?? 0);
+}
+
 function bestTrialsByMarket(trials = [], perMarket = 3) {
   const grouped = new Map();
   for (const trial of trials) {
@@ -2732,6 +2789,16 @@ function repairActionsForTemplate(template) {
       primary: true,
     });
   }
+  if (hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high")) {
+    add({
+      id: "capital-fit",
+      preset: "capital_fit",
+      title: "Fix capital fit",
+      detail: "Rerun this market and family with smaller stakes, tighter stops, and ranking weighted toward the selected account size.",
+      button: "Capital fit",
+      primary: actions.length === 0,
+    });
+  }
   if (hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "target_regime_low_oos_trades", "calendar_effect_needs_longer_history")) {
     add({
       id: "more-trades",
@@ -2870,11 +2937,15 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const crossMarketDiscovery = crossMarket && discoveryMarketCount > 0;
   const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
   const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
+  const capitalBlocked = hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high");
 
   let marketIds = selectedMarket;
   let budget = 54;
   let start = researchRun.start;
   let stress = 2.0;
+  let objective = "profit_first";
+  let riskProfile = template.risk_profile;
+  let repairMode = "auto_refine";
   let includeRegimeScans = false;
   let runTargetRegime = targetRegime;
   let regimeScanBudget = "";
@@ -2887,9 +2958,19 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   if (syncCosts) {
     addStep("Refresh IG costs, spread, slippage, margin, and minimum stake");
   }
+  if (capitalBlocked) {
+    budget = 120;
+    stress = Math.max(stress, 2.5);
+    start = earlierDate(start, "2024-01-01");
+    objective = "balanced";
+    riskProfile = "conservative";
+    repairMode = "capital_fit";
+    addStep(`Rank by ${accountSizeLabel(optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE)} capital fit first`);
+    addStep("Search smaller stakes and tighter stops before profit");
+  }
   if (tooFewTrades) {
     budget = 120;
-    start = earlierDate(researchRun.start, "2024-01-01");
+    start = earlierDate(start, "2024-01-01");
     addStep("Deep locked-family retest over longer history");
     if (targetRegime) {
       runTargetRegime = targetRegime;
@@ -2943,8 +3024,8 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     start,
     end: researchRun.end,
     trading_style: template.style,
-    objective: "profit_first",
-    risk_profile: template.risk_profile,
+    objective,
+    risk_profile: riskProfile,
     search_preset: budget >= 120 ? "deep" : "balanced",
     search_budget: String(budget),
     strategy_families: family,
@@ -2953,7 +3034,8 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     regime_scan_budget_per_regime: regimeScanBudget,
     target_regime: runTargetRegime,
     excluded_months: uniqueMonths(excludedMonths),
-    repair_mode: "auto_refine",
+    repair_mode: repairMode,
+    account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
   };
   const summary = runTargetRegime
     ? `Regime-specific refine: results are scored inside ${regimeLabel(runTargetRegime)} with full-history gated evidence kept alongside.`
@@ -3000,6 +3082,7 @@ function repairModeLabel(value) {
     standard: "Standard search",
     focused_retest: "Focused retest",
     evidence_first: "Evidence first",
+    capital_fit: "Capital fit",
     more_trades: "More trades",
     cost_stress: "Cost stress",
     cross_market: "Cross-market",
@@ -3030,6 +3113,23 @@ function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) 
 
 function accountScenarioFor(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
   return (scenarios ?? []).find((item) => Number(item.account_size) === Number(accountSize));
+}
+
+function testingAccountSizeForSource(source = {}) {
+  const parameters = source.parameters ?? source.audit?.candidate?.parameters ?? {};
+  const searchAudit = parameters.search_audit ?? {};
+  return optionalNumber(parameters.testing_account_size) || optionalNumber(searchAudit.testing_account_size) || WORKING_ACCOUNT_SIZE;
+}
+
+function accountSizeLabel(value) {
+  const number = Number(value ?? WORKING_ACCOUNT_SIZE);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "£3k";
+  }
+  if (number >= 1000 && number % 1000 === 0) {
+    return `£${number / 1000}k`;
+  }
+  return formatMoney(number);
 }
 
 function capitalBlockReasons(scenario = {}) {
@@ -3117,9 +3217,12 @@ function humanWarnings(warnings = []) {
     shock_regime_dependency: "Shock-regime dependency",
     target_regime_low_oos_trades: "Target-regime low OOS trades",
     below_ig_min_deal_size: "Below IG min stake",
+    historical_daily_loss_stop_breached: "Daily loss stop breached",
+    historical_drawdown_too_large: "Historical drawdown too large",
     risk_budget_exceeded: "Risk budget exceeded",
     margin_too_large: "Margin too large",
     insufficient_account_for_margin: "Insufficient margin",
+    missing_reference_price: "Missing reference price",
     stop_required_for_risk_preview: "Stop required",
     stop_not_below_entry: "Stop must be below entry",
     stop_not_above_entry: "Stop must be above entry",
@@ -3264,10 +3367,14 @@ function regimeCountsLabel(counts = {}) {
 }
 
 function scoreBasisLabel(audit = {}) {
+  const parts = [];
   if (audit?.grade_mode === "target_regime" && audit.grade_regime) {
-    return `graded on ${regimeLabel(audit.grade_regime)}`;
+    parts.push(`graded on ${regimeLabel(audit.grade_regime)}`);
   }
-  return "";
+  if (audit?.testing_account_size) {
+    parts.push(`${accountSizeLabel(audit.testing_account_size)} paper score`);
+  }
+  return parts.join(" · ");
 }
 
 function discoveryBadgeLabel(audit = {}) {

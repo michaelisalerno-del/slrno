@@ -7,7 +7,7 @@ import json
 from datetime import UTC, date, datetime, time
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from .capital import capital_scenarios, capital_summary
+from .capital import capital_scenarios, capital_summary, scenario_account_sizes
 from .market_data_cache import MarketDataCache
 from .providers.base import OHLCBar
 from .providers.eodhd import EODHDProvider, _bar_from_row
@@ -283,7 +283,7 @@ def _trial_export(trial: dict[str, object], cost_profiles: dict[str, dict[str, o
     parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
     backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
     market_id = str(parameters.get("market_id") or "")
-    scenarios = capital_scenarios(backtest, parameters, cost_profiles.get(market_id))
+    scenarios = capital_scenarios(backtest, parameters, cost_profiles.get(market_id), account_sizes=_scenario_sizes_for_parameters(parameters))
     return {**trial, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
 
 
@@ -293,8 +293,13 @@ def _candidate_export(candidate: dict[str, object], cost_profiles: dict[str, dic
     parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
     backtest = audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
     market_id = str(candidate.get("market_id") or parameters.get("market_id") or "")
-    scenarios = capital_scenarios(backtest, parameters, cost_profiles.get(market_id))
+    scenarios = capital_scenarios(backtest, parameters, cost_profiles.get(market_id), account_sizes=_scenario_sizes_for_parameters(parameters))
     return {**candidate, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
+
+
+def _scenario_sizes_for_parameters(parameters: dict[str, object]) -> tuple[float, ...]:
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    return scenario_account_sizes(parameters.get("testing_account_size") or search_audit.get("testing_account_size"))
 
 
 def _cost_profiles_for_run(

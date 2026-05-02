@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from math import erf, log, sqrt
 from random import Random
 
 from .bar_patterns import analyze_strategy_patterns, eligible_specialist_regimes, gate_signals_to_regimes, market_regime_context
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
-from .capital import WORKING_ACCOUNT_SIZE_GBP
+from .capital import (
+    MAX_HISTORICAL_DRAWDOWN_FRACTION,
+    MAX_MARGIN_FRACTION,
+    WORKING_ACCOUNT_SIZE_GBP,
+    capital_scenarios,
+    scenario_account_sizes,
+)
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_badge
 from .promotion_readiness import LIVE_VALIDATED_COST_CONFIDENCE, MIN_PROMOTION_SHARPE_DAYS, PRICE_VALIDATED_COST_CONFIDENCES
 from .providers.base import OHLCBar
@@ -79,6 +85,7 @@ class AdaptiveSearchConfig:
     regime_scan_budget_per_regime: int | None = None
     target_regime: str | None = None
     repair_mode: str = "standard"
+    account_size: float = WORKING_ACCOUNT_SIZE_GBP
     seed: int = 7
 
 
@@ -106,12 +113,13 @@ def run_adaptive_search(
         raise ValueError("adaptive search needs at least 40 bars")
     budget = config.search_budget or SEARCH_PRESETS.get(config.preset, SEARCH_PRESETS["balanced"])
     budget = max(6, min(500, budget))
+    account_size = _account_size(config.account_size)
     families = config.strategy_families or STYLE_FAMILIES.get(config.trading_style, STYLE_FAMILIES["find_anything_robust"])
     rng = Random(_stable_seed(market_id, timeframe, config.seed, config.trading_style))
     labels = triple_barrier_labels(bars, TripleBarrierConfig())
     backtest_base = backtest_config_from_profile(
         cost_profile,
-        starting_cash=WORKING_ACCOUNT_SIZE_GBP,
+        starting_cash=account_size,
         compound_position_size=False,
     )
     folds = _adaptive_folds(len(bars))
@@ -174,6 +182,7 @@ def run_adaptive_search(
             "stress_net_profit": round(stress.net_profit, 4),
             "stress_sharpe": round(stress.sharpe, 4),
             "repair_mode": config.repair_mode,
+            "testing_account_size": account_size,
             "evidence_profile": evidence_profile,
             "bar_pattern_analysis": pattern_analysis,
         }
@@ -266,6 +275,7 @@ def run_adaptive_search(
                     "stress_net_profit": round(stress.net_profit, 4),
                     "stress_sharpe": round(stress.sharpe, 4),
                     "repair_mode": config.repair_mode,
+                    "testing_account_size": account_size,
                     "evidence_profile": evidence_profile,
                     "bar_pattern_analysis": pattern_analysis,
                 }
@@ -346,6 +356,16 @@ def _target_regime(value: str | None) -> str | None:
     return text or None
 
 
+def _account_size(value: object) -> float:
+    try:
+        number = float(value or 0.0)
+    except (TypeError, ValueError):
+        return WORKING_ACCOUNT_SIZE_GBP
+    if number <= 0:
+        return WORKING_ACCOUNT_SIZE_GBP
+    return round(max(100.0, min(1_000_000.0, number)), 2)
+
+
 def _latest_reference_price(bars: list[OHLCBar]) -> float:
     for bar in reversed(bars):
         if bar.close > 0:
@@ -354,7 +374,11 @@ def _latest_reference_price(bars: list[OHLCBar]) -> float:
 
 
 def _trade_count_repair_mode(repair_mode: str) -> bool:
-    return repair_mode in {"auto_refine", "more_trades", "longer_history"}
+    return repair_mode in {"auto_refine", "more_trades", "longer_history", "capital_fit"}
+
+
+def _capital_fit_repair_mode(repair_mode: str) -> bool:
+    return repair_mode == "capital_fit"
 
 
 def _sample_parameters(
@@ -365,6 +389,7 @@ def _sample_parameters(
     repair_mode: str = "standard",
     target_regime: str | None = None,
 ) -> dict[str, float | int | str]:
+    capital_repair = _capital_fit_repair_mode(repair_mode)
     trade_repair = _trade_count_repair_mode(repair_mode) and bool(target_regime)
     lookbacks = {
         "scalping": (3, 5, 8, 12) if not trade_repair else (2, 3, 5, 8),
@@ -379,24 +404,31 @@ def _sample_parameters(
     }.get(family, (12, 24, 36))
     direction = "long_only" if family in CALENDAR_FAMILIES else ("long_only", "short_only", "long_short")[trial_index % 3]
     risk_scale = {"conservative": 0.7, "balanced": 1.0, "aggressive": 1.35}.get(risk_profile, 1.0)
+    if capital_repair:
+        risk_scale = min(risk_scale, 0.55)
+    stop_choices = (8, 12, 18, 25, 35, 50) if capital_repair else (18, 25, 35, 50, 75, 110)
+    take_profit_choices = (12, 18, 25, 35, 55, 80) if capital_repair else (20, 35, 55, 80, 130, 180)
+    position_choices = (0.1, 0.2, 0.35, 0.5, 0.75, 1.0) if capital_repair else (0.5, 1.0, 1.5, 2.0)
     parameters: dict[str, float | int | str] = {
         "lookback": rng.choice(lookbacks),
-        "threshold_bps": round(rng.choice(_threshold_choices(family, trade_repair)) * risk_scale, 2),
+        "threshold_bps": round(rng.choice(_threshold_choices(family, trade_repair or capital_repair)) * risk_scale, 2),
         "z_threshold": round(rng.uniform(0.65, 2.2), 3),
         "volatility_multiplier": round(rng.uniform(1.1, 2.8), 3),
-        "stop_loss_bps": round(rng.choice((18, 25, 35, 50, 75, 110)) * risk_scale, 2),
-        "take_profit_bps": round(rng.choice((20, 35, 55, 80, 130, 180)) * risk_scale, 2),
-        "max_hold_bars": rng.choice(_max_hold_choices(family, trade_repair)),
+        "stop_loss_bps": round(rng.choice(stop_choices) * risk_scale, 2),
+        "take_profit_bps": round(rng.choice(take_profit_choices) * risk_scale, 2),
+        "max_hold_bars": rng.choice(_max_hold_choices(family, trade_repair or capital_repair)),
         "min_hold_bars": rng.choice((1, 2, 3, 5) if trade_repair else ((3, 5, 8, 12) if family in CALENDAR_FAMILIES else (2, 3, 5, 8))),
-        "min_trade_spacing": rng.choice(_spacing_choices(family, trade_repair)),
+        "min_trade_spacing": rng.choice(_spacing_choices(family, trade_repair or capital_repair)),
         "confidence_quantile": 1.0 if family in CALENDAR_FAMILIES else rng.choice((0.3, 0.4, 0.55, 0.7, 1.0) if trade_repair else (0.1, 0.15, 0.2, 0.25, 0.3, 0.4)),
         "regime_filter": rng.choice(("any", "any", "trend", "volatile") if trade_repair else ("any", "trend", "volatile", "calm")),
         "false_breakout_filter": rng.choice((0, 1)),
-        "position_size": round(rng.choice((0.5, 1.0, 1.5, 2.0)) * risk_scale, 2),
+        "position_size": round(rng.choice(position_choices) * risk_scale, 2),
         "direction": direction,
     }
     if trade_repair:
         parameters["repair_profile"] = "target_regime_more_oos_trades"
+    if capital_repair:
+        parameters["repair_profile"] = "capital_fit"
     if family == "calendar_turnaround_tuesday":
         parameters.update(
             {
@@ -710,13 +742,21 @@ def _annotate_evaluations(
     config: AdaptiveSearchConfig,
     cost_profile: IGCostProfile,
 ) -> tuple[CandidateEvaluation, ...]:
-    prepared: list[tuple[CandidateEvaluation, float, dict[str, object]]] = []
+    account_size = _account_size(config.account_size)
+    prepared: list[tuple[CandidateEvaluation, float, dict[str, object], dict[str, object]]] = []
     for evaluation in evaluations:
         stability = _parameter_stability_score(evaluation, evaluations)
         diagnostics = _sharpe_diagnostics(evaluation.backtest, evaluation.fold_results, trial_count, stability)
-        tier = _promotion_tier(evaluation, stability, cost_profile)
-        score = _cost_aware_score(evaluation, diagnostics, stability, config)
-        warnings = tuple(sorted(set(evaluation.warnings).union(diagnostics["implausibility_flags"])))
+        capital_profile = _working_capital_profile(evaluation, cost_profile, account_size)
+        tier = _promotion_tier(evaluation, stability, cost_profile, capital_profile)
+        score = _cost_aware_score(evaluation, diagnostics, stability, config, capital_profile)
+        warnings = tuple(
+            sorted(
+                set(evaluation.warnings)
+                .union(diagnostics["implausibility_flags"])
+                .union(_capital_warning_codes(capital_profile))
+            )
+        )
         prepared.append(
             (
                 replace(
@@ -728,11 +768,12 @@ def _annotate_evaluations(
                 ),
                 stability,
                 diagnostics,
+                capital_profile,
             )
         )
-    ranked = tuple(sorted(prepared, key=lambda item: _trial_ranking_key(item[0], item[1], item[2]), reverse=True))
+    ranked = tuple(sorted(prepared, key=lambda item: _trial_ranking_key(item[0], item[1], item[2], item[3]), reverse=True))
     output: list[CandidateEvaluation] = []
-    for rank, (evaluation, stability, diagnostics) in enumerate(ranked, start=1):
+    for rank, (evaluation, stability, diagnostics, capital_profile) in enumerate(ranked, start=1):
         tier = evaluation.promotion_tier
         grade = _grade_profile(evaluation)
         parameters = {
@@ -746,6 +787,7 @@ def _annotate_evaluations(
                 "trading_style": config.trading_style,
                 "objective": config.objective,
                 "risk_profile": config.risk_profile,
+                "repair_mode": config.repair_mode,
                 "regime_scan_enabled": config.include_regime_scans,
                 "regime_scan": bool(evaluation.candidate.parameters.get("regime_scan")),
                 "target_regime": evaluation.candidate.parameters.get("target_regime"),
@@ -756,6 +798,18 @@ def _annotate_evaluations(
                 "graded_daily_pnl_sharpe": round(float(grade.get("daily_pnl_sharpe") or 0.0), 4),
                 "graded_sharpe_days": int(float(grade.get("sharpe_days") or 0.0)),
                 "graded_trade_count": int(float(grade.get("trade_count") or 0.0)),
+                "testing_account_size": account_size,
+                "working_capital_feasible": bool(capital_profile.get("feasible")),
+                "working_capital_score": round(float(capital_profile.get("score") or 0.0), 4),
+                "paper_readiness_score": round(float(capital_profile.get("paper_readiness_score") or 0.0), 4),
+                "working_capital_account_size": capital_profile.get("account_size"),
+                "working_capital_violations": list(capital_profile.get("violations") or []),
+                "working_capital_projected_final_balance": capital_profile.get("projected_final_balance"),
+                "working_capital_projected_net_profit": capital_profile.get("projected_net_profit"),
+                "working_capital_estimated_stop_loss": capital_profile.get("estimated_stop_loss"),
+                "working_capital_estimated_margin": capital_profile.get("estimated_margin"),
+                "working_capital_historical_drawdown": capital_profile.get("historical_max_drawdown"),
+                "working_capital_worst_daily_loss": capital_profile.get("worst_daily_loss"),
             },
             "parameter_stability_score": stability,
             "sharpe_diagnostics": diagnostics,
@@ -769,7 +823,105 @@ def _annotate_evaluations(
     return tuple(output)
 
 
-def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_profile: IGCostProfile) -> str:
+def _working_capital_profile(
+    evaluation: CandidateEvaluation,
+    cost_profile: IGCostProfile,
+    account_size: float,
+) -> dict[str, object]:
+    scenarios = capital_scenarios(
+        asdict(evaluation.backtest),
+        evaluation.candidate.parameters,
+        asdict(cost_profile),
+        account_sizes=scenario_account_sizes(account_size),
+    )
+    scenario = next((item for item in scenarios if float(item.get("account_size") or 0.0) == float(account_size)), scenarios[0] if scenarios else {})
+    score = _capital_fit_score(scenario)
+    return {
+        **scenario,
+        "score": score,
+        "paper_readiness_score": _paper_readiness_score(evaluation, score),
+    }
+
+
+def _capital_fit_score(scenario: dict[str, object]) -> float:
+    if not scenario:
+        return 0.0
+    account_size = _safe_float(scenario.get("account_size"))
+    risk_budget = _safe_float(scenario.get("risk_budget"))
+    daily_limit = _safe_float(scenario.get("daily_loss_limit"))
+    margin_limit = account_size * MAX_MARGIN_FRACTION
+    drawdown_limit = account_size * MAX_HISTORICAL_DRAWDOWN_FRACTION
+    risk_score = _limit_score(_safe_float(scenario.get("estimated_stop_loss")), risk_budget)
+    margin_score = _limit_score(_safe_float(scenario.get("estimated_margin")), margin_limit)
+    drawdown_score = _limit_score(_safe_float(scenario.get("historical_max_drawdown")), drawdown_limit)
+    daily_score = _limit_score(_safe_float(scenario.get("worst_daily_loss")), daily_limit)
+    execution_score = 1.0
+    violations = set(str(item) for item in scenario.get("violations", []) if item)
+    if "missing_reference_price" in violations:
+        execution_score = min(execution_score, 0.2)
+    if "below_ig_min_deal_size" in violations:
+        execution_score = min(execution_score, 0.45)
+    if "insufficient_account_for_margin" in violations:
+        margin_score = min(margin_score, 0.2)
+    score = (
+        0.28 * risk_score
+        + 0.24 * drawdown_score
+        + 0.18 * daily_score
+        + 0.18 * margin_score
+        + 0.12 * execution_score
+    )
+    return round(_clamp(score, 0.0, 1.0), 6)
+
+
+def _limit_score(value: float, limit: float) -> float:
+    if limit <= 0:
+        return 0.0
+    if value <= 0:
+        return 1.0
+    return _clamp(limit / max(limit, value), 0.0, 1.0)
+
+
+def _paper_readiness_score(evaluation: CandidateEvaluation, capital_score: float) -> float:
+    backtest = evaluation.backtest
+    evidence = evaluation.candidate.parameters.get("evidence_profile")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    grade = _grade_profile(evaluation)
+    oos_trade_component = _clamp(_safe_float(evidence.get("oos_trade_count")) / 18.0, 0.0, 1.0)
+    oos_net_component = 1.0 if _safe_float(evidence.get("oos_net_profit")) > 0 else 0.0
+    fold_component = _positive_fold_rate(evaluation.fold_results) * (1.0 - _profit_concentration(evaluation.fold_results))
+    stress_component = 1.0 if _safe_float(evaluation.candidate.parameters.get("stress_net_profit")) > 0 else 0.0
+    cost_component = _clamp(_safe_float(grade.get("net_cost_ratio")), 0.0, 1.0)
+    sharpe_component = _clamp(min(backtest.sharpe_observations / MIN_PROMOTION_SHARPE_DAYS, max(0.0, backtest.daily_pnl_sharpe) / 2.0), 0.0, 1.0)
+    return round(
+        100
+        * (
+            0.34 * _clamp(capital_score, 0.0, 1.0)
+            + 0.18 * oos_trade_component
+            + 0.12 * oos_net_component
+            + 0.14 * _clamp(fold_component, 0.0, 1.0)
+            + 0.10 * stress_component
+            + 0.07 * cost_component
+            + 0.05 * sharpe_component
+        ),
+        4,
+    )
+
+
+def _capital_warning_codes(capital_profile: dict[str, object]) -> tuple[str, ...]:
+    return tuple(str(item) for item in capital_profile.get("violations", []) if item)
+
+
+def _promotion_tier(
+    evaluation: CandidateEvaluation,
+    stability: float,
+    cost_profile: IGCostProfile,
+    capital_profile: dict[str, object] | None = None,
+) -> str:
+    capital_profile = capital_profile or {
+        "account_size": WORKING_ACCOUNT_SIZE_GBP,
+        "feasible": True,
+        "paper_readiness_score": 100.0,
+    }
     backtest = evaluation.backtest
     stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
     fold_rate = _positive_fold_rate(evaluation.fold_results)
@@ -804,10 +956,12 @@ def _promotion_tier(evaluation: CandidateEvaluation, stability: float, cost_prof
         and stress_net_profit > 0
         and backtest.trade_count >= 18
         and fold_rate >= 0.55
-        and backtest.max_drawdown <= 3_500
+        and backtest.max_drawdown <= _safe_float(capital_profile.get("account_size")) * MAX_HISTORICAL_DRAWDOWN_FRACTION
         and cost_robust
         and stability >= 0.35
         and fresh_costed_evidence
+        and bool(capital_profile.get("feasible"))
+        and _safe_float(capital_profile.get("paper_readiness_score")) >= 72.0
     )
     if paper_ready and cost_profile.confidence == LIVE_VALIDATED_COST_CONFIDENCE and stability >= 0.55:
         return "validated_candidate"
@@ -827,7 +981,14 @@ def _cost_aware_score(
     diagnostics: dict[str, object],
     stability: float,
     config: AdaptiveSearchConfig,
+    capital_profile: dict[str, object] | None = None,
 ) -> float:
+    capital_profile = capital_profile or {
+        "account_size": _account_size(config.account_size),
+        "feasible": True,
+        "score": 1.0,
+        "paper_readiness_score": 100.0,
+    }
     backtest = evaluation.backtest
     grade = _grade_profile(evaluation)
     stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
@@ -845,7 +1006,11 @@ def _cost_aware_score(
     expectancy_component = _grade_expectancy_efficiency(grade)
     fold_component = _positive_fold_rate(evaluation.fold_results)
     concentration_penalty = _profit_concentration(evaluation.fold_results)
-    drawdown_component = 1.0 - _clamp(grade_drawdown / 3_500.0, 0.0, 1.0)
+    account_size = _safe_float(capital_profile.get("account_size")) or _account_size(config.account_size)
+    drawdown_limit = max(1.0, account_size * MAX_HISTORICAL_DRAWDOWN_FRACTION)
+    drawdown_component = 1.0 - _clamp(grade_drawdown / drawdown_limit, 0.0, 1.0)
+    capital_component = _clamp(_safe_float(capital_profile.get("score")), 0.0, 1.0)
+    paper_component = _clamp(_safe_float(capital_profile.get("paper_readiness_score")) / 100.0, 0.0, 1.0)
     churn_penalty = _grade_churn_penalty(grade, backtest)
     if config.objective == "profit_first":
         profit_weight, sharpe_weight = 0.36, 0.10
@@ -854,23 +1019,33 @@ def _cost_aware_score(
     else:
         profit_weight, sharpe_weight = 0.30, 0.16
     evidence_mode = config.repair_mode in {"evidence_first", "auto_refine"}
+    capital_mode = config.repair_mode == "capital_fit"
     if evidence_mode:
         profit_weight *= 0.85
         sharpe_weight *= 0.75
+    if capital_mode:
+        profit_weight *= 0.70
+        sharpe_weight *= 0.65
     score = 100 * (
         profit_weight * profit_component
-        + 0.10 * net_component
-        + 0.15 * stress_component
+        + 0.08 * net_component
+        + 0.12 * stress_component
         + sharpe_weight * deflated_sharpe_component
-        + 0.12 * net_cost_component
-        + 0.10 * expectancy_component
+        + 0.10 * net_cost_component
+        + 0.08 * expectancy_component
         + 0.08 * stability
         + (0.13 if evidence_mode else 0.05) * fold_component
-        + 0.04 * drawdown_component
+        + (0.16 if capital_mode else 0.08) * drawdown_component
+        + (0.22 if capital_mode else 0.12) * capital_component
+        + (0.14 if capital_mode else 0.07) * paper_component
         - 0.28 * churn_penalty
         - (0.12 if evidence_mode else 0.04) * concentration_penalty
     )
     score = min(score, _oos_trade_score_cap(evaluation, grade))
+    if not capital_profile.get("feasible"):
+        score = min(score, 42.0 + 30.0 * capital_component)
+    if capital_mode:
+        score = min(score, 35.0 + 55.0 * capital_component)
     return round(_clamp(score, -100.0, 100.0), 4)
 
 
@@ -892,6 +1067,7 @@ def _trial_ranking_key(
     evaluation: CandidateEvaluation,
     stability: float,
     diagnostics: dict[str, object],
+    capital_profile: dict[str, object],
 ) -> tuple[float, ...]:
     tier_rank = {
         "validated_candidate": 4,
@@ -904,6 +1080,9 @@ def _trial_ranking_key(
     grade = _grade_profile(evaluation)
     return (
         float(tier_rank),
+        1.0 if capital_profile.get("feasible") else 0.0,
+        float(capital_profile.get("paper_readiness_score") or 0.0),
+        float(capital_profile.get("score") or 0.0),
         float(grade["test_profit"]),
         float(stress_net_profit),
         float(grade["net_profit"]),

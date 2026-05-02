@@ -58,9 +58,11 @@ def capital_scenarios(
     backtest: dict[str, object],
     parameters: dict[str, object] | None = None,
     cost_profile: dict[str, object] | None = None,
+    account_sizes: tuple[float, ...] | list[float] | None = None,
 ) -> list[dict[str, object]]:
     parameters = parameters or {}
     cost_profile = cost_profile or {}
+    scenario_account_sizes = _scenario_account_sizes(account_sizes)
     requested_stake = _positive_float(parameters.get("position_size"), backtest.get("position_size"), 1.0)
     min_deal_size = _positive_float(cost_profile.get("min_deal_size"), 0.0)
     effective_stake = max(requested_stake, min_deal_size or requested_stake)
@@ -83,7 +85,7 @@ def capital_scenarios(
     )
 
     output: list[dict[str, object]] = []
-    for account_size in CAPITAL_SCENARIOS_GBP:
+    for account_size in scenario_account_sizes:
         risk_budget = account_size * RISK_PER_TRADE_FRACTION
         daily_loss_limit = account_size * DAILY_LOSS_FRACTION
         projected_net_profit = account_size * return_pct / 100 if compounding_enabled and source_starting_cash > 0 else net_profit
@@ -136,6 +138,19 @@ def capital_scenarios(
             ).as_dict()
         )
     return output
+
+
+def scenario_account_sizes(account_size: float | int | str | None = None) -> tuple[float, ...]:
+    return _scenario_account_sizes((account_size,) if account_size not in (None, "") else None)
+
+
+def _scenario_account_sizes(account_sizes: tuple[float, ...] | list[float] | None = None) -> tuple[float, ...]:
+    values = {float(size) for size in CAPITAL_SCENARIOS_GBP}
+    for size in account_sizes or ():
+        number = _positive_float(size, 0.0)
+        if number > 0:
+            values.add(round(number, 2))
+    return tuple(sorted(values))
 
 
 def _projection_return_pct(backtest: dict[str, object], net_profit: float, source_starting_cash: float, projection_available: bool) -> float:

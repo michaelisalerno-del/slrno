@@ -37,6 +37,7 @@ ROBUSTNESS_BLOCKING_WARNINGS = {
     "drawdown_too_high",
     "profits_not_consistent_across_folds",
     "weak_oos_evidence",
+    "below_ig_min_deal_size",
     "one_fold_dependency",
     "calendar_effect_needs_longer_history",
     "known_edge_needs_cross_market_validation",
@@ -56,6 +57,12 @@ ROBUSTNESS_BLOCKING_WARNINGS = {
     "regime_gated_oos_negative",
     "shock_regime_dependency",
     "target_regime_low_oos_trades",
+    "historical_daily_loss_stop_breached",
+    "historical_drawdown_too_large",
+    "insufficient_account_for_margin",
+    "margin_too_large",
+    "missing_reference_price",
+    "risk_budget_exceeded",
 }
 
 
