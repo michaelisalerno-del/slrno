@@ -1264,7 +1264,7 @@ function GuideView({ setActiveModule }) {
     ["Warning colours", "Red blocks paper promotion, orange needs repair, blue is a specialist/regime identity, and grey is diagnostic."],
   ];
   const repairs = [
-    ["Too few trades", "Auto-refine runs a deeper longer-history retest. If the edge only wins in one regime, it also compares regime specialists."],
+    ["Too few trades / low OOS", "Auto-refine runs a deeper longer-history retest. Target-regime refinements sample more active settings, but thin OOS evidence still caps the score."],
     ["Fragile folds", "Use Longer history and Evidence first. The result needs to work across several walk-forward folds."],
     ["Single-month profit", "Use Exclude month. The run removes the dominant month from saved bars and retests."],
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
@@ -1924,6 +1924,7 @@ function RegimeEvidenceMetrics({ pattern }) {
       <Metric label={evidence.is_targeted ? "Target regime" : "Edge regime"} value={regimeLabel(evidence.target_regime)} />
       <Metric label="In-regime net" value={formatMoney(inRegime.net_profit)} />
       <Metric label="In-regime OOS" value={formatMoney(inRegime.test_profit)} />
+      <Metric label="In-regime OOS trades" value={inRegime.test_trade_count ?? 0} />
       <Metric label="In-regime Sharpe" value={round(inRegime.daily_pnl_sharpe)} />
       <Metric label="Regime days" value={`${evidence.regime_trading_days ?? 0} (${percent(evidence.regime_history_share)})`} />
       <Metric label="Regime episodes" value={evidence.regime_episodes ?? 0} />
@@ -2728,7 +2729,7 @@ function repairActionsForTemplate(template) {
       primary: true,
     });
   }
-  if (hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "calendar_effect_needs_longer_history")) {
+  if (hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "target_regime_low_oos_trades", "calendar_effect_needs_longer_history")) {
     add({
       id: "more-trades",
       preset: "more_trades",
@@ -2845,7 +2846,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     }
   };
   const hasAny = (...codes) => codes.some((code) => warnings.has(code));
-  const tooFewTrades = hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "calendar_effect_needs_longer_history");
+  const tooFewTrades = hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "target_regime_low_oos_trades", "calendar_effect_needs_longer_history");
   const regimeDependent =
     hasAny(
       "profit_concentrated_single_regime",
@@ -3111,6 +3112,7 @@ function humanWarnings(warnings = []) {
     regime_gated_backtest_negative: "Gated backtest negative",
     regime_gated_oos_negative: "Gated OOS negative",
     shock_regime_dependency: "Shock-regime dependency",
+    target_regime_low_oos_trades: "Target-regime low OOS trades",
     below_ig_min_deal_size: "Below IG min stake",
     risk_budget_exceeded: "Risk budget exceeded",
     margin_too_large: "Margin too large",
@@ -3178,6 +3180,7 @@ const PAPER_BLOCKER_WARNINGS = new Set([
   "regime_gated_oos_negative",
   "risk_budget_exceeded",
   "short_sharpe_sample",
+  "target_regime_low_oos_trades",
   "too_few_trades",
   "weak_oos_economics",
   "weak_oos_evidence",

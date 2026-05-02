@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from random import Random
 
-from app.adaptive_research import AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _generate_signals, _promotion_tier, _warnings, balanced_score, run_adaptive_search
+from app.adaptive_research import AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _generate_signals, _promotion_tier, _sample_parameters, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import IGCostProfile, public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -70,6 +71,8 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert "bar_pattern_analysis" in best.candidate.parameters
     assert "evidence_profile" in best.candidate.parameters
     assert "positive_fold_rate" in best.candidate.parameters["evidence_profile"]
+    assert best.candidate.parameters["reference_price"] == round(bars[-1].close, 8)
+    assert best.candidate.parameters["reference_price_source"] == "latest_eodhd_bar_close"
     assert "parameter_stability_score" in best.candidate.parameters
     assert "net_cost_ratio" in best.backtest.__dict__
     assert best.backtest.starting_cash == 3000
@@ -197,6 +200,77 @@ def test_target_regime_scoring_uses_in_regime_evidence():
     config = AdaptiveSearchConfig(repair_mode="auto_refine")
 
     assert _cost_aware_score(targeted, diagnostics, 0.5, config) > _cost_aware_score(untargeted, diagnostics, 0.5, config)
+
+
+def test_target_regime_low_oos_trades_caps_score():
+    backtest = BacktestResult(
+        net_profit=2_000,
+        sharpe=2.5,
+        max_drawdown=100,
+        win_rate=0.7,
+        trade_count=50,
+        exposure=0.2,
+        turnover=50,
+        train_profit=1_500,
+        test_profit=500,
+        gross_profit=2_200,
+        total_cost=200,
+        daily_pnl_sharpe=2.5,
+        expectancy_per_trade=40,
+        average_cost_per_trade=4,
+        net_cost_ratio=10,
+        cost_to_gross_ratio=0.09,
+    )
+    evaluation = CandidateEvaluation(
+        candidate=ProbabilityCandidate(
+            "target",
+            ("adaptive_ig_v1",),
+            {
+                "target_regime": "shock_event",
+                "stress_net_profit": 1_500,
+                "evidence_profile": {"oos_trade_count": 0},
+                "bar_pattern_analysis": {
+                    "regime_trade_evidence": {
+                        "available": True,
+                        "target_regime": "shock_event",
+                        "regime_trading_days": 6,
+                        "regime_history_share": 0.01,
+                        "regime_episodes": 3,
+                        "in_regime": {
+                            "net_profit": 2_000,
+                            "test_profit": 500,
+                            "test_trade_count": 0,
+                            "daily_pnl_sharpe": 8,
+                            "sharpe_days": 6,
+                            "trade_count": 12,
+                            "max_drawdown": 100,
+                            "gross_profit": 2_200,
+                            "cost": 200,
+                        },
+                    },
+                },
+            },
+            [0.5, 0.6],
+        ),
+        metrics=ClassificationMetrics(0.8, 0.7, 0.3, 0.7, 0.7, 0.5, 2),
+        backtest=backtest,
+        fold_results=(),
+        robustness_score=0,
+        passed=False,
+        warnings=(),
+    )
+
+    score = _cost_aware_score(evaluation, {"deflated_sharpe_probability": 1.0}, 0.8, AdaptiveSearchConfig(repair_mode="auto_refine"))
+
+    assert score <= 42.0
+
+
+def test_auto_refine_target_regime_samples_more_active_trade_repair_parameters():
+    parameters = _sample_parameters(Random(2), "intraday_trend", "balanced", 0, "auto_refine", "shock_event")
+
+    assert parameters["repair_profile"] == "target_regime_more_oos_trades"
+    assert parameters["confidence_quantile"] >= 0.3
+    assert parameters["min_trade_spacing"] <= 12
 
 
 def test_negative_total_net_does_not_promote_to_research_candidate():
