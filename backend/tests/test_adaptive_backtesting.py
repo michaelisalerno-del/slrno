@@ -419,6 +419,40 @@ def test_month_end_seasonality_signals_last_trading_days():
     assert datetime(2026, 1, 30).date() in active_dates
 
 
+def test_liquidity_sweep_reversal_signals_support_reclaim():
+    start = datetime(2026, 1, 1, 9)
+    bars = [
+        OHLCBar("TEST", start + timedelta(minutes=5 * index), 100.2, 100.6, 100.0, 100.3)
+        for index in range(12)
+    ]
+    bars.append(OHLCBar("TEST", start + timedelta(minutes=60), 100.1, 100.7, 99.7, 100.45))
+    bars.extend(
+        OHLCBar("TEST", start + timedelta(minutes=65 + 5 * index), 100.45, 100.9, 100.3, 100.7)
+        for index in range(4)
+    )
+
+    signals = _generate_signals(
+        bars,
+        "liquidity_sweep_reversal",
+        {
+            "lookback": 12,
+            "threshold_bps": 8,
+            "z_threshold": 1,
+            "volatility_multiplier": 1,
+            "stop_loss_bps": 500,
+            "take_profit_bps": 500,
+            "max_hold_bars": 4,
+            "min_hold_bars": 1,
+            "min_trade_spacing": 0,
+            "confidence_quantile": 1.0,
+            "regime_filter": "any",
+            "direction": "long_only",
+        },
+    )
+
+    assert signals[12] > 0
+
+
 def test_research_ideas_style_runs_calendar_family_trials():
     market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
     profile = public_ig_cost_profile(market)

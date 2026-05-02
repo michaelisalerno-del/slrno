@@ -1630,7 +1630,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
               <div className="status" key={`${item.market_id}-${item.status}`}>
                 <strong>{item.market_id} · <span className={`badge ${statusBadgeClass(item.status)}`}>{item.status}</span></strong>
                 <span>{item.eodhd_symbol} · {normalizeInterval(item.interval)} · {item.data_source_status || "EODHD primary symbol"}</span>
-                {item.bar_count !== undefined && <small>{item.bar_count} bars · {item.trial_count ?? 0} trials saved</small>}
+                {item.bar_count !== undefined && <small>{marketStatusLine(item)}</small>}
                 {item.error && <small>{item.error}</small>}
               </div>
             ))}
@@ -2181,6 +2181,23 @@ function marketStatusProgress(status) {
     return 18;
   }
   return 5;
+}
+
+function marketStatusLine(item) {
+  const bars = `${item.bar_count ?? 0} bars`;
+  if (item.status === "completed") {
+    return `${bars} · ${item.trial_count ?? 0} trials saved`;
+  }
+  if (item.status === "evaluating") {
+    return `${bars} loaded · evaluating strategy trials`;
+  }
+  if (item.status === "failed") {
+    return `${bars} loaded before failure`;
+  }
+  if (item.status === "loading") {
+    return `${bars} loaded so far`;
+  }
+  return `${bars} loaded`;
 }
 
 function boundedProgress(value, status = "") {
@@ -2922,6 +2939,7 @@ function strategyFamilyLabel(value) {
     swing_trend: "Swing trend",
     mean_reversion: "Mean reversion",
     volatility_expansion: "Volatility expansion",
+    liquidity_sweep_reversal: "Liquidity sweep",
     scalping: "Scalping",
     breakout: "Breakout",
     research_ideas: "Known research ideas",
