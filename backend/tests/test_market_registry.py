@@ -36,3 +36,4 @@ def test_market_registry_seeds_priority_ig_markets(tmp_path):
     assert markets["NAS100"].eodhd_symbol == "NDX.INDX"
     assert markets["US500"].ig_name == "US 500"
     assert markets["XAUUSD"].asset_class == "commodity"
+    assert markets["UK10Y"].eodhd_symbol == "UK10Y.GBOND"

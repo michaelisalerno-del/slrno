@@ -54,7 +54,7 @@ DEFAULT_MARKETS = [
     MarketMapping("NATGAS", "Natural Gas", "commodity", "COMMODITY:NATURAL_GAS", "", True, "ig-natural-gas", "Natural Gas", "Natural Gas,US Natural Gas", "1day", 5.0, 2.5),
     MarketMapping("COPPER", "Copper", "commodity", "COMMODITY:COPPER", "", True, "ig-copper", "Copper", "Copper", "1day", 4.0, 2.0),
     MarketMapping("US10Y", "US 10Y Treasury Yield", "rates", "US10Y.GBOND", "", True, "ig-us-10y", "US 10 Year T-Note", "US 10 Year,T-Note,Treasury", "1day", 2.0, 1.0),
-    MarketMapping("UK10Y", "UK 10Y Gilt Yield", "rates", "GB10Y.GBOND", "", True, "ig-uk-10y", "UK Long Gilt", "UK Long Gilt,Gilt", "1day", 2.0, 1.0),
+    MarketMapping("UK10Y", "UK 10Y Gilt Yield", "rates", "UK10Y.GBOND", "", True, "ig-uk-10y", "UK Long Gilt", "UK Long Gilt,Gilt", "1day", 2.0, 1.0),
     MarketMapping("DE10Y", "Germany 10Y Bund Yield", "rates", "DE10Y.GBOND", "", True, "ig-de-10y", "Bund", "Bund,Germany 10 Year", "1day", 2.0, 1.0),
     MarketMapping("AAPL", "Apple", "share", "AAPL.US", "", True, "ig-aapl", "Apple", "Apple,AAPL", "5min", 4.0, 2.0),
     MarketMapping("MSFT", "Microsoft", "share", "MSFT.US", "", True, "ig-msft", "Microsoft", "Microsoft,MSFT", "5min", 4.0, 2.0),
