@@ -101,6 +101,86 @@ def test_market_default_interval_uses_each_market_timeframe(tmp_path, monkeypatc
     assert statuses[3]["history_expanded"] is True
 
 
+def test_empty_intraday_index_falls_back_to_daily_bars(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    registry = MarketRegistry(tmp_path / "markets.sqlite3")
+    registry.upsert(MarketMapping("FTSE100", "FTSE 100", "index", "FTSE.INDX", "", True, "", "FTSE 100", "FTSE", "5min", 2.0, 1.0, 750))
+    calls: list[tuple[str, str, str]] = []
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", registry)
+
+    class EmptyIntradayProvider:
+        cache = FakeCache()
+
+        async def historical_bars(self, symbol: str, interval: str, start_value: str, _end: str) -> list[OHLCBar]:
+            calls.append((symbol, interval, start_value))
+            if interval == "5min":
+                return []
+            start = datetime(2025, 1, 1, tzinfo=UTC)
+            return [
+                OHLCBar(symbol=symbol, timestamp=start + timedelta(days=index), open=100 + index, high=101 + index, low=99 + index, close=100 + index, volume=10)
+                for index in range(260)
+            ]
+
+    def fake_search(*args, **kwargs):
+        captured["interval"] = args[2]
+        captured["bar_count"] = len(args[0])
+        return SimpleNamespace(evaluations=[_evaluation("accepted")], regime_scan={})
+
+    monkeypatch.setattr(main, "EODHDProvider", lambda _token: EmptyIntradayProvider())
+    monkeypatch.setattr(main, "run_adaptive_search", fake_search)
+    payload = main.ResearchRunPayload(start="2025-01-01", end="2026-04-01", market_ids=["FTSE100"], interval="market_default", search_budget=2)
+    run_id = store.create_run("FTSE100", main._research_run_config(payload, [registry.get("FTSE100")]), status="running")
+
+    asyncio.run(main._execute_research_run(run_id, payload, "token"))
+
+    assert calls == [("FTSE.INDX", "5min", "2025-01-01"), ("FTSE.INDX", "1day", "2025-01-01")]
+    assert captured == {"interval": "1day", "bar_count": 260}
+    run = store.get_run(run_id)
+    assert run["status"] == "finished"
+    status = run["config"]["market_statuses"][0]
+    assert status["requested_interval"] == "5min"
+    assert status["interval"] == "1day"
+    assert status["data_source_status"] == "eodhd_daily_fallback"
+    assert status["intraday_bar_count"] == 0
+    assert status["fallback_bar_count"] == 260
+
+
+def test_empty_intraday_fallback_failure_reports_daily_requirement(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    registry = MarketRegistry(tmp_path / "markets.sqlite3")
+    registry.upsert(MarketMapping("RUSSELL2000", "US Russell 2000", "index", "RUT.INDX", "", True, "", "Russell 2000", "RUT", "5min", 2.5, 1.2, 750))
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", registry)
+
+    class ShortDailyProvider:
+        cache = FakeCache()
+
+        async def historical_bars(self, symbol: str, interval: str, _start: str, _end: str) -> list[OHLCBar]:
+            if interval == "5min":
+                return []
+            start = datetime(2025, 1, 1, tzinfo=UTC)
+            return [
+                OHLCBar(symbol=symbol, timestamp=start + timedelta(days=index), open=100 + index, high=101 + index, low=99 + index, close=100 + index, volume=10)
+                for index in range(27)
+            ]
+
+    monkeypatch.setattr(main, "EODHDProvider", lambda _token: ShortDailyProvider())
+    payload = main.ResearchRunPayload(start="2026-01-01", end="2026-02-01", market_ids=["RUSSELL2000"], interval="market_default", search_budget=2)
+    run_id = store.create_run("RUSSELL2000", main._research_run_config(payload, [registry.get("RUSSELL2000")]), status="running")
+
+    asyncio.run(main._execute_research_run(run_id, payload, "token"))
+
+    run = store.get_run(run_id)
+    assert run["status"] == "error"
+    assert "need at least 250 1day bars; received 27" in str(run["error"])
+    status = run["config"]["market_statuses"][0]
+    assert status["requested_interval"] == "5min"
+    assert status["interval"] == "1day"
+    assert status["data_source_status"] == "eodhd_daily_fallback"
+
+
 def test_daily_market_default_uses_daily_minimum_bar_floor():
     market = MarketMapping("WTI", "US Crude", "commodity", "COMMODITY:WTI", "", True, "", "US Crude", "WTI", "1day", 3.5, 2.0, 750)
 
