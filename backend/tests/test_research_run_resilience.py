@@ -101,6 +101,17 @@ def test_market_default_interval_uses_each_market_timeframe(tmp_path, monkeypatc
     assert statuses[3]["history_expanded"] is True
 
 
+def test_multi_market_default_budget_is_auto_capped_but_manual_budget_is_respected():
+    default_payload = main.ResearchRunPayload(start="2025-01-01", end="2026-04-01", search_preset="balanced")
+    manual_payload = main.ResearchRunPayload(start="2025-01-01", end="2026-04-01", search_preset="balanced", search_budget=54)
+    deep_payload = main.ResearchRunPayload(start="2025-01-01", end="2026-04-01", search_preset="deep")
+
+    assert main._effective_search_budget(default_payload, 1) is None
+    assert main._effective_search_budget(default_payload, 30) == 9
+    assert main._effective_search_budget(manual_payload, 30) == 54
+    assert main._effective_search_budget(deep_payload, 38) == 12
+
+
 def test_empty_intraday_index_falls_back_to_daily_bars(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     registry = MarketRegistry(tmp_path / "markets.sqlite3")
