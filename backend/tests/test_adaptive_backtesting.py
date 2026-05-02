@@ -419,6 +419,40 @@ def test_month_end_seasonality_signals_last_trading_days():
     assert datetime(2026, 1, 30).date() in active_dates
 
 
+def test_liquidity_sweep_reversal_signals_support_reclaim():
+    start = datetime(2026, 1, 1, 9)
+    bars = [
+        OHLCBar("TEST", start + timedelta(minutes=5 * index), 100.2, 100.6, 100.0, 100.3)
+        for index in range(12)
+    ]
+    bars.append(OHLCBar("TEST", start + timedelta(minutes=60), 100.1, 100.7, 99.7, 100.45))
+    bars.extend(
+        OHLCBar("TEST", start + timedelta(minutes=65 + 5 * index), 100.45, 100.9, 100.3, 100.7)
+        for index in range(4)
+    )
+
+    signals = _generate_signals(
+        bars,
+        "liquidity_sweep_reversal",
+        {
+            "lookback": 12,
+            "threshold_bps": 8,
+            "z_threshold": 1,
+            "volatility_multiplier": 1,
+            "stop_loss_bps": 500,
+            "take_profit_bps": 500,
+            "max_hold_bars": 4,
+            "min_hold_bars": 1,
+            "min_trade_spacing": 0,
+            "confidence_quantile": 1.0,
+            "regime_filter": "any",
+            "direction": "long_only",
+        },
+    )
+
+    assert signals[12] > 0
+
+
 def test_research_ideas_style_runs_calendar_family_trials():
     market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
     profile = public_ig_cost_profile(market)
@@ -476,6 +510,39 @@ def test_regime_specialist_scans_are_opt_in_and_gated_to_target_regime():
         assert analysis["target_regime"] == target
         for row in analysis["regime_summary"]:
             if row["key"] != target:
+                assert row["active_bars"] == 0
+
+
+def test_target_regime_refine_gates_base_trials_to_that_regime():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    bars = _daily_trend_bars(90)
+
+    result = run_adaptive_search(
+        bars,
+        "TEST",
+        "1day",
+        profile,
+        AdaptiveSearchConfig(
+            preset="quick",
+            trading_style="intraday_only",
+            search_budget=6,
+            target_regime="trend_up",
+            seed=5,
+        ),
+    )
+
+    assert result.regime_scan["target_regime"] == "trend_up"
+    assert len(result.evaluations) == 6
+    for evaluation in result.evaluations:
+        parameters = evaluation.candidate.parameters
+        analysis = parameters["bar_pattern_analysis"]
+        assert parameters["target_regime"] == "trend_up"
+        assert parameters["regime_targeted_refine"] is True
+        assert analysis["target_regime"] == "trend_up"
+        assert analysis["regime_trade_evidence"]["target_regime"] == "trend_up"
+        for row in analysis["regime_summary"]:
+            if row["key"] != "trend_up":
                 assert row["active_bars"] == 0
 
 

@@ -161,10 +161,11 @@ function App() {
     cost_stress_multiplier: 2.0,
     include_regime_scans: false,
     regime_scan_budget_per_regime: "",
+    target_regime: "",
     excluded_months: [],
     repair_mode: "standard",
   });
-  const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
+  const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready.", progress: 0 });
 
   const eodhdStatus = providerStatus(status, "eodhd");
   const igStatus = providerStatus(status, "ig");
@@ -315,10 +316,12 @@ function App() {
     const budget = runConfig.search_budget === "" ? preset.budget : Number(runConfig.search_budget);
     const plannedTrials = budget * market_ids.length;
     const regimeScanNote = runConfig.include_regime_scans ? " plus capped regime-specialist scans" : "";
+    const targetRegimeNote = runConfig.target_regime ? `, ${regimeLabel(runConfig.target_regime)} only` : "";
     setMessage(launchMessage);
     setResearchState({
       status: "running",
-      detail: `${engine.label}: ${budget} strategy trials per market, ${plannedTrials} base total${regimeScanNote}.`,
+      detail: `${engine.label}: ${budget} strategy trials per market, ${plannedTrials} base total${regimeScanNote}${targetRegimeNote}.`,
+      progress: 2,
     });
     try {
       const result = await createResearchRun({
@@ -327,6 +330,7 @@ function App() {
         market_ids,
         search_budget: budget,
         regime_scan_budget_per_regime: runConfig.regime_scan_budget_per_regime === "" ? null : Number(runConfig.regime_scan_budget_per_regime),
+        target_regime: runConfig.target_regime || null,
         excluded_months: uniqueMonths(runConfig.excluded_months),
         repair_mode: runConfig.repair_mode || "standard",
         product_mode: "spread_bet",
@@ -337,11 +341,12 @@ function App() {
       setResearchState({
         status: detail.status,
         detail: runStateDetail(detail, plannedTrials),
+        progress: runProgress(detail, plannedTrials),
       });
       setMessage(runCompletionMessage(result.run_id, detail));
       await loadModule("backtests");
     } catch (error) {
-      setResearchState({ status: "error", detail: error.message });
+      setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
       await loadModule("backtests").catch(() => undefined);
     }
@@ -374,7 +379,7 @@ function App() {
       }
       await launchResearchRun(runConfig, autoRefinementPlan.marketIds, "Launching auto-refine run...");
     } catch (error) {
-      setResearchState({ status: "error", detail: error.message });
+      setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
     }
   }
@@ -407,6 +412,7 @@ function App() {
     const pattern = parameters.bar_pattern_analysis ?? {};
     const family = parameters.family ? String(parameters.family) : String(source.strategy_family || source.family || "");
     const marketId = String(source.market_id || parameters.market_id || researchRun.market_id);
+    const targetRegime = String(parameters.target_regime || pattern.target_regime || "");
     const template = {
       id: source.id ?? source.trial_id ?? source.strategy_name,
       name: source.strategy_name,
@@ -416,6 +422,7 @@ function App() {
       objective: String(parameters.objective || searchAudit.objective || "profit_first"),
       interval: intervalValue(parameters.timeframe || researchRun.interval),
       risk_profile: String(searchAudit.risk_profile || researchRun.risk_profile),
+      target_regime: targetRegime,
       recipe: researchRecipeLabel(parameters.research_recipe),
       warnings: warningCodesForSource(source),
       readiness: source.audit?.promotion_readiness ?? null,
@@ -439,6 +446,7 @@ function App() {
       search_budget: current.search_budget || "54",
       strategy_families: family ? [family] : [],
       cost_stress_multiplier: current.cost_stress_multiplier || 2.0,
+      target_regime: targetRegime,
     }));
     setActiveTab("builder");
     setMessage(`Refining ${source.strategy_name} on ${marketId || "selected market"}.`);
@@ -446,7 +454,7 @@ function App() {
 
   function clearRefinementTemplate() {
     setRefinementTemplate(null);
-    setResearchRun((current) => ({ ...current, strategy_families: [], excluded_months: [] }));
+    setResearchRun((current) => ({ ...current, strategy_families: [], excluded_months: [], target_regime: "" }));
   }
 
   function applyRobustnessPreset(preset) {
@@ -457,6 +465,8 @@ function App() {
     const selectedMarket = refinementTemplate.market_id ? [refinementTemplate.market_id] : activeMarketIds;
     const allMarketIds = enabledMarkets.map((item) => item.market_id);
     const dominantMonth = refinementTemplate.pattern?.dominant_profit_month?.key;
+    const templateTargetRegime = templateSpecificRegime(refinementTemplate);
+    const regimeRepairTarget = regimeRefineTarget(refinementTemplate);
     const presetConfig = {
       focused: {
         marketIds: selectedMarket,
@@ -465,6 +475,7 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
         repairMode: "focused_retest",
         label: "Focused robustness run staged.",
       },
@@ -475,6 +486,7 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
         repairMode: "evidence_first",
         label: "Evidence-first retest staged with a smaller locked search and stricter fold ranking.",
       },
@@ -485,6 +497,7 @@ function App() {
         start: "2024-01-01",
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
         repairMode: "more_trades",
         label: "More-trades repair run staged with longer history and a deeper search.",
       },
@@ -495,6 +508,7 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
         repairMode: "cost_stress",
         label: "Higher-cost robustness run staged.",
       },
@@ -505,6 +519,7 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: "market_default",
+        targetRegime: "",
         repairMode: "cross_market",
         label: "Cross-market robustness run staged using each market default timeframe.",
       },
@@ -515,10 +530,13 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
-        includeRegimeScans: true,
+        includeRegimeScans: !regimeRepairTarget,
         regimeScanBudget: "",
+        targetRegime: regimeRepairTarget,
         repairMode: "regime_repair",
-        label: "Regime repair run staged with capped specialist scans.",
+        label: regimeRepairTarget
+          ? `Regime repair staged: scoring ${regimeLabel(regimeRepairTarget)} only and forcing flat outside it.`
+          : "Regime repair run staged with capped specialist scans.",
       },
       exclude_best_month: {
         marketIds: selectedMarket,
@@ -527,6 +545,7 @@ function App() {
         start: researchRun.start,
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
         excludedMonths: dominantMonth ? [dominantMonth] : [],
         repairMode: "month_exclusion",
         label: dominantMonth ? `Best-month exclusion run staged without ${dominantMonth}.` : "No dominant month found to exclude.",
@@ -538,6 +557,7 @@ function App() {
         start: "2024-01-01",
         end: researchRun.end,
         interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
         repairMode: "longer_history",
         label: "Longer-history robustness run staged.",
       },
@@ -562,8 +582,9 @@ function App() {
       search_budget: presetConfig.budget,
       strategy_families: family,
       cost_stress_multiplier: presetConfig.stress,
-      include_regime_scans: Boolean(presetConfig.includeRegimeScans),
+      include_regime_scans: Boolean(presetConfig.includeRegimeScans) && !presetConfig.targetRegime,
       regime_scan_budget_per_regime: presetConfig.regimeScanBudget ?? "",
+      target_regime: presetConfig.targetRegime || "",
       excluded_months: presetConfig.excludedMonths ?? [],
       repair_mode: presetConfig.repairMode ?? "standard",
     }));
@@ -575,7 +596,7 @@ function App() {
     setRunDetail(detail);
     getMarketDataCacheStatus().then(setCacheStatus).catch(() => undefined);
     for (let attempt = 0; attempt < 720 && ["created", "running"].includes(detail.status); attempt += 1) {
-      setResearchState({ status: "running", detail: runStateDetail(detail, plannedTrials) });
+      setResearchState({ status: "running", detail: runStateDetail(detail, plannedTrials), progress: runProgress(detail, plannedTrials) });
       await sleep(2000);
       const [nextDetail, nextCacheStatus] = await Promise.all([
         getResearchRun(runId),
@@ -583,6 +604,7 @@ function App() {
       ]);
       detail = nextDetail;
       setRunDetail(detail);
+      setResearchState({ status: detail.status, detail: runStateDetail(detail, plannedTrials), progress: runProgress(detail, plannedTrials) });
       if (nextCacheStatus) {
         setCacheStatus(nextCacheStatus);
       }
@@ -723,6 +745,12 @@ function App() {
               <div className={`run-state ${researchState.status}`}>
                 <strong>{researchState.status.toUpperCase()}</strong>
                 <span>{researchState.detail}</span>
+                <div className="progress-row">
+                  <div className="progress-track" aria-label="Research run progress">
+                    <div className={`progress-fill ${researchState.status}`} style={{ width: `${boundedProgress(researchState.progress)}%` }} />
+                  </div>
+                  <small>{Math.round(boundedProgress(researchState.progress))}%</small>
+                </div>
               </div>
             </div>
             <div className="tabs">
@@ -770,6 +798,7 @@ function App() {
                       <Metric label="Fold share" value={percent(refinementTemplate.evidence?.single_fold_profit_share)} />
                       <Metric label="OOS net" value={formatMoney(refinementTemplate.evidence?.oos_net_profit)} />
                       <Metric label="OOS trades" value={refinementTemplate.evidence?.oos_trade_count ?? 0} />
+                      <RegimeEvidenceMetrics pattern={refinementTemplate.pattern} />
                     </div>
                     <div className="warning-row">
                       {(refinementTemplate.warnings ?? []).length > 0
@@ -783,7 +812,10 @@ function App() {
                             <strong><Sparkles size={16} /> Auto-refine plan</strong>
                             <span>{autoRefinementPlan.summary}</span>
                           </div>
-                          <span className="badge muted-badge">{autoRefinementPlan.marketIds.length} market{autoRefinementPlan.marketIds.length === 1 ? "" : "s"}</span>
+                          <div className="badge-group">
+                            {autoRefinementPlan.targetRegime && <span className="badge market-badge">{regimeLabel(autoRefinementPlan.targetRegime)} only</span>}
+                            <span className="badge muted-badge">{autoRefinementPlan.marketIds.length} market{autoRefinementPlan.marketIds.length === 1 ? "" : "s"}</span>
+                          </div>
                         </div>
                         <div className="auto-refine-steps">
                           {autoRefinementPlan.steps.map((step) => (
@@ -902,6 +934,13 @@ function App() {
                         max={regimePresetBudget(researchRun.search_preset)}
                       />
                     </>
+                  )}
+                  {researchRun.target_regime && (
+                    <div className="status compact-status">
+                      <strong>Target regime · {regimeLabel(researchRun.target_regime)}</strong>
+                      <span>Signals are scored only inside this regime and forced flat outside it.</span>
+                      <button type="button" className="ghost" onClick={() => setResearchRun({ ...researchRun, target_regime: "" })}>Clear target</button>
+                    </div>
                   )}
                 </section>
 
@@ -1591,7 +1630,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
               <div className="status" key={`${item.market_id}-${item.status}`}>
                 <strong>{item.market_id} · <span className={`badge ${statusBadgeClass(item.status)}`}>{item.status}</span></strong>
                 <span>{item.eodhd_symbol} · {normalizeInterval(item.interval)} · {item.data_source_status || "EODHD primary symbol"}</span>
-                {item.bar_count !== undefined && <small>{item.bar_count} bars · {item.trial_count ?? 0} trials saved</small>}
+                {item.bar_count !== undefined && <small>{marketStatusLine(item)}</small>}
                 {item.error && <small>{item.error}</small>}
               </div>
             ))}
@@ -1747,6 +1786,25 @@ function RegimeEvidence({ runDetail, trials }) {
   );
 }
 
+function RegimeEvidenceMetrics({ pattern }) {
+  const evidence = pattern?.regime_trade_evidence ?? {};
+  if (!evidence.available) {
+    return null;
+  }
+  const inRegime = evidence.in_regime ?? {};
+  return (
+    <>
+      <Metric label={evidence.is_targeted ? "Target regime" : "Edge regime"} value={regimeLabel(evidence.target_regime)} />
+      <Metric label="In-regime net" value={formatMoney(inRegime.net_profit)} />
+      <Metric label="In-regime OOS" value={formatMoney(inRegime.test_profit)} />
+      <Metric label="In-regime Sharpe" value={round(inRegime.daily_pnl_sharpe)} />
+      <Metric label="Regime days" value={`${evidence.regime_trading_days ?? 0} (${percent(evidence.regime_history_share)})`} />
+      <Metric label="Regime episodes" value={evidence.regime_episodes ?? 0} />
+      <Metric label="Outside trades" value={evidence.outside_trade_count ?? 0} />
+    </>
+  );
+}
+
 function TrialCard({ trial, onRefineTemplate }) {
   const backtest = trial.backtest ?? {};
   const warnings = humanWarnings(trial.warnings);
@@ -1754,15 +1812,20 @@ function TrialCard({ trial, onRefineTemplate }) {
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(trial);
+  const marketId = trialMarketId(trial);
+  const interval = trialIntervalLabel(trial);
   return (
     <article className="trial-card">
       <div className="trial-summary">
         <div>
           <div className="label-row">
             <strong>{trial.strategy_name}</strong>
-            <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
+            <div className="badge-group">
+              {marketId && <span className="badge market-badge">{marketId}</span>}
+              <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
+            </div>
           </div>
-          <span>{strategyFamilyLabel(trial.strategy_family || trial.style)} · score {round(trial.robustness_score)}</span>
+          <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="button-row trial-actions">
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
@@ -1785,6 +1848,7 @@ function TrialCard({ trial, onRefineTemplate }) {
         <Metric label="Net/cost" value={formatRatio(backtest.net_cost_ratio)} />
         <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
         <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <RegimeEvidenceMetrics pattern={pattern} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
         <Metric label="OOS net" value={formatMoney(evidence.oos_net_profit)} />
@@ -1943,6 +2007,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         <Metric label="Net/cost" value={formatRatio(candidate.audit?.backtest?.net_cost_ratio)} />
         <Metric label="Gated net" value={formatMoney(gated.net_profit)} />
         <Metric label="Gated OOS" value={formatMoney(gated.test_profit)} />
+        <RegimeEvidenceMetrics pattern={pattern} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
         <Metric label="OOS net" value={formatMoney(evidence.oos_net_profit)} />
@@ -2078,6 +2143,72 @@ function providerStatus(statuses, provider) {
   return statuses.find((item) => item.provider === provider);
 }
 
+function runProgress(detail, plannedTrials = 0) {
+  if (!detail) {
+    return 0;
+  }
+  if (["finished", "finished_with_warnings", "error"].includes(detail.status)) {
+    return 100;
+  }
+  const statuses = detail.config?.market_statuses ?? [];
+  const configuredMarkets = detail.config?.market_ids ?? [];
+  const marketCount = Math.max(configuredMarkets.length, statuses.length, 1);
+  if (statuses.length > 0) {
+    const marketProgressTotal = statuses.reduce((total, item) => total + marketStatusProgress(item), 0);
+    const missingMarkets = Math.max(0, marketCount - statuses.length);
+    const marketProgress = marketProgressTotal / Math.max(1, statuses.length + missingMarkets);
+    const trialProgress = plannedTrials > 0 ? Math.min(95, (Number(detail.trial_count ?? 0) / plannedTrials) * 95) : 0;
+    return boundedProgress(Math.max(marketProgress, trialProgress), detail.status);
+  }
+  if (detail.status === "running") {
+    const savedTrials = Number(detail.trial_count ?? 0);
+    return plannedTrials > 0 ? boundedProgress((savedTrials / plannedTrials) * 95, detail.status) : 5;
+  }
+  return detail.status === "created" ? 2 : 0;
+}
+
+function marketStatusProgress(status) {
+  if (status.status === "completed" || status.status === "failed") {
+    return 100;
+  }
+  if (status.status === "evaluating") {
+    return 68;
+  }
+  if (status.bar_snapshot || status.bar_count) {
+    return 52;
+  }
+  if (status.status === "loading") {
+    return 18;
+  }
+  return 5;
+}
+
+function marketStatusLine(item) {
+  const bars = `${item.bar_count ?? 0} bars`;
+  if (item.status === "completed") {
+    return `${bars} · ${item.trial_count ?? 0} trials saved`;
+  }
+  if (item.status === "evaluating") {
+    return `${bars} loaded · evaluating strategy trials`;
+  }
+  if (item.status === "failed") {
+    return `${bars} loaded before failure`;
+  }
+  if (item.status === "loading") {
+    return `${bars} loaded so far`;
+  }
+  return `${bars} loaded`;
+}
+
+function boundedProgress(value, status = "") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+  const upper = ["created", "running"].includes(status) ? 98 : 100;
+  return Math.max(0, Math.min(upper, number));
+}
+
 function runStateDetail(detail, plannedTrials) {
   const savedTrials = detail?.trial_count ?? 0;
   if (["created", "running"].includes(detail?.status)) {
@@ -2129,6 +2260,15 @@ function intervalValue(value) {
     return "1hour";
   }
   return value || "5min";
+}
+
+function trialMarketId(item) {
+  return String(item?.market_id || item?.parameters?.market_id || "").trim();
+}
+
+function trialIntervalLabel(item) {
+  const raw = item?.parameters?.timeframe || item?.parameters?.interval || item?.parameters?.bar_interval;
+  return raw ? normalizeInterval(String(raw)) : "";
 }
 
 function costBadge(profile, market) {
@@ -2350,6 +2490,34 @@ function uniqueMonths(months = []) {
   return [...new Set(arrayValue(months).map((month) => String(month).trim()).filter((month) => /^\d{4}-\d{2}$/.test(month)))];
 }
 
+function templateSpecificRegime(template) {
+  return String(template?.target_regime || template?.parameters?.target_regime || template?.pattern?.target_regime || "").trim();
+}
+
+function regimeRefineTarget(template) {
+  const specific = templateSpecificRegime(template);
+  if (specific) {
+    return specific;
+  }
+  const pattern = template?.pattern ?? {};
+  const dominant = String(pattern.dominant_profit_regime?.key || "").trim();
+  const share = Number(pattern.dominant_profit_regime?.positive_profit_share ?? 0);
+  const warnings = new Set(template?.warnings ?? []);
+  const verdict = pattern.regime_verdict;
+  if (
+    dominant &&
+    (share >= 0.5 ||
+      ["headline_only", "regime_specific", "thin_regime_sample"].includes(verdict) ||
+      warnings.has("profit_concentrated_single_regime") ||
+      warnings.has("headline_sharpe_not_regime_robust") ||
+      warnings.has("high_volatility_only_edge") ||
+      warnings.has("shock_regime_dependency"))
+  ) {
+    return dominant;
+  }
+  return "";
+}
+
 function repairActionsForTemplate(template) {
   const warnings = new Set(template.warnings ?? []);
   const pattern = template.pattern ?? {};
@@ -2480,6 +2648,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const dominantMonthShare = Number(pattern.dominant_profit_month?.positive_profit_share ?? 0);
   const dominantRegimeShare = Number(pattern.dominant_profit_regime?.positive_profit_share ?? 0);
   const verdict = pattern.regime_verdict;
+  const targetRegime = regimeRefineTarget(template);
   const family = template.family ? [template.family] : [];
   const selectedMarket = template.market_id ? [template.market_id] : activeMarketIds.length ? activeMarketIds : [researchRun.market_id];
   const allMarketIds = enabledMarkets.map((item) => item.market_id).filter(Boolean);
@@ -2516,6 +2685,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   let start = researchRun.start;
   let stress = 2.0;
   let includeRegimeScans = false;
+  let runTargetRegime = templateSpecificRegime(template);
   let regimeScanBudget = "";
   const excludedMonths = [];
 
@@ -2526,16 +2696,25 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     budget = 120;
     start = earlierDate(researchRun.start, "2024-01-01");
     addStep("Deep locked-family retest over longer history");
-    if (dominantRegime || regimeDependent) {
+    if (targetRegime) {
+      runTargetRegime = targetRegime;
+      includeRegimeScans = false;
+      addStep(`Score only ${regimeLabel(targetRegime)} and force flat outside it`);
+    } else if (dominantRegime || regimeDependent) {
       includeRegimeScans = true;
       regimeScanBudget = "";
       addStep(dominantRegime ? `Compare more trades with ${regimeLabel(dominantRegime)} specialists` : "Compare more trades with regime specialists");
     }
   }
   if (regimeDependent && !includeRegimeScans) {
-    includeRegimeScans = true;
-    regimeScanBudget = "";
-    addStep(dominantRegime ? `Run regime-gated specialists around ${regimeLabel(dominantRegime)}` : "Run regime-gated specialist checks");
+    if (targetRegime) {
+      runTargetRegime = targetRegime;
+      addStep(`Keep scoring locked to ${regimeLabel(targetRegime)} only`);
+    } else {
+      includeRegimeScans = true;
+      regimeScanBudget = "";
+      addStep(dominantRegime ? `Run regime-gated specialists around ${regimeLabel(dominantRegime)}` : "Run regime-gated specialist checks");
+    }
   }
   if (monthDependent && dominantMonth) {
     excludedMonths.push(dominantMonth);
@@ -2554,6 +2733,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     marketIds = allMarketIds;
     budget = Math.max(budget, 120);
     stress = Math.max(stress, 2.5);
+    runTargetRegime = "";
     addStep("Cross-check the locked family across enabled markets");
     addStep("Use each market default candle timeframe");
   }
@@ -2577,12 +2757,15 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     search_budget: String(budget),
     strategy_families: family,
     cost_stress_multiplier: stress,
-    include_regime_scans: includeRegimeScans,
+    include_regime_scans: includeRegimeScans && !runTargetRegime,
     regime_scan_budget_per_regime: regimeScanBudget,
+    target_regime: runTargetRegime,
     excluded_months: uniqueMonths(excludedMonths),
     repair_mode: "auto_refine",
   };
-  const summary = tooFewTrades && includeRegimeScans
+  const summary = runTargetRegime
+    ? `Regime-specific refine: results are scored inside ${regimeLabel(runTargetRegime)} with full-history gated evidence kept alongside.`
+    : tooFewTrades && includeRegimeScans
     ? "Tests both the broader trade-count repair and the winning-regime specialist path."
     : "Combines the active blockers into one locked-family repair run.";
   return {
@@ -2591,6 +2774,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     steps: steps.slice(0, 6),
     syncCosts,
     summary,
+    targetRegime: runTargetRegime,
     stageMessage: `Auto-refine staged: ${steps.slice(0, 3).join("; ")}.`,
   };
 }
@@ -2755,6 +2939,7 @@ function strategyFamilyLabel(value) {
     swing_trend: "Swing trend",
     mean_reversion: "Mean reversion",
     volatility_expansion: "Volatility expansion",
+    liquidity_sweep_reversal: "Liquidity sweep",
     scalping: "Scalping",
     breakout: "Breakout",
     research_ideas: "Known research ideas",

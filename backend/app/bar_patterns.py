@@ -83,6 +83,7 @@ def analyze_strategy_patterns(
         "worst_regime": _worst_bucket(regime_summary),
         "regime_verdict": verdict,
         "regime_gated_backtest": gated_backtest,
+        "regime_trade_evidence": _regime_trade_evidence(market_regime, regime_summary, gated_backtest, target_regime, allowed_regimes),
         "regime_summary": regime_summary,
         "monthly_summary": monthly_summary,
         "session_summary": session_summary,
@@ -229,21 +230,26 @@ def _regime_segments(days: list[DailyRegime]) -> list[dict[str, object]]:
     segments: list[dict[str, object]] = []
     start = days[0]
     previous = days[0]
+    trading_days = 1
     for day in days[1:]:
         if day.regime != previous.regime:
-            segments.append(_segment_row(start, previous))
+            segments.append(_segment_row(start, previous, trading_days))
             start = day
+            trading_days = 1
+        else:
+            trading_days += 1
         previous = day
-    segments.append(_segment_row(start, previous))
+    segments.append(_segment_row(start, previous, trading_days))
     return segments[:250]
 
 
-def _segment_row(start: DailyRegime, end: DailyRegime) -> dict[str, object]:
+def _segment_row(start: DailyRegime, end: DailyRegime, trading_days: int) -> dict[str, object]:
     return {
         "start": start.date.isoformat(),
         "end": end.date.isoformat(),
         "regime": start.regime,
-        "trading_days": (end.date - start.date).days + 1,
+        "trading_days": trading_days,
+        "calendar_days": (end.date - start.date).days + 1,
     }
 
 
@@ -527,6 +533,75 @@ def _regime_gated_backtest(
     ]
     result = run_vector_backtest(bars, gated_signals, config)
     return _backtest_summary(result)
+
+
+def _regime_trade_evidence(
+    market_regime: dict[str, object],
+    regime_summary: list[dict[str, object]],
+    gated_backtest: dict[str, object],
+    target_regime: str | None,
+    allowed_regimes: list[str],
+) -> dict[str, object]:
+    target = str(target_regime or "")
+    if not target:
+        dominant = _dominant_positive_bucket(regime_summary)
+        target = str(dominant.get("key") or (allowed_regimes[0] if len(allowed_regimes) == 1 else ""))
+    if not target:
+        return {"schema": "regime_trade_evidence_v1", "available": False}
+
+    target_row = next((row for row in regime_summary if str(row.get("key")) == target), None)
+    trading_days = int(market_regime.get("trading_days") or 0)
+    segments = market_regime.get("segments") if isinstance(market_regime.get("segments"), list) else []
+    target_segments = [segment for segment in segments if isinstance(segment, dict) and str(segment.get("regime")) == target]
+    outside_rows = [row for row in regime_summary if str(row.get("key")) != target]
+    outside_active_bars = sum(int(row.get("active_bars") or 0) for row in outside_rows)
+    outside_transitions = sum(int(row.get("transitions") or 0) for row in outside_rows)
+    outside_net_profit = sum(_number(row.get("net_profit")) for row in outside_rows)
+    regime_days = int(target_row.get("trading_days") or 0) if target_row else 0
+    in_regime = _regime_evidence_summary(target_row) if target_row else {}
+    return {
+        "schema": "regime_trade_evidence_v1",
+        "available": target_row is not None,
+        "target_regime": target,
+        "is_targeted": bool(target_regime),
+        "history_trading_days": trading_days,
+        "history_bar_count": market_regime.get("bar_count"),
+        "history_start": market_regime.get("start"),
+        "history_end": market_regime.get("end"),
+        "regime_trading_days": regime_days,
+        "regime_history_share": round(regime_days / trading_days, 4) if trading_days > 0 else 0.0,
+        "regime_episodes": len(target_segments),
+        "longest_regime_episode_days": max((int(segment.get("trading_days") or 0) for segment in target_segments), default=0),
+        "first_regime_start": target_segments[0].get("start") if target_segments else None,
+        "last_regime_end": target_segments[-1].get("end") if target_segments else None,
+        "flat_days_outside_regime": max(0, trading_days - regime_days),
+        "outside_active_bars": outside_active_bars,
+        "outside_trade_count": outside_transitions,
+        "outside_net_profit": round(outside_net_profit, 4),
+        "in_regime": in_regime,
+        "full_history_gated": gated_backtest,
+    }
+
+
+def _regime_evidence_summary(row: dict[str, object] | None) -> dict[str, object]:
+    if row is None:
+        return {}
+    return {
+        "net_profit": row.get("net_profit"),
+        "gross_profit": row.get("gross_profit"),
+        "cost": row.get("cost"),
+        "trade_count": row.get("transitions"),
+        "active_bars": row.get("active_bars"),
+        "active_days": row.get("active_days"),
+        "trading_days": row.get("trading_days"),
+        "train_profit": row.get("train_profit"),
+        "test_profit": row.get("test_profit"),
+        "daily_pnl_sharpe": row.get("daily_pnl_sharpe"),
+        "sharpe_days": row.get("sharpe_days"),
+        "max_drawdown": row.get("max_drawdown"),
+        "positive_profit_share": row.get("positive_profit_share"),
+        "verdict": row.get("verdict"),
+    }
 
 
 def _backtest_summary(result: BacktestResult) -> dict[str, object]:

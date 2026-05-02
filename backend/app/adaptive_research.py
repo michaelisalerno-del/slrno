@@ -34,16 +34,17 @@ STYLE_FAMILIES = {
         "swing_trend",
         "calendar_turnaround_tuesday",
         "breakout",
+        "liquidity_sweep_reversal",
         "month_end_seasonality",
         "mean_reversion",
         "volatility_expansion",
         "intraday_trend",
         "swing_trend",
     ),
-    "intraday_only": ("intraday_trend", "breakout", "mean_reversion", "volatility_expansion", "intraday_trend", "scalping"),
-    "swing_trades": ("swing_trend", "breakout", "mean_reversion"),
-    "lower_drawdown": ("mean_reversion", "intraday_trend", "volatility_expansion"),
-    "higher_profit": ("breakout", "swing_trend", "intraday_trend"),
+    "intraday_only": ("intraday_trend", "breakout", "liquidity_sweep_reversal", "mean_reversion", "volatility_expansion", "intraday_trend", "scalping"),
+    "swing_trades": ("swing_trend", "breakout", "liquidity_sweep_reversal", "mean_reversion"),
+    "lower_drawdown": ("mean_reversion", "liquidity_sweep_reversal", "intraday_trend", "volatility_expansion"),
+    "higher_profit": ("breakout", "liquidity_sweep_reversal", "swing_trend", "intraday_trend"),
     "research_ideas": ("calendar_turnaround_tuesday", "month_end_seasonality", "calendar_turnaround_tuesday", "month_end_seasonality"),
 }
 
@@ -74,6 +75,7 @@ class AdaptiveSearchConfig:
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = False
     regime_scan_budget_per_regime: int | None = None
+    target_regime: str | None = None
     repair_mode: str = "standard"
     seed: int = 7
 
@@ -109,11 +111,13 @@ def run_adaptive_search(
     folds = _adaptive_folds(len(bars))
     evaluations: list[CandidateEvaluation] = []
     eligible_regimes = eligible_specialist_regimes(bars)
+    target_regime = _target_regime(config.target_regime)
 
     for trial_index in range(budget):
         family = families[trial_index % len(families)]
         parameters = _sample_parameters(rng, family, config.risk_profile, trial_index)
-        signals = _generate_signals(bars, family, parameters)
+        raw_signals = _generate_signals(bars, family, parameters)
+        signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}) if target_regime else raw_signals
         backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
         backtest = run_vector_backtest(bars, signals, backtest_config)
         fold_results = tuple(_fold_backtests(bars, signals, backtest_config, folds))
@@ -130,7 +134,7 @@ def run_adaptive_search(
         probabilities = _signals_to_probabilities(signals)
         metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
         score = balanced_score(backtest, fold_results, stress, backtest_config)
-        pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest)
+        pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest, target_regime=target_regime)
         warnings = tuple(
             sorted(
                 set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
@@ -155,9 +159,14 @@ def run_adaptive_search(
             "evidence_profile": evidence_profile,
             "bar_pattern_analysis": pattern_analysis,
         }
+        if target_regime:
+            parameters["target_regime"] = target_regime
+            parameters["regime_targeted_refine"] = True
         candidate = ProbabilityCandidate(
-            name=f"{config.trading_style}_{family}_{trial_index + 1}",
-            module_stack=("adaptive_ig_v1", config.trading_style, family),
+            name=f"{config.trading_style}_{target_regime}_{family}_{trial_index + 1}" if target_regime else f"{config.trading_style}_{family}_{trial_index + 1}",
+            module_stack=("adaptive_ig_v1", config.trading_style, "regime_targeted", target_regime, family)
+            if target_regime
+            else ("adaptive_ig_v1", config.trading_style, family),
             parameters=parameters,
             probabilities=probabilities,
         )
@@ -260,6 +269,7 @@ def run_adaptive_search(
         "trial_count": regime_scan_trial_count,
         "budget_per_regime": _regime_scan_budget(config) if config.include_regime_scans else 0,
         "hard_cap": REGIME_SCAN_HARD_CAP,
+        "target_regime": target_regime,
     }
     return AdaptiveSearchResult(ranked, _pareto(ranked), cost_profile, regime_scan)
 
@@ -303,11 +313,17 @@ def _regime_scan_budget(config: AdaptiveSearchConfig) -> int:
     return max(1, min(preset_budget, int(requested)))
 
 
+def _target_regime(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index: int) -> dict[str, float | int | str]:
     lookbacks = {
         "scalping": (3, 5, 8, 12),
         "intraday_trend": (8, 12, 16, 24, 36),
         "breakout": (12, 20, 32, 48),
+        "liquidity_sweep_reversal": (12, 20, 32, 48, 72),
         "mean_reversion": (10, 16, 24, 36),
         "volatility_expansion": (12, 18, 30, 42),
         "swing_trend": (48, 72, 96, 144),
@@ -358,6 +374,13 @@ def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index:
                 "known_edge_reference": "end-of-month seasonality idea; validate across assets and history depth",
             }
         )
+    elif family == "liquidity_sweep_reversal":
+        parameters.update(
+            {
+                "price_action_model": "bar_only_support_resistance_sweep_reclaim",
+                "orderflow_limitation": "No footprint delta or order-book liquidity is available from OHLC bars; this only tests the visible price-action sweep/reclaim pattern.",
+            }
+        )
     return parameters
 
 
@@ -391,6 +414,18 @@ def _generate_signals(bars: list[OHLCBar], family: str, parameters: dict[str, fl
                 signal = 1 if long_break else -1 if short_break else 0
                 breakout_distance = max((bar.close - high) / max(high, 1e-12), (low - bar.close) / max(low, 1e-12), 0.0)
                 confidence = breakout_distance / max(threshold, 1e-12)
+            elif family == "liquidity_sweep_reversal":
+                window = bars[index - lookback : index]
+                support = min(item.low for item in window)
+                resistance = max(item.high for item in window)
+                swept_support = bar.low < support * (1 - threshold)
+                reclaimed_support = bar.close > support and bar.close >= bar.open
+                swept_resistance = bar.high > resistance * (1 + threshold)
+                rejected_resistance = bar.close < resistance and bar.close <= bar.open
+                signal = 1 if swept_support and reclaimed_support else -1 if swept_resistance and rejected_resistance else 0
+                sweep_distance = max((support - bar.low) / max(support, 1e-12), (bar.high - resistance) / max(resistance, 1e-12), 0.0)
+                body_reclaim = abs(bar.close - bar.open) / max(bar.close, 1e-12)
+                confidence = (sweep_distance + body_reclaim) / max(threshold, 1e-12)
             elif family == "mean_reversion":
                 zscore = _zscore(closes[index - lookback : index], bar.close)
                 signal = 1 if zscore < -z_threshold else -1 if zscore > z_threshold else 0
@@ -1048,6 +1083,8 @@ def _churn_penalty(backtest: BacktestResult) -> float:
 def _threshold_choices(family: str) -> tuple[int, ...]:
     if family == "scalping":
         return (12, 18, 25, 35, 50, 75)
+    if family == "liquidity_sweep_reversal":
+        return (6, 8, 12, 18, 25, 35, 50)
     if family in {"intraday_trend", "breakout", "volatility_expansion"}:
         return (12, 18, 25, 35, 50, 75, 110)
     if family == "swing_trend":
@@ -1060,6 +1097,8 @@ def _max_hold_choices(family: str) -> tuple[int, ...]:
         return (8, 12, 18, 24, 36)
     if family == "swing_trend":
         return (48, 96, 144, 192, 288)
+    if family == "liquidity_sweep_reversal":
+        return (12, 18, 24, 36, 48, 72)
     return (24, 48, 72, 96, 144)
 
 
@@ -1068,6 +1107,8 @@ def _spacing_choices(family: str) -> tuple[int, ...]:
         return (4, 8, 12, 18)
     if family == "swing_trend":
         return (12, 24, 36, 48)
+    if family == "liquidity_sweep_reversal":
+        return (6, 8, 12, 18, 24)
     return (4, 8, 12, 18, 24, 36)
 
 

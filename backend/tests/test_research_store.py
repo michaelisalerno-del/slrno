@@ -31,6 +31,7 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     assert run_detail is not None
     assert run_detail["error"] == ""
     assert [trial["strategy_name"] for trial in trials] == ["rejected", "accepted"]
+    assert [trial["market_id"] for trial in trials] == ["NAS100", "NAS100"]
     assert "estimated_spread_bps" in trials[0]["costs"]
     assert "net_cost_ratio" in trials[0]["costs"]
     assert "expectancy_per_trade" in trials[0]["costs"]
@@ -236,7 +237,7 @@ def test_research_store_demotes_stale_paper_candidate_on_read(tmp_path):
 
 def _evaluation(name: str, passed: bool, promotion_tier: str = "reject", robustness_score: float = 75.0) -> CandidateEvaluation:
     return CandidateEvaluation(
-        candidate=ProbabilityCandidate(name, ("fixture",), {}, [0.1, 0.9]),
+        candidate=ProbabilityCandidate(name, ("fixture",), {"market_id": "NAS100"}, [0.1, 0.9]),
         metrics=ClassificationMetrics(1.0, 1.0, 0.01, 0.1, 1.0, 0.5, 2),
         backtest=BacktestResult(
             100,

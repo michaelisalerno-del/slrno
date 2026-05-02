@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import date
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,6 +97,7 @@ class ResearchRunPayload(BaseModel):
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = False
     regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
+    target_regime: str | None = None
     excluded_months: list[str] = Field(default_factory=list)
     repair_mode: str = "standard"
 
@@ -443,15 +445,21 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
 
     for market in selected_markets:
         interval = _run_interval_for_market(payload, market)
+        start = _run_start_for_market(payload, market, interval)
         market_status: dict[str, object] = {
             "market_id": market.market_id,
             "name": market.name,
             "eodhd_symbol": market.eodhd_symbol,
             "interval": interval,
+            "start": start,
+            "end": payload.end,
             "status": "loading",
             "data_source_status": "eodhd_primary_symbol",
             "cost_source_status": "ig_cost_model",
         }
+        if start != payload.start:
+            market_status["requested_start"] = payload.start
+            market_status["history_expanded"] = True
         market_statuses.append(market_status)
         persist_status()
         if not market.enabled:
@@ -459,7 +467,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             persist_status()
             continue
         try:
-            bars = await provider.historical_bars(market.eodhd_symbol, interval, payload.start, payload.end)
+            bars = await provider.historical_bars(market.eodhd_symbol, interval, start, payload.end)
         except Exception as exc:
             _mark_market_failed(
                 market_status,
@@ -497,7 +505,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             market.market_id,
             interval,
             "eodhd_primary_symbol",
-            payload.start,
+            start,
             payload.end,
             bars,
         )
@@ -522,6 +530,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         cost_stress_multiplier=max(1.0, payload.cost_stress_multiplier),
                         include_regime_scans=payload.include_regime_scans,
                         regime_scan_budget_per_regime=payload.regime_scan_budget_per_regime,
+                        target_regime=payload.target_regime,
                         repair_mode=payload.repair_mode,
                     ),
                 )
@@ -726,11 +735,44 @@ def _bar_month_key(bar: object) -> str:
 
 def _run_interval_for_market(payload: ResearchRunPayload, market: MarketMapping) -> str:
     requested = str(payload.interval or "").strip()
+    if _is_eodhd_monthly_commodity(market):
+        return "1month"
     if not requested or requested == "market_default":
         if market.asset_class == "commodity" and market.default_timeframe in {"1min", "1m", "5min", "5m", "15min", "15m", "30min", "30m", "1hour", "1h"}:
             return "1day"
         return market.default_timeframe
     return requested
+
+
+def _is_eodhd_monthly_commodity(market: MarketMapping) -> bool:
+    if not market.eodhd_symbol.startswith("COMMODITY:"):
+        return False
+    code = market.eodhd_symbol.removeprefix("COMMODITY:")
+    return code in EODHDProvider._MONTHLY_COMMODITIES
+
+
+def _run_start_for_market(payload: ResearchRunPayload, market: MarketMapping, interval: str) -> str:
+    requested_interval = str(payload.interval or "").strip()
+    if interval not in {"1month", "1mo", "monthly"}:
+        return payload.start
+    if requested_interval != "market_default" and not _is_eodhd_monthly_commodity(market):
+        return payload.start
+    return min(payload.start, _years_before(payload.end, 6))
+
+
+def _years_before(value: str, years: int) -> str:
+    try:
+        end = date.fromisoformat(value[:10])
+    except ValueError:
+        return value
+    year = max(1, end.year - years)
+    day = end.day
+    while day > 28:
+        try:
+            return end.replace(year=year, day=day).isoformat()
+        except ValueError:
+            day -= 1
+    return end.replace(year=year, day=day).isoformat()
 
 
 def _minimum_bars_for_interval(market: MarketMapping, interval: str) -> int:
@@ -764,6 +806,7 @@ def _research_run_config(
         "cost_stress_multiplier": payload.cost_stress_multiplier,
         "include_regime_scans": payload.include_regime_scans,
         "regime_scan_budget_per_regime": payload.regime_scan_budget_per_regime,
+        "target_regime": payload.target_regime,
         "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
         "repair_mode": payload.repair_mode,
         "product_mode": payload.product_mode,
