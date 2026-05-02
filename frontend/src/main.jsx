@@ -164,7 +164,7 @@ function App() {
     excluded_months: [],
     repair_mode: "standard",
   });
-  const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready." });
+  const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready.", progress: 0 });
 
   const eodhdStatus = providerStatus(status, "eodhd");
   const igStatus = providerStatus(status, "ig");
@@ -319,6 +319,7 @@ function App() {
     setResearchState({
       status: "running",
       detail: `${engine.label}: ${budget} strategy trials per market, ${plannedTrials} base total${regimeScanNote}.`,
+      progress: 2,
     });
     try {
       const result = await createResearchRun({
@@ -337,11 +338,12 @@ function App() {
       setResearchState({
         status: detail.status,
         detail: runStateDetail(detail, plannedTrials),
+        progress: runProgress(detail, plannedTrials),
       });
       setMessage(runCompletionMessage(result.run_id, detail));
       await loadModule("backtests");
     } catch (error) {
-      setResearchState({ status: "error", detail: error.message });
+      setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
       await loadModule("backtests").catch(() => undefined);
     }
@@ -374,7 +376,7 @@ function App() {
       }
       await launchResearchRun(runConfig, autoRefinementPlan.marketIds, "Launching auto-refine run...");
     } catch (error) {
-      setResearchState({ status: "error", detail: error.message });
+      setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
     }
   }
@@ -575,7 +577,7 @@ function App() {
     setRunDetail(detail);
     getMarketDataCacheStatus().then(setCacheStatus).catch(() => undefined);
     for (let attempt = 0; attempt < 720 && ["created", "running"].includes(detail.status); attempt += 1) {
-      setResearchState({ status: "running", detail: runStateDetail(detail, plannedTrials) });
+      setResearchState({ status: "running", detail: runStateDetail(detail, plannedTrials), progress: runProgress(detail, plannedTrials) });
       await sleep(2000);
       const [nextDetail, nextCacheStatus] = await Promise.all([
         getResearchRun(runId),
@@ -583,6 +585,7 @@ function App() {
       ]);
       detail = nextDetail;
       setRunDetail(detail);
+      setResearchState({ status: detail.status, detail: runStateDetail(detail, plannedTrials), progress: runProgress(detail, plannedTrials) });
       if (nextCacheStatus) {
         setCacheStatus(nextCacheStatus);
       }
@@ -723,6 +726,12 @@ function App() {
               <div className={`run-state ${researchState.status}`}>
                 <strong>{researchState.status.toUpperCase()}</strong>
                 <span>{researchState.detail}</span>
+                <div className="progress-row">
+                  <div className="progress-track" aria-label="Research run progress">
+                    <div className={`progress-fill ${researchState.status}`} style={{ width: `${boundedProgress(researchState.progress)}%` }} />
+                  </div>
+                  <small>{Math.round(boundedProgress(researchState.progress))}%</small>
+                </div>
               </div>
             </div>
             <div className="tabs">
@@ -2076,6 +2085,55 @@ function SecretBadge({ status }) {
 
 function providerStatus(statuses, provider) {
   return statuses.find((item) => item.provider === provider);
+}
+
+function runProgress(detail, plannedTrials = 0) {
+  if (!detail) {
+    return 0;
+  }
+  if (["finished", "finished_with_warnings", "error"].includes(detail.status)) {
+    return 100;
+  }
+  const statuses = detail.config?.market_statuses ?? [];
+  const configuredMarkets = detail.config?.market_ids ?? [];
+  const marketCount = Math.max(configuredMarkets.length, statuses.length, 1);
+  if (statuses.length > 0) {
+    const marketProgressTotal = statuses.reduce((total, item) => total + marketStatusProgress(item), 0);
+    const missingMarkets = Math.max(0, marketCount - statuses.length);
+    const marketProgress = marketProgressTotal / Math.max(1, statuses.length + missingMarkets);
+    const trialProgress = plannedTrials > 0 ? Math.min(95, (Number(detail.trial_count ?? 0) / plannedTrials) * 95) : 0;
+    return boundedProgress(Math.max(marketProgress, trialProgress), detail.status);
+  }
+  if (detail.status === "running") {
+    const savedTrials = Number(detail.trial_count ?? 0);
+    return plannedTrials > 0 ? boundedProgress((savedTrials / plannedTrials) * 95, detail.status) : 5;
+  }
+  return detail.status === "created" ? 2 : 0;
+}
+
+function marketStatusProgress(status) {
+  if (status.status === "completed" || status.status === "failed") {
+    return 100;
+  }
+  if (status.status === "evaluating") {
+    return 68;
+  }
+  if (status.bar_snapshot || status.bar_count) {
+    return 52;
+  }
+  if (status.status === "loading") {
+    return 18;
+  }
+  return 5;
+}
+
+function boundedProgress(value, status = "") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+  const upper = ["created", "running"].includes(status) ? 98 : 100;
+  return Math.max(0, Math.min(upper, number));
 }
 
 function runStateDetail(detail, plannedTrials) {
