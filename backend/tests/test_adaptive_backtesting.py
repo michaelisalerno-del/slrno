@@ -479,6 +479,39 @@ def test_regime_specialist_scans_are_opt_in_and_gated_to_target_regime():
                 assert row["active_bars"] == 0
 
 
+def test_target_regime_refine_gates_base_trials_to_that_regime():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    bars = _daily_trend_bars(90)
+
+    result = run_adaptive_search(
+        bars,
+        "TEST",
+        "1day",
+        profile,
+        AdaptiveSearchConfig(
+            preset="quick",
+            trading_style="intraday_only",
+            search_budget=6,
+            target_regime="trend_up",
+            seed=5,
+        ),
+    )
+
+    assert result.regime_scan["target_regime"] == "trend_up"
+    assert len(result.evaluations) == 6
+    for evaluation in result.evaluations:
+        parameters = evaluation.candidate.parameters
+        analysis = parameters["bar_pattern_analysis"]
+        assert parameters["target_regime"] == "trend_up"
+        assert parameters["regime_targeted_refine"] is True
+        assert analysis["target_regime"] == "trend_up"
+        assert analysis["regime_trade_evidence"]["target_regime"] == "trend_up"
+        for row in analysis["regime_summary"]:
+            if row["key"] != "trend_up":
+                assert row["active_bars"] == 0
+
+
 def _trend_bars(count: int) -> list[OHLCBar]:
     start = datetime(2026, 1, 1, 9)
     price = 100.0

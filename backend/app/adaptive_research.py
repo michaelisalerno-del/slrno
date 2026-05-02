@@ -74,6 +74,7 @@ class AdaptiveSearchConfig:
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = False
     regime_scan_budget_per_regime: int | None = None
+    target_regime: str | None = None
     repair_mode: str = "standard"
     seed: int = 7
 
@@ -109,11 +110,13 @@ def run_adaptive_search(
     folds = _adaptive_folds(len(bars))
     evaluations: list[CandidateEvaluation] = []
     eligible_regimes = eligible_specialist_regimes(bars)
+    target_regime = _target_regime(config.target_regime)
 
     for trial_index in range(budget):
         family = families[trial_index % len(families)]
         parameters = _sample_parameters(rng, family, config.risk_profile, trial_index)
-        signals = _generate_signals(bars, family, parameters)
+        raw_signals = _generate_signals(bars, family, parameters)
+        signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}) if target_regime else raw_signals
         backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
         backtest = run_vector_backtest(bars, signals, backtest_config)
         fold_results = tuple(_fold_backtests(bars, signals, backtest_config, folds))
@@ -130,7 +133,7 @@ def run_adaptive_search(
         probabilities = _signals_to_probabilities(signals)
         metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
         score = balanced_score(backtest, fold_results, stress, backtest_config)
-        pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest)
+        pattern_analysis = analyze_strategy_patterns(bars, signals, backtest_config, backtest, target_regime=target_regime)
         warnings = tuple(
             sorted(
                 set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
@@ -155,9 +158,14 @@ def run_adaptive_search(
             "evidence_profile": evidence_profile,
             "bar_pattern_analysis": pattern_analysis,
         }
+        if target_regime:
+            parameters["target_regime"] = target_regime
+            parameters["regime_targeted_refine"] = True
         candidate = ProbabilityCandidate(
-            name=f"{config.trading_style}_{family}_{trial_index + 1}",
-            module_stack=("adaptive_ig_v1", config.trading_style, family),
+            name=f"{config.trading_style}_{target_regime}_{family}_{trial_index + 1}" if target_regime else f"{config.trading_style}_{family}_{trial_index + 1}",
+            module_stack=("adaptive_ig_v1", config.trading_style, "regime_targeted", target_regime, family)
+            if target_regime
+            else ("adaptive_ig_v1", config.trading_style, family),
             parameters=parameters,
             probabilities=probabilities,
         )
@@ -260,6 +268,7 @@ def run_adaptive_search(
         "trial_count": regime_scan_trial_count,
         "budget_per_regime": _regime_scan_budget(config) if config.include_regime_scans else 0,
         "hard_cap": REGIME_SCAN_HARD_CAP,
+        "target_regime": target_regime,
     }
     return AdaptiveSearchResult(ranked, _pareto(ranked), cost_profile, regime_scan)
 
@@ -301,6 +310,11 @@ def _regime_scan_budget(config: AdaptiveSearchConfig) -> int:
     if requested is None:
         return preset_budget
     return max(1, min(preset_budget, int(requested)))
+
+
+def _target_regime(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _sample_parameters(rng: Random, family: str, risk_profile: str, trial_index: int) -> dict[str, float | int | str]:

@@ -36,6 +36,28 @@ def test_strategy_pattern_analysis_warns_when_edge_only_works_in_shock_regime():
     assert analysis["trade_summary"]["trade_segments"] >= 1
 
 
+def test_strategy_pattern_analysis_reports_target_regime_trade_evidence():
+    bars = _selloff_rebound_bars()
+    signals = [0] * len(bars)
+    signals[8] = 1
+    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0)
+    backtest = run_vector_backtest(bars, signals, config)
+
+    analysis = analyze_strategy_patterns(bars, signals, config, backtest, target_regime="rebound_after_selloff")
+    evidence = analysis["regime_trade_evidence"]
+    in_regime = evidence["in_regime"]
+
+    assert evidence["available"] is True
+    assert evidence["target_regime"] == "rebound_after_selloff"
+    assert evidence["is_targeted"] is True
+    assert evidence["regime_trading_days"] >= 1
+    assert 0 < evidence["regime_history_share"] <= 1
+    assert evidence["regime_episodes"] >= 1
+    assert in_regime["net_profit"] > 0
+    assert in_regime["trade_count"] >= 1
+    assert evidence["full_history_gated"]["net_profit"] == analysis["regime_gated_backtest"]["net_profit"]
+
+
 def test_strategy_pattern_analysis_marks_negative_gated_oos_as_headline_only():
     bars = _selloff_rebound_bars()
     signals = [0] * len(bars)

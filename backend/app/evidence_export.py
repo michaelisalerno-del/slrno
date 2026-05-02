@@ -332,6 +332,8 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
         evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
         pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
         gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
+        regime_evidence = pattern.get("regime_trade_evidence") if isinstance(pattern.get("regime_trade_evidence"), dict) else {}
+        in_regime = regime_evidence.get("in_regime") if isinstance(regime_evidence.get("in_regime"), dict) else {}
         summary = trial.get("capital_summary") if isinstance(trial.get("capital_summary"), dict) else {}
         rows.append(
             {
@@ -362,6 +364,14 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
                 "regime_gated_net_profit": gated.get("net_profit"),
                 "regime_gated_test_profit": gated.get("test_profit"),
                 "regime_gated_daily_pnl_sharpe": gated.get("daily_pnl_sharpe"),
+                "in_regime_net_profit": in_regime.get("net_profit"),
+                "in_regime_test_profit": in_regime.get("test_profit"),
+                "in_regime_daily_pnl_sharpe": in_regime.get("daily_pnl_sharpe"),
+                "in_regime_sharpe_days": in_regime.get("sharpe_days"),
+                "target_regime_trading_days": regime_evidence.get("regime_trading_days"),
+                "target_regime_history_share": regime_evidence.get("regime_history_share"),
+                "target_regime_episodes": regime_evidence.get("regime_episodes"),
+                "outside_regime_trade_count": regime_evidence.get("outside_trade_count"),
                 "smallest_feasible_account": summary.get("smallest_feasible_account"),
                 "warnings": "|".join(str(item) for item in trial.get("warnings", [])),
             }
@@ -379,6 +389,8 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
         evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
         pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
         gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
+        regime_evidence = pattern.get("regime_trade_evidence") if isinstance(pattern.get("regime_trade_evidence"), dict) else {}
+        in_regime = regime_evidence.get("in_regime") if isinstance(regime_evidence.get("in_regime"), dict) else {}
         readiness = audit.get("promotion_readiness") if isinstance(audit.get("promotion_readiness"), dict) else {}
         summary = candidate.get("capital_summary") if isinstance(candidate.get("capital_summary"), dict) else {}
         rows.append(
@@ -407,6 +419,14 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
                 "regime_gated_net_profit": gated.get("net_profit"),
                 "regime_gated_test_profit": gated.get("test_profit"),
                 "regime_gated_daily_pnl_sharpe": gated.get("daily_pnl_sharpe"),
+                "in_regime_net_profit": in_regime.get("net_profit"),
+                "in_regime_test_profit": in_regime.get("test_profit"),
+                "in_regime_daily_pnl_sharpe": in_regime.get("daily_pnl_sharpe"),
+                "in_regime_sharpe_days": in_regime.get("sharpe_days"),
+                "target_regime_trading_days": regime_evidence.get("regime_trading_days"),
+                "target_regime_history_share": regime_evidence.get("regime_history_share"),
+                "target_regime_episodes": regime_evidence.get("regime_episodes"),
+                "outside_regime_trade_count": regime_evidence.get("outside_trade_count"),
                 "smallest_feasible_account": summary.get("smallest_feasible_account"),
                 "blockers": "|".join(str(item) for item in readiness.get("blockers", [])),
                 "validation_warnings": "|".join(str(item) for item in readiness.get("validation_warnings", [])),
@@ -556,6 +576,8 @@ def _regime_gated_backtest_rows(bar_analysis: dict[str, object]) -> list[dict[st
             continue
         analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
         gated = analysis.get("regime_gated_backtest") if isinstance(analysis.get("regime_gated_backtest"), dict) else {}
+        regime_evidence = analysis.get("regime_trade_evidence") if isinstance(analysis.get("regime_trade_evidence"), dict) else {}
+        in_regime = regime_evidence.get("in_regime") if isinstance(regime_evidence.get("in_regime"), dict) else {}
         rows.append(
             {
                 "entity_type": item.get("entity_type"),
@@ -567,6 +589,14 @@ def _regime_gated_backtest_rows(bar_analysis: dict[str, object]) -> list[dict[st
                 "regime_verdict": analysis.get("regime_verdict"),
                 "allowed_regimes": "|".join(str(value) for value in analysis.get("allowed_regimes", [])),
                 "blocked_regimes": "|".join(str(value) for value in analysis.get("blocked_regimes", [])),
+                "in_regime_net_profit": in_regime.get("net_profit"),
+                "in_regime_test_profit": in_regime.get("test_profit"),
+                "in_regime_daily_pnl_sharpe": in_regime.get("daily_pnl_sharpe"),
+                "in_regime_sharpe_days": in_regime.get("sharpe_days"),
+                "target_regime_trading_days": regime_evidence.get("regime_trading_days"),
+                "target_regime_history_share": regime_evidence.get("regime_history_share"),
+                "target_regime_episodes": regime_evidence.get("regime_episodes"),
+                "outside_regime_trade_count": regime_evidence.get("outside_trade_count"),
                 **gated,
             }
         )

@@ -97,6 +97,7 @@ class ResearchRunPayload(BaseModel):
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = False
     regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
+    target_regime: str | None = None
     excluded_months: list[str] = Field(default_factory=list)
     repair_mode: str = "standard"
 
@@ -529,6 +530,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         cost_stress_multiplier=max(1.0, payload.cost_stress_multiplier),
                         include_regime_scans=payload.include_regime_scans,
                         regime_scan_budget_per_regime=payload.regime_scan_budget_per_regime,
+                        target_regime=payload.target_regime,
                         repair_mode=payload.repair_mode,
                     ),
                 )
@@ -804,6 +806,7 @@ def _research_run_config(
         "cost_stress_multiplier": payload.cost_stress_multiplier,
         "include_regime_scans": payload.include_regime_scans,
         "regime_scan_budget_per_regime": payload.regime_scan_budget_per_regime,
+        "target_regime": payload.target_regime,
         "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
         "repair_mode": payload.repair_mode,
         "product_mode": payload.product_mode,
