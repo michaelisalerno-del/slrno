@@ -19,5 +19,6 @@ def test_plugin_maps_to_backtest_ready_market_mapping():
 
     assert mapping.market_id == "XAUUSD"
     assert mapping.plugin_id == "ig-spot-gold"
+    assert mapping.ig_epic == "CS.D.USCGC.TODAY.IP"
     assert mapping.spread_bps > 0
     assert mapping.min_backtest_bars >= 500
