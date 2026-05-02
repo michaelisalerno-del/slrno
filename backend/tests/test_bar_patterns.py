@@ -21,7 +21,7 @@ def test_strategy_pattern_analysis_warns_when_edge_only_works_in_shock_regime():
     bars = _selloff_rebound_bars()
     signals = [0] * len(bars)
     signals[8] = 1
-    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0)
+    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0, overnight_admin_fee_annual=0)
     backtest = run_vector_backtest(bars, signals, config)
 
     analysis = analyze_strategy_patterns(bars, signals, config, backtest)
@@ -40,7 +40,7 @@ def test_strategy_pattern_analysis_reports_target_regime_trade_evidence():
     bars = _selloff_rebound_bars()
     signals = [0] * len(bars)
     signals[8] = 1
-    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0)
+    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0, overnight_admin_fee_annual=0)
     backtest = run_vector_backtest(bars, signals, config)
 
     analysis = analyze_strategy_patterns(bars, signals, config, backtest, target_regime="rebound_after_selloff")
@@ -69,6 +69,25 @@ def test_strategy_pattern_analysis_marks_negative_gated_oos_as_headline_only():
 
     assert "regime_gated_oos_negative" in analysis["warnings"]
     assert analysis["regime_verdict"] in {"headline_only", "thin_regime_sample"}
+
+
+def test_trade_summary_assigns_flip_pnl_to_new_position():
+    start = datetime(2026, 1, 1, 16)
+    closes = [100, 110, 105, 95]
+    bars = [
+        OHLCBar("TEST", start + timedelta(days=index), close, close, close, close)
+        for index, close in enumerate(closes)
+    ]
+    signals = [1, -1, 0, 0]
+    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0, overnight_admin_fee_annual=0)
+    backtest = run_vector_backtest(bars, signals, config)
+
+    analysis = analyze_strategy_patterns(bars, signals, config, backtest)
+    top_trades = analysis["trade_summary"]["top_trades"]
+
+    assert analysis["trade_summary"]["trade_segments"] == 2
+    assert [trade["side"] for trade in top_trades] == ["long", "short"]
+    assert [trade["net_profit"] for trade in top_trades] == [10, 5]
 
 
 def _selloff_rebound_bars() -> list[OHLCBar]:
