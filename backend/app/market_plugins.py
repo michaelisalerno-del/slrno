@@ -20,6 +20,7 @@ class MarketPlugin:
     name: str
     asset_class: str
     eodhd_symbol: str
+    ig_epic: str
     ig_name: str
     ig_search_terms: tuple[str, ...]
     backtest_profile: BacktestProfile
@@ -32,7 +33,7 @@ class MarketPlugin:
             name=self.name,
             asset_class=self.asset_class,
             eodhd_symbol=self.eodhd_symbol,
-            ig_epic="",
+            ig_epic=self.ig_epic,
             enabled=True,
             plugin_id=self.plugin_id,
             ig_name=self.ig_name,
@@ -50,6 +51,7 @@ class MarketPlugin:
             "name": self.name,
             "asset_class": self.asset_class,
             "eodhd_symbol": self.eodhd_symbol,
+            "ig_epic": self.ig_epic,
             "ig_name": self.ig_name,
             "ig_search_terms": list(self.ig_search_terms),
             "estimated_spread_bps": self.backtest_profile.spread_bps,
@@ -67,6 +69,7 @@ def _plugin_from_market(market: MarketMapping, source_url: str, notes: str) -> M
         name=market.name,
         asset_class=market.asset_class,
         eodhd_symbol=market.eodhd_symbol,
+        ig_epic=market.ig_epic,
         ig_name=market.ig_name,
         ig_search_terms=tuple(term.strip() for term in market.ig_search_terms.split(",") if term.strip()),
         backtest_profile=BacktestProfile(market.default_timeframe, market.spread_bps, market.slippage_bps, market.min_backtest_bars),

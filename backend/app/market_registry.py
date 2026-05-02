@@ -47,7 +47,7 @@ DEFAULT_MARKETS = [
     MarketMapping("NZDUSD", "NZD/USD", "forex", "NZDUSD.FOREX", "", True, "ig-nzd-usd", "NZD/USD", "NZD/USD,NZDUSD", "5min", 1.8, 1.0),
     MarketMapping("EURJPY", "EUR/JPY", "forex", "EURJPY.FOREX", "", True, "ig-eur-jpy", "EUR/JPY", "EUR/JPY,EURJPY", "5min", 1.8, 1.0),
     MarketMapping("GBPJPY", "GBP/JPY", "forex", "GBPJPY.FOREX", "", True, "ig-gbp-jpy", "GBP/JPY", "GBP/JPY,GBPJPY", "5min", 2.2, 1.1),
-    MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD.FOREX", "", True, "ig-spot-gold", "Spot Gold", "Spot Gold,Gold,XAU/USD", "5min", 3.0, 1.5),
+    MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD.FOREX", "CS.D.USCGC.TODAY.IP", True, "ig-spot-gold", "Spot Gold", "Spot Gold,Gold,XAU/USD", "5min", 3.0, 1.5),
     MarketMapping("XAGUSD", "Spot Silver", "commodity", "XAGUSD.FOREX", "", True, "ig-spot-silver", "Spot Silver", "Spot Silver,Silver,XAG/USD", "5min", 4.0, 2.0),
     MarketMapping("BRENT", "Brent Crude", "commodity", "COMMODITY:BRENT", "", True, "ig-brent-crude", "Brent Crude", "Brent Crude,Brent Oil", "1day", 3.5, 2.0),
     MarketMapping("WTI", "US Crude", "commodity", "COMMODITY:WTI", "", True, "ig-wti-crude", "US Crude", "US Crude,WTI Oil", "1day", 3.5, 2.0),
