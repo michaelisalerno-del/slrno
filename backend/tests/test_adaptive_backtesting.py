@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.adaptive_research import AdaptiveSearchConfig, _generate_signals, _promotion_tier, _warnings, balanced_score, run_adaptive_search
+from app.adaptive_research import AdaptiveSearchConfig, _cost_aware_score, _generate_signals, _promotion_tier, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import IGCostProfile, public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -115,6 +115,78 @@ def test_balanced_score_prefers_same_profit_with_less_cost_churn():
     )
 
     assert balanced_score(efficient, (efficient,), efficient, config) > balanced_score(churn, (churn,), churn, config)
+
+
+def test_target_regime_scoring_uses_in_regime_evidence():
+    flat_full_period = BacktestResult(
+        net_profit=0,
+        sharpe=0,
+        max_drawdown=900,
+        win_rate=0.5,
+        trade_count=30,
+        exposure=0.1,
+        turnover=30,
+        train_profit=0,
+        test_profit=0,
+        gross_profit=1_000,
+        total_cost=1_000,
+        daily_pnl_sharpe=0,
+        expectancy_per_trade=0,
+        average_cost_per_trade=33,
+        net_cost_ratio=0,
+        cost_to_gross_ratio=1,
+    )
+    metrics = ClassificationMetrics(0.6, 0.6, 0.2, 0.6, 0.6, 0.5, 2)
+    untargeted = CandidateEvaluation(
+        candidate=ProbabilityCandidate("full", ("adaptive_ig_v1",), {"stress_net_profit": 0}, [0.5, 0.6]),
+        metrics=metrics,
+        backtest=flat_full_period,
+        fold_results=(flat_full_period,),
+        robustness_score=0,
+        passed=False,
+        warnings=(),
+    )
+    targeted = CandidateEvaluation(
+        candidate=ProbabilityCandidate(
+            "target",
+            ("adaptive_ig_v1",),
+            {
+                "target_regime": "trend_up",
+                "stress_net_profit": 500,
+                "bar_pattern_analysis": {
+                    "regime_trade_evidence": {
+                        "available": True,
+                        "target_regime": "trend_up",
+                        "regime_trading_days": 140,
+                        "regime_history_share": 0.4,
+                        "regime_episodes": 8,
+                        "in_regime": {
+                            "net_profit": 900,
+                            "test_profit": 450,
+                            "daily_pnl_sharpe": 2.1,
+                            "sharpe_days": 140,
+                            "trade_count": 30,
+                            "max_drawdown": 180,
+                            "gross_profit": 1_100,
+                            "cost": 200,
+                        },
+                    },
+                },
+            },
+            [0.5, 0.6],
+        ),
+        metrics=metrics,
+        backtest=flat_full_period,
+        fold_results=(flat_full_period,),
+        robustness_score=0,
+        passed=False,
+        warnings=(),
+    )
+
+    diagnostics = {"deflated_sharpe_probability": 0.0}
+    config = AdaptiveSearchConfig(repair_mode="auto_refine")
+
+    assert _cost_aware_score(targeted, diagnostics, 0.5, config) > _cost_aware_score(untargeted, diagnostics, 0.5, config)
 
 
 def test_negative_total_net_does_not_promote_to_research_candidate():
@@ -539,6 +611,8 @@ def test_target_regime_refine_gates_base_trials_to_that_regime():
         analysis = parameters["bar_pattern_analysis"]
         assert parameters["target_regime"] == "trend_up"
         assert parameters["regime_targeted_refine"] is True
+        assert parameters["search_audit"]["grade_mode"] == "target_regime"
+        assert parameters["search_audit"]["grade_regime"] == "trend_up"
         assert analysis["target_regime"] == "trend_up"
         assert analysis["regime_trade_evidence"]["target_regime"] == "trend_up"
         for row in analysis["regime_summary"]:

@@ -1866,6 +1866,7 @@ function TrialCard({ trial, onRefineTemplate }) {
   const evidence = evidenceProfileForSource(trial);
   const marketId = trialMarketId(trial);
   const interval = trialIntervalLabel(trial);
+  const scoreBasis = scoreBasisLabel(trial.parameters?.search_audit);
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -1877,7 +1878,7 @@ function TrialCard({ trial, onRefineTemplate }) {
               <span className={`badge ${tierBadgeClass(trial.promotion_tier)}`}>{tierLabel(trial.promotion_tier)}</span>
             </div>
           </div>
-          <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`].filter(Boolean).join(" · ")}</span>
+          <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`, scoreBasis].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="button-row trial-actions">
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
@@ -2021,6 +2022,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(candidate);
+  const scoreBasis = scoreBasisLabel(candidate.audit?.candidate?.parameters?.search_audit);
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -2033,7 +2035,7 @@ function CandidateCard({ candidate, onRefineTemplate }) {
         <strong>{candidate.strategy_name}</strong>
         <span className={`badge ${readinessBadgeClass(readiness.status)}`}>{readinessLabel(readiness.status)}</span>
       </div>
-      <span>{candidate.market_id} · score {round(candidate.robustness_score)}</span>
+      <span>{[candidate.market_id, `score ${round(candidate.robustness_score)}`, scoreBasis].filter(Boolean).join(" · ")}</span>
       {researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe) && (
         <small>{researchRecipeLabel(candidate.audit?.candidate?.parameters?.research_recipe)}</small>
       )}
@@ -2986,6 +2988,13 @@ function regimeCountsLabel(counts = {}) {
     return "No regime labels yet";
   }
   return entries.map(([regime, count]) => `${regimeLabel(regime)} ${count}d`).join(" · ");
+}
+
+function scoreBasisLabel(audit = {}) {
+  if (audit?.grade_mode === "target_regime" && audit.grade_regime) {
+    return `graded on ${regimeLabel(audit.grade_regime)}`;
+  }
+  return "";
 }
 
 function regimePresetBudget(preset) {
