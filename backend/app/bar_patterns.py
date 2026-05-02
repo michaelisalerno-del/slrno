@@ -398,18 +398,24 @@ def _trade_ledger(bars: list[OHLCBar], rows: list[dict[str, object]]) -> list[di
     for row_index, row in enumerate(rows, start=1):
         position = _sign(row["position"])
         previous_position = _sign(row["previous_position"])
-        if current is None and position != 0:
+        if position != previous_position:
+            if current is not None:
+                current["exit_at"] = bars[row_index - 1].timestamp.isoformat()
+                current["exit_price"] = bars[row_index - 1].close
+                trades.append(_rounded_trade(current))
+                current = None
+            if position != 0:
+                current = _new_trade(position, bars[row_index - 1])
+        elif current is None and position != 0:
             current = _new_trade(position, bars[row_index - 1])
-        if current is not None:
+
+        if current is not None and position != 0:
             current["exit_at"] = row["timestamp"]
             current["exit_price"] = bars[row_index].close
             current["bars"] = int(current["bars"]) + 1
             current["gross_profit"] = _number(current["gross_profit"]) + _number(row["gross_profit"])
             current["cost"] = _number(current["cost"]) + _number(row["cost"])
             current["net_profit"] = _number(current["net_profit"]) + _number(row["net_profit"])
-        if current is not None and previous_position != 0 and (position == 0 or position != previous_position):
-            trades.append(_rounded_trade(current))
-            current = _new_trade(position, bars[row_index - 1]) if position != 0 else None
     if current is not None:
         trades.append(_rounded_trade(current))
     return trades
