@@ -76,12 +76,16 @@ class BacktestResult:
     final_equity: float = 10_000.0
     return_pct: float = 0.0
     compounded_position_sizing: bool = False
+    compounded_projection_final_equity: float = 10_000.0
+    compounded_projection_return_pct: float = 0.0
+    compounded_projection_max_drawdown: float = 0.0
     min_effective_position_size: float = 0.0
     max_effective_position_size: float = 0.0
     average_effective_position_size: float = 0.0
     equity_curve: tuple[float, ...] = ()
     drawdown_curve: tuple[float, ...] = ()
     daily_pnl_curve: tuple[float, ...] = ()
+    compounded_projection_daily_pnl_curve: tuple[float, ...] = ()
 
 
 def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: BacktestConfig | None = None) -> BacktestResult:
@@ -101,6 +105,10 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     equity = config.starting_cash
     peak = equity
     max_drawdown = 0.0
+    projection_equity = config.starting_cash
+    projection_peak = projection_equity
+    projection_max_drawdown = 0.0
+    projection_daily_pnl: dict[str, float] = {}
     wins = 0
     trade_count = 0
     active_periods = 0
@@ -154,6 +162,8 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
 
         trade_cost = trade_spread + trade_slippage + trade_commission + trade_funding + trade_fx + trade_guaranteed
         trade_pnl = trade_gross - trade_cost
+        projection_scale = 1.0 if config.compound_position_size else max(0.0, projection_equity) / config.starting_cash
+        projection_trade_pnl = trade_pnl if config.compound_position_size else trade_pnl * projection_scale
         spread_cost += trade_spread
         slippage_cost += trade_slippage
         commission_cost += trade_commission
@@ -164,11 +174,16 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         pnl_date = current_bar.timestamp.date().isoformat()
         pnl_dates.append(pnl_date)
         daily_pnl[pnl_date] = daily_pnl.get(pnl_date, 0.0) + trade_pnl
+        projection_daily_pnl[pnl_date] = projection_daily_pnl.get(pnl_date, 0.0) + projection_trade_pnl
         equity += trade_pnl
+        projection_equity += projection_trade_pnl
         wins += 1 if trade_pnl > 0 else 0
         peak = max(peak, equity)
         current_drawdown = equity - peak
         max_drawdown = min(max_drawdown, current_drawdown)
+        projection_peak = max(projection_peak, projection_equity)
+        projection_drawdown = projection_equity - projection_peak
+        projection_max_drawdown = min(projection_max_drawdown, projection_drawdown)
         equity_values.append(equity)
         drawdown_values.append(abs(current_drawdown))
         previous_exposure = position
@@ -183,6 +198,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     total_cost = spread_cost + slippage_cost + commission_cost + funding_cost + fx_cost + guaranteed_stop_cost
     net_profit = sum(pnl)
     daily_pnl_values = list(daily_pnl.values())
+    projection_daily_pnl_values = list(projection_daily_pnl.values())
     train_daily_pnl_values = _daily_pnl_values(pnl[:split], pnl_dates[:split])
     test_daily_pnl_values = _daily_pnl_values(pnl[split:], pnl_dates[split:])
     rolling_sharpes = _rolling_sharpes(daily_pnl_values, window=20)
@@ -194,6 +210,9 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         starting_cash=config.starting_cash,
         final_equity=equity,
         return_pct=(net_profit / config.starting_cash) * 100,
+        compounded_projection_final_equity=projection_equity,
+        compounded_projection_return_pct=((projection_equity - config.starting_cash) / config.starting_cash) * 100,
+        compounded_projection_max_drawdown=abs(projection_max_drawdown),
         net_profit=net_profit,
         sharpe=sharpe,
         train_sharpe=train_sharpe,
@@ -243,6 +262,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         equity_curve=_sample_curve(equity_values),
         drawdown_curve=_sample_curve(drawdown_values),
         daily_pnl_curve=_sample_curve(daily_pnl_values),
+        compounded_projection_daily_pnl_curve=_sample_curve(projection_daily_pnl_values),
     )
 
 

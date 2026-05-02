@@ -52,6 +52,29 @@ def test_capital_scenarios_project_compounded_balance_by_account_size():
     assert by_account[10000.0]["historical_max_drawdown"] == 500
 
 
+def test_capital_scenarios_use_compounded_projection_without_changing_headline_backtest():
+    scenarios = capital_scenarios(
+        {
+            "starting_cash": 2000,
+            "net_profit": 200,
+            "return_pct": 10,
+            "max_drawdown": 100,
+            "compounded_position_sizing": False,
+            "compounded_projection_return_pct": 12,
+            "compounded_projection_max_drawdown": 120,
+            "compounded_projection_daily_pnl_curve": [50, -40, 30],
+        },
+        {"position_size": 1.0, "stop_loss_bps": 100},
+        {"bid": 100, "offer": 100, "min_deal_size": 1.0, "margin_percent": 5.0},
+    )
+
+    by_account = {item["account_size"]: item for item in scenarios}
+    assert by_account[2000.0]["compounding_enabled"] is True
+    assert by_account[2000.0]["projected_final_balance"] == 2240
+    assert by_account[10000.0]["projected_net_profit"] == 1200
+    assert by_account[10000.0]["historical_max_drawdown"] == 600
+
+
 def test_capital_scenarios_require_reference_price_for_margin_and_stop_estimates():
     scenarios = capital_scenarios({"max_drawdown": 10}, {"position_size": 1.0, "stop_loss_bps": 100}, {})
 

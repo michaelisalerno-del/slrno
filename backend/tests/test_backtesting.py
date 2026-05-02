@@ -82,8 +82,12 @@ def test_compound_position_sizing_scales_new_entries_with_equity():
     )
 
     assert fixed.net_profit == 20
+    assert fixed.compounded_position_sizing is False
+    assert fixed.compounded_projection_final_equity == 121
+    assert fixed.compounded_projection_return_pct == 21
     assert compounded.net_profit == 21
     assert compounded.final_equity == 121
+    assert compounded.compounded_projection_final_equity == 121
     assert compounded.compounded_position_sizing is True
     assert compounded.max_effective_position_size == 1.1
 

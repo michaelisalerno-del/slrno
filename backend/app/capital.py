@@ -72,14 +72,15 @@ def capital_scenarios(
     estimated_stop_loss = abs(stop_points * effective_stake)
     estimated_margin = abs(price * effective_stake * margin_percent / 100)
     source_starting_cash = _positive_float(backtest.get("starting_cash"), 0.0)
-    compounding_enabled = bool(backtest.get("compounded_position_sizing"))
     net_profit = _float(backtest.get("net_profit"), 0.0)
-    return_pct = _float(
-        backtest.get("return_pct"),
-        (net_profit / source_starting_cash) * 100 if source_starting_cash > 0 else 0.0,
+    actual_compounding = bool(backtest.get("compounded_position_sizing"))
+    projection_available = source_starting_cash > 0 and "compounded_projection_return_pct" in backtest
+    compounding_enabled = actual_compounding or projection_available
+    return_pct = _projection_return_pct(backtest, net_profit, source_starting_cash, projection_available)
+    source_max_drawdown = _projection_drawdown(backtest, projection_available)
+    source_worst_daily_loss = _worst_daily_loss(
+        backtest.get("compounded_projection_daily_pnl_curve") if projection_available else backtest.get("daily_pnl_curve")
     )
-    source_max_drawdown = _positive_float(backtest.get("max_drawdown"), 0.0)
-    source_worst_daily_loss = _worst_daily_loss(backtest.get("daily_pnl_curve"))
 
     output: list[dict[str, object]] = []
     for account_size in CAPITAL_SCENARIOS_GBP:
@@ -135,6 +136,21 @@ def capital_scenarios(
             ).as_dict()
         )
     return output
+
+
+def _projection_return_pct(backtest: dict[str, object], net_profit: float, source_starting_cash: float, projection_available: bool) -> float:
+    if projection_available:
+        return _float(backtest.get("compounded_projection_return_pct"), 0.0)
+    return _float(
+        backtest.get("return_pct"),
+        (net_profit / source_starting_cash) * 100 if source_starting_cash > 0 else 0.0,
+    )
+
+
+def _projection_drawdown(backtest: dict[str, object], projection_available: bool) -> float:
+    if projection_available:
+        return _positive_float(backtest.get("compounded_projection_max_drawdown"), backtest.get("max_drawdown"), 0.0)
+    return _positive_float(backtest.get("max_drawdown"), 0.0)
 
 
 def capital_summary(scenarios: list[dict[str, object]]) -> dict[str, object]:
