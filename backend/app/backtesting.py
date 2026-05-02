@@ -11,6 +11,7 @@ from .providers.base import OHLCBar
 class BacktestConfig:
     starting_cash: float = 10_000.0
     position_size: float = 1.0
+    compound_position_size: bool = False
     spread_bps: float = 2.0
     slippage_bps: float = 1.0
     train_fraction: float = 0.7
@@ -71,6 +72,13 @@ class BacktestResult:
     average_cost_per_trade: float = 0.0
     net_cost_ratio: float = 0.0
     cost_to_gross_ratio: float = 0.0
+    starting_cash: float = 10_000.0
+    final_equity: float = 10_000.0
+    return_pct: float = 0.0
+    compounded_position_sizing: bool = False
+    min_effective_position_size: float = 0.0
+    max_effective_position_size: float = 0.0
+    average_effective_position_size: float = 0.0
     equity_curve: tuple[float, ...] = ()
     drawdown_curve: tuple[float, ...] = ()
     daily_pnl_curve: tuple[float, ...] = ()
@@ -84,6 +92,8 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         raise ValueError("at least two bars are required")
     if not 0 < config.train_fraction < 1:
         raise ValueError("train_fraction must be between 0 and 1")
+    if config.starting_cash <= 0:
+        raise ValueError("starting_cash must be positive")
 
     pnl: list[float] = []
     equity_values: list[float] = [config.starting_cash]
@@ -94,7 +104,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     wins = 0
     trade_count = 0
     active_periods = 0
-    previous_position = 0
+    previous_exposure = 0.0
     gross_profit = 0.0
     spread_cost = 0.0
     slippage_cost = 0.0
@@ -104,28 +114,33 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     guaranteed_stop_cost = 0.0
     pnl_dates: list[str] = []
     daily_pnl: dict[str, float] = {}
+    exposure_turnover = 0.0
+    active_position_sizes: list[float] = []
 
     for index in range(1, len(bars)):
         previous_bar = bars[index - 1]
         current_bar = bars[index]
-        position = _normalize_signal(signals[index - 1])
+        direction = _normalize_signal(signals[index - 1])
+        position = _target_exposure(direction, previous_exposure, equity, config)
         if position != 0:
             active_periods += 1
-        position_delta = abs(position - previous_position)
-        if position_delta > 0:
+            active_position_sizes.append(abs(position))
+        exposure_delta = abs(position - previous_exposure)
+        if exposure_delta > 0:
             trade_count += 1
+            exposure_turnover += exposure_delta
 
         price_change = current_bar.close - previous_bar.close
-        trade_gross = position * price_change * config.position_size
+        trade_gross = position * price_change
         gross_profit += trade_gross
 
-        notional = previous_bar.close * config.position_size
+        notional = previous_bar.close * abs(position)
         stress = max(0.0, config.cost_stress_multiplier)
-        trade_spread = notional * (config.spread_bps / 10_000) * stress * position_delta / 2
-        trade_slippage = notional * (config.slippage_bps / 10_000) * stress * position_delta
-        trade_commission = notional * (config.commission_bps / 10_000) * position_delta / 2
+        trade_spread = previous_bar.close * (config.spread_bps / 10_000) * stress * exposure_delta / 2
+        trade_slippage = previous_bar.close * (config.slippage_bps / 10_000) * stress * exposure_delta
+        trade_commission = previous_bar.close * (config.commission_bps / 10_000) * exposure_delta / 2
         trade_guaranteed = (
-            config.guaranteed_stop_premium_points * config.position_size * position_delta / 2
+            config.guaranteed_stop_premium_points * exposure_delta / 2
             if config.use_guaranteed_stop
             else 0.0
         )
@@ -156,7 +171,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         max_drawdown = min(max_drawdown, current_drawdown)
         equity_values.append(equity)
         drawdown_values.append(abs(current_drawdown))
-        previous_position = position
+        previous_exposure = position
 
     split = max(1, int(len(pnl) * config.train_fraction))
     train_profit = sum(pnl[:split])
@@ -176,6 +191,9 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
     sample_calendar_days = (bars[-1].timestamp.date() - bars[0].timestamp.date()).days + 1
 
     return BacktestResult(
+        starting_cash=config.starting_cash,
+        final_equity=equity,
+        return_pct=(net_profit / config.starting_cash) * 100,
         net_profit=net_profit,
         sharpe=sharpe,
         train_sharpe=train_sharpe,
@@ -184,7 +202,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         win_rate=wins / len(pnl),
         trade_count=trade_count,
         exposure=active_periods / (len(bars) - 1),
-        turnover=trade_count * config.position_size,
+        turnover=exposure_turnover,
         train_profit=train_profit,
         test_profit=test_profit,
         gross_profit=gross_profit,
@@ -213,11 +231,15 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         train_daily_pnl_sharpe=_sharpe(train_daily_pnl_values),
         test_daily_pnl_sharpe=_sharpe(test_daily_pnl_values),
         sharpe_annualization_note=_sharpe_note(sample_trading_days),
-        turnover_efficiency=net_profit / max(1e-9, trade_count * config.position_size),
+        turnover_efficiency=net_profit / max(1e-9, exposure_turnover),
         expectancy_per_trade=net_profit / trade_denominator,
         average_cost_per_trade=total_cost / trade_denominator,
         net_cost_ratio=net_profit / max(1.0, total_cost),
         cost_to_gross_ratio=total_cost / max(1e-9, abs(gross_profit)),
+        compounded_position_sizing=config.compound_position_size,
+        min_effective_position_size=min(active_position_sizes) if active_position_sizes else 0.0,
+        max_effective_position_size=max(active_position_sizes) if active_position_sizes else 0.0,
+        average_effective_position_size=sum(active_position_sizes) / len(active_position_sizes) if active_position_sizes else 0.0,
         equity_curve=_sample_curve(equity_values),
         drawdown_curve=_sample_curve(drawdown_values),
         daily_pnl_curve=_sample_curve(daily_pnl_values),
@@ -230,6 +252,18 @@ def _normalize_signal(value: int) -> int:
     if value < 0:
         return -1
     return 0
+
+
+def _target_exposure(direction: int, previous_exposure: float, equity: float, config: BacktestConfig) -> float:
+    if direction == 0:
+        return 0.0
+    previous_direction = 1 if previous_exposure > 0 else -1 if previous_exposure < 0 else 0
+    if previous_direction == direction:
+        return previous_exposure
+    stake = config.position_size
+    if config.compound_position_size:
+        stake *= max(0.0, equity) / config.starting_cash
+    return direction * max(0.0, stake)
 
 
 def _crosses_funding_cutoff(previous: datetime, current: datetime, cutoff_hour: int) -> bool:

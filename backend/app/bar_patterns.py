@@ -260,20 +260,22 @@ def _pnl_rows(
     regime_by_date: dict[date, str],
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    previous_position = 0
+    previous_exposure = 0.0
+    equity = config.starting_cash
     for index in range(1, len(bars)):
         previous_bar = bars[index - 1]
         current_bar = bars[index]
-        position = _normalize_signal(signals[index - 1])
-        position_delta = abs(position - previous_position)
+        direction = _normalize_signal(signals[index - 1])
+        position = _target_exposure(direction, previous_exposure, equity, config)
+        position_delta = abs(position - previous_exposure)
         price_change = current_bar.close - previous_bar.close
-        gross = position * price_change * config.position_size
-        notional = previous_bar.close * config.position_size
+        gross = position * price_change
+        notional = previous_bar.close * abs(position)
         stress = max(0.0, config.cost_stress_multiplier)
-        spread = notional * (config.spread_bps / 10_000) * stress * position_delta / 2
-        slippage = notional * (config.slippage_bps / 10_000) * stress * position_delta
-        commission = notional * (config.commission_bps / 10_000) * position_delta / 2
-        guaranteed = config.guaranteed_stop_premium_points * config.position_size * position_delta / 2 if config.use_guaranteed_stop else 0.0
+        spread = previous_bar.close * (config.spread_bps / 10_000) * stress * position_delta / 2
+        slippage = previous_bar.close * (config.slippage_bps / 10_000) * stress * position_delta
+        commission = previous_bar.close * (config.commission_bps / 10_000) * position_delta / 2
+        guaranteed = config.guaranteed_stop_premium_points * position_delta / 2 if config.use_guaranteed_stop else 0.0
         funding = 0.0
         if position != 0 and _crosses_funding_cutoff(previous_bar.timestamp, current_bar.timestamp, config.funding_cutoff_hour):
             funding = notional * (max(0.0, config.overnight_admin_fee_annual + config.overnight_interest_annual) / 365) * stress
@@ -282,6 +284,7 @@ def _pnl_rows(
             fx = abs(gross) * (config.fx_conversion_bps / 10_000)
         cost = spread + slippage + commission + guaranteed + funding + fx
         pnl = gross - cost
+        equity += pnl
         timestamp = current_bar.timestamp
         rows.append(
             {
@@ -291,14 +294,14 @@ def _pnl_rows(
                 "session": _session_label(timestamp),
                 "regime": regime_by_date.get(timestamp.date(), "unknown"),
                 "position": position,
-                "previous_position": previous_position,
+                "previous_position": previous_exposure,
                 "position_delta": position_delta,
                 "gross_profit": gross,
                 "cost": cost,
                 "net_profit": pnl,
             }
         )
-        previous_position = position
+        previous_exposure = position
     return rows
 
 
@@ -345,11 +348,11 @@ def _group_summary(rows: list[dict[str, object]], key: str, train_fraction: floa
         if str_date:
             grouped[bucket]["trading_days"].add(str_date)  # type: ignore[union-attr]
             grouped[bucket]["daily_pnl"][str_date] += net_profit  # type: ignore[index]
-        if int(row.get("position") or 0) != 0:
+        if abs(_number(row.get("position"))) > 0:
             grouped[bucket]["active_bars"] = _number(grouped[bucket]["active_bars"]) + 1
             if str_date:
                 grouped[bucket]["active_days"].add(str_date)  # type: ignore[union-attr]
-        if int(row.get("position_delta") or 0) > 0:
+        if _number(row.get("position_delta")) > 0:
             grouped[bucket]["transitions"] = _number(grouped[bucket]["transitions"]) + 1
     summaries = [
         {
@@ -380,8 +383,8 @@ def _trade_ledger(bars: list[OHLCBar], rows: list[dict[str, object]]) -> list[di
     trades: list[dict[str, object]] = []
     current: dict[str, object] | None = None
     for row_index, row in enumerate(rows, start=1):
-        position = int(row["position"])
-        previous_position = int(row["previous_position"])
+        position = _sign(row["position"])
+        previous_position = _sign(row["previous_position"])
         if current is None and position != 0:
             current = _new_trade(position, bars[row_index - 1])
         if current is not None:
@@ -694,6 +697,27 @@ def _normalize_signal(value: int) -> int:
     if value < 0:
         return -1
     return 0
+
+
+def _sign(value: object) -> int:
+    number = _number(value)
+    if number > 0:
+        return 1
+    if number < 0:
+        return -1
+    return 0
+
+
+def _target_exposure(direction: int, previous_exposure: float, equity: float, config: BacktestConfig) -> float:
+    if direction == 0:
+        return 0.0
+    previous_direction = 1 if previous_exposure > 0 else -1 if previous_exposure < 0 else 0
+    if previous_direction == direction:
+        return previous_exposure
+    stake = config.position_size
+    if config.compound_position_size and config.starting_cash > 0:
+        stake *= max(0.0, equity) / config.starting_cash
+    return direction * max(0.0, stake)
 
 
 def _crosses_funding_cutoff(previous: datetime, current: datetime, cutoff_hour: int) -> bool:

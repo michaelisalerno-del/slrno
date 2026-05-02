@@ -110,10 +110,16 @@ def profile_from_ig_market(market: MarketMapping, payload: dict[str, Any], accou
     )
 
 
-def backtest_config_from_profile(profile: IGCostProfile, starting_cash: float = 10_000.0, position_size: float = 1.0) -> BacktestConfig:
+def backtest_config_from_profile(
+    profile: IGCostProfile,
+    starting_cash: float = 10_000.0,
+    position_size: float = 1.0,
+    compound_position_size: bool = False,
+) -> BacktestConfig:
     return BacktestConfig(
         starting_cash=starting_cash,
         position_size=position_size,
+        compound_position_size=compound_position_size,
         spread_bps=profile.spread_bps,
         slippage_bps=profile.slippage_bps,
         commission_bps=0.0,
