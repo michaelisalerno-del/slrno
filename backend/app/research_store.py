@@ -17,8 +17,13 @@ from .research_lab import CandidateEvaluation
 
 INCUBATOR_RESEARCH_BLOCKERS = {
     "best_trades_dominate",
+    "calendar_dependent_edge",
+    "calendar_filtered_oos_negative",
+    "calendar_sample_too_thin",
+    "event_strategy_requires_label",
     "insufficient_regime_sample",
     "low_oos_trades",
+    "major_event_window_dependency",
     "one_fold_dependency",
     "profit_concentrated_single_month",
     "profit_concentrated_single_regime",

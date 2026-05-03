@@ -7,6 +7,7 @@ from random import Random
 
 from .bar_patterns import analyze_strategy_patterns, eligible_specialist_regimes, gate_signals_to_regimes, market_regime_context
 from .backtesting import BacktestConfig, BacktestResult, run_vector_backtest
+from .calendar_diagnostics import analyze_calendar_strategy_patterns
 from .capital import (
     MAX_HISTORICAL_DRAWDOWN_FRACTION,
     MAX_MARGIN_FRACTION,
@@ -107,6 +108,7 @@ class AdaptiveSearchConfig:
     repair_mode: str = "standard"
     account_size: float = WORKING_ACCOUNT_SIZE_GBP
     source_template: dict[str, object] = field(default_factory=dict)
+    market_context: dict[str, object] = field(default_factory=dict)
     seed: int = 7
 
 
@@ -191,11 +193,19 @@ def run_adaptive_search(
             market_regime=market_regime,
             regime_by_date=regime_by_date,
         )
+        calendar_analysis = analyze_calendar_strategy_patterns(
+            bars,
+            signals,
+            backtest_config,
+            backtest,
+            market_context=config.market_context,
+            strategy_family=family,
+        )
         warnings = tuple(
             sorted(
                 set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
                     str(warning) for warning in pattern_analysis.get("warnings", [])
-                )
+                ).union(str(warning) for warning in calendar_analysis.get("warnings", []))
             )
         )
         parameters = {
@@ -217,6 +227,7 @@ def run_adaptive_search(
             "testing_account_size": account_size,
             "evidence_profile": evidence_profile,
             "bar_pattern_analysis": pattern_analysis,
+            "calendar_context_analysis": calendar_analysis,
         }
         if frozen_template:
             parameters["source_template"] = _source_template_audit(frozen_template)
@@ -286,11 +297,19 @@ def run_adaptive_search(
                     market_regime=market_regime,
                     regime_by_date=regime_by_date,
                 )
+                calendar_analysis = analyze_calendar_strategy_patterns(
+                    bars,
+                    signals,
+                    backtest_config,
+                    backtest,
+                    market_context=config.market_context,
+                    strategy_family=family,
+                )
                 warnings = tuple(
                     sorted(
                         set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
                             str(warning) for warning in pattern_analysis.get("warnings", [])
-                        )
+                        ).union(str(warning) for warning in calendar_analysis.get("warnings", []))
                     )
                 )
                 parameters = {
@@ -314,6 +333,7 @@ def run_adaptive_search(
                     "testing_account_size": account_size,
                     "evidence_profile": evidence_profile,
                     "bar_pattern_analysis": pattern_analysis,
+                    "calendar_context_analysis": calendar_analysis,
                 }
                 candidate = ProbabilityCandidate(
                     name=f"{config.trading_style}_{target_regime}_{family}_{scan_index + 1}",

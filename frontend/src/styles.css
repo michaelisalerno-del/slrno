@@ -981,6 +981,10 @@ button.ghost {
   font-size: 13px;
 }
 
+.context-mini {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .compact-status {
   grid-template-columns: 1fr auto;
   align-items: center;
@@ -1242,7 +1246,8 @@ th {
   .row,
   .compact,
   .template-card-header,
-  .refinement-metrics {
+  .refinement-metrics,
+  .context-mini {
     grid-template-columns: 1fr;
   }
 

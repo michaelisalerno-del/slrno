@@ -94,3 +94,51 @@ def test_market_context_summary_fetches_fmp_calendar_without_exposing_key(tmp_pa
     assert result["available"] is True
     assert result["major_event_count"] == 1
     assert "starter-secret" not in str(result)
+
+
+def test_market_context_stack_includes_calendar_vix_and_macro_context(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("fmp", "api_key", "starter-secret")
+
+    class FakeFMPProvider:
+        def __init__(self, api_key: str) -> None:
+            assert api_key == "starter-secret"
+
+        async def economic_calendar(self, start: str, end: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "date": "2026-05-06 19:00:00",
+                    "country": "US",
+                    "currency": "USD",
+                    "event": "FOMC Interest Rate Decision",
+                    "impact": "High",
+                }
+            ]
+
+    class FakeFREDProvider:
+        async def series(self, series_id: str, start: str | date | None = None, end: str | date | None = None) -> list[dict[str, object]]:
+            assert start == "2026-01-01"
+            assert end == "2026-03-01"
+            rows = {
+                "VIXCLS": [15.0, 28.0],
+                "BAMLH0A0HYM2": [4.3, 4.6],
+                "T10Y2Y": [0.1, -0.2],
+            }[series_id]
+            return [
+                {"date": "2026-02-01", "value": rows[0], "series_id": series_id},
+                {"date": "2026-03-01", "value": rows[1], "series_id": series_id},
+            ]
+
+    monkeypatch.setattr(main, "settings", store)
+    monkeypatch.setattr(main, "FMPProvider", FakeFMPProvider)
+    monkeypatch.setattr(main, "FREDProvider", FakeFREDProvider)
+
+    result = asyncio.run(main.market_context_stack(start=date(2026, 1, 1), end=date(2026, 3, 1), market_id="XAUUSD"))
+
+    assert result["schema"] == "market_context_stack_v1"
+    assert result["calendar"]["major_event_count"] == 1
+    assert result["volatility"]["regime"] == "high_volatility"
+    assert result["macro"]["high_yield_spread"]["risk"] == "credit_widening"
+    assert result["macro"]["yield_curve_10y2y"]["regime"] == "inverted"
+    assert result["positioning"]["status"] == "planned"
+    assert result["tick_quote"]["status"] == "shortlist_only"

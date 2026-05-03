@@ -47,6 +47,7 @@ def build_research_export_zip(
     warning_rows = _warning_rows(exported_trials, exported_candidates)
     capital_rows = _capital_rows(exported_trials, exported_candidates)
     bar_analysis = _bar_analysis_payload(run, exported_trials, exported_candidates)
+    calendar_analysis = _calendar_analysis_payload(exported_trials, exported_candidates)
     market_context = _market_context_payload(run)
     manifest = {
         "app": "slrno",
@@ -64,6 +65,9 @@ def build_research_export_zip(
             "trial_count": len(trials),
             "candidate_count": len(candidates),
             "market_context_available": any(item.get("available") for item in market_context),
+            "calendar_backtest_evidence_available": any(
+                item.get("analysis", {}).get("available") for item in calendar_analysis.get("items", []) if isinstance(item, dict)
+            ),
         },
     }
 
@@ -80,6 +84,9 @@ def build_research_export_zip(
         archive.writestr("warnings.csv", _csv_bytes(warning_rows))
         archive.writestr("market_context.json", _json_bytes(_redact_sensitive(market_context)))
         archive.writestr("market_context_events.csv", _csv_bytes(_market_context_rows(market_context)))
+        archive.writestr("calendar_context_analysis.json", _json_bytes(_redact_sensitive(calendar_analysis)))
+        archive.writestr("calendar_policy_backtests.csv", _csv_bytes(_calendar_policy_rows(calendar_analysis)))
+        archive.writestr("calendar_pnl.csv", _csv_bytes(_calendar_bucket_rows(calendar_analysis)))
         archive.writestr("bar_analysis.json", _json_bytes(_redact_sensitive(bar_analysis)))
         archive.writestr("regime_segments.csv", _csv_bytes(_regime_segment_rows(run)))
         archive.writestr("regime_pnl.csv", _csv_bytes(_pattern_summary_rows(bar_analysis, "regime_summary")))
@@ -422,6 +429,11 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
         parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
         evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
         pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+        calendar = parameters.get("calendar_context_analysis") if isinstance(parameters.get("calendar_context_analysis"), dict) else {}
+        event_day = calendar.get("event_day_summary") if isinstance(calendar.get("event_day_summary"), dict) else {}
+        event_window = calendar.get("event_window_summary") if isinstance(calendar.get("event_window_summary"), dict) else {}
+        normal_day = calendar.get("normal_day_summary") if isinstance(calendar.get("normal_day_summary"), dict) else {}
+        avoid_event_window = _calendar_policy(calendar, "avoid_event_window")
         gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
         regime_evidence = pattern.get("regime_trade_evidence") if isinstance(pattern.get("regime_trade_evidence"), dict) else {}
         in_regime = regime_evidence.get("in_regime") if isinstance(regime_evidence.get("in_regime"), dict) else {}
@@ -470,6 +482,21 @@ def _trial_csv_rows(trials: list[dict[str, object]]) -> list[dict[str, object]]:
                 "target_regime_history_share": regime_evidence.get("regime_history_share"),
                 "target_regime_episodes": regime_evidence.get("regime_episodes"),
                 "outside_regime_trade_count": regime_evidence.get("outside_trade_count"),
+                "calendar_available": calendar.get("available"),
+                "calendar_risk": calendar.get("calendar_risk"),
+                "calendar_recommended_policy": calendar.get("recommended_policy"),
+                "calendar_event_dates": "|".join(str(item) for item in calendar.get("event_dates", [])),
+                "calendar_event_window_dates": "|".join(str(item) for item in calendar.get("event_window_dates", [])),
+                "event_day_net_profit": event_day.get("net_profit"),
+                "event_day_trade_count": event_day.get("trade_count"),
+                "event_day_profit_share": event_day.get("positive_profit_share"),
+                "event_window_net_profit": event_window.get("net_profit"),
+                "event_window_trade_count": event_window.get("trade_count"),
+                "event_window_profit_share": event_window.get("positive_profit_share"),
+                "normal_day_net_profit": normal_day.get("net_profit"),
+                "avoid_event_window_net_profit": avoid_event_window.get("net_profit"),
+                "avoid_event_window_test_profit": avoid_event_window.get("test_profit"),
+                "calendar_warnings": "|".join(str(item) for item in calendar.get("warnings", [])),
                 "smallest_feasible_account": summary.get("smallest_feasible_account"),
                 "warnings": "|".join(str(item) for item in trial.get("warnings", [])),
             }
@@ -486,6 +513,11 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
         parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
         evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
         pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+        calendar = parameters.get("calendar_context_analysis") if isinstance(parameters.get("calendar_context_analysis"), dict) else {}
+        event_day = calendar.get("event_day_summary") if isinstance(calendar.get("event_day_summary"), dict) else {}
+        event_window = calendar.get("event_window_summary") if isinstance(calendar.get("event_window_summary"), dict) else {}
+        normal_day = calendar.get("normal_day_summary") if isinstance(calendar.get("normal_day_summary"), dict) else {}
+        avoid_event_window = _calendar_policy(calendar, "avoid_event_window")
         gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
         regime_evidence = pattern.get("regime_trade_evidence") if isinstance(pattern.get("regime_trade_evidence"), dict) else {}
         in_regime = regime_evidence.get("in_regime") if isinstance(regime_evidence.get("in_regime"), dict) else {}
@@ -532,6 +564,21 @@ def _candidate_csv_rows(candidates: list[dict[str, object]]) -> list[dict[str, o
                 "target_regime_history_share": regime_evidence.get("regime_history_share"),
                 "target_regime_episodes": regime_evidence.get("regime_episodes"),
                 "outside_regime_trade_count": regime_evidence.get("outside_trade_count"),
+                "calendar_available": calendar.get("available"),
+                "calendar_risk": calendar.get("calendar_risk"),
+                "calendar_recommended_policy": calendar.get("recommended_policy"),
+                "calendar_event_dates": "|".join(str(item) for item in calendar.get("event_dates", [])),
+                "calendar_event_window_dates": "|".join(str(item) for item in calendar.get("event_window_dates", [])),
+                "event_day_net_profit": event_day.get("net_profit"),
+                "event_day_trade_count": event_day.get("trade_count"),
+                "event_day_profit_share": event_day.get("positive_profit_share"),
+                "event_window_net_profit": event_window.get("net_profit"),
+                "event_window_trade_count": event_window.get("trade_count"),
+                "event_window_profit_share": event_window.get("positive_profit_share"),
+                "normal_day_net_profit": normal_day.get("net_profit"),
+                "avoid_event_window_net_profit": avoid_event_window.get("net_profit"),
+                "avoid_event_window_test_profit": avoid_event_window.get("test_profit"),
+                "calendar_warnings": "|".join(str(item) for item in calendar.get("warnings", [])),
                 "smallest_feasible_account": summary.get("smallest_feasible_account"),
                 "blockers": "|".join(str(item) for item in readiness.get("blockers", [])),
                 "validation_warnings": "|".join(str(item) for item in readiness.get("validation_warnings", [])),
@@ -580,6 +627,114 @@ def _bar_analysis_payload(
         "market_regimes": _market_regimes(run),
         "items": _pattern_items("trial", trials) + _pattern_items("candidate", candidates),
     }
+
+
+def _calendar_analysis_payload(
+    trials: list[dict[str, object]],
+    candidates: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "schema": "calendar_context_analysis_export_v1",
+        "items": _calendar_items("trial", trials) + _calendar_items("candidate", candidates),
+    }
+
+
+def _calendar_items(entity_type: str, items: list[dict[str, object]]) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for item in items:
+        analysis = _item_calendar_analysis(item)
+        if not analysis:
+            continue
+        output.append(
+            {
+                "entity_type": entity_type,
+                "id": item.get("id"),
+                "run_id": item.get("run_id"),
+                "strategy_name": item.get("strategy_name"),
+                "market_id": _entity_market_id(item),
+                "promotion_tier": item.get("promotion_tier"),
+                "analysis": analysis,
+            }
+        )
+    return output
+
+
+def _item_calendar_analysis(item: dict[str, object]) -> dict[str, object] | None:
+    parameters = item.get("parameters") if isinstance(item.get("parameters"), dict) else None
+    if parameters is None:
+        audit = item.get("audit") if isinstance(item.get("audit"), dict) else {}
+        candidate = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+        parameters = candidate.get("parameters") if isinstance(candidate.get("parameters"), dict) else None
+    if not parameters:
+        return None
+    analysis = parameters.get("calendar_context_analysis")
+    return analysis if isinstance(analysis, dict) else None
+
+
+def _calendar_policy_rows(calendar_analysis: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in calendar_analysis.get("items", []) if isinstance(calendar_analysis.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
+        policies = analysis.get("policy_backtests") if isinstance(analysis.get("policy_backtests"), list) else []
+        for policy in policies:
+            if not isinstance(policy, dict):
+                continue
+            rows.append(
+                {
+                    "entity_type": item.get("entity_type"),
+                    "id": item.get("id"),
+                    "run_id": item.get("run_id"),
+                    "strategy_name": item.get("strategy_name"),
+                    "market_id": item.get("market_id"),
+                    "calendar_risk": analysis.get("calendar_risk"),
+                    "recommended_policy": analysis.get("recommended_policy"),
+                    "event_dates": "|".join(str(value) for value in analysis.get("event_dates", [])),
+                    "event_window_dates": "|".join(str(value) for value in analysis.get("event_window_dates", [])),
+                    "warnings": "|".join(str(value) for value in analysis.get("warnings", [])),
+                    **policy,
+                }
+            )
+    return rows
+
+
+def _calendar_bucket_rows(calendar_analysis: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    buckets = (
+        ("event_day", "event_day_summary"),
+        ("event_window", "event_window_summary"),
+        ("normal_day", "normal_day_summary"),
+    )
+    for item in calendar_analysis.get("items", []) if isinstance(calendar_analysis.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
+        for bucket_name, key in buckets:
+            summary = analysis.get(key) if isinstance(analysis.get(key), dict) else None
+            if summary is None:
+                continue
+            rows.append(
+                {
+                    "entity_type": item.get("entity_type"),
+                    "id": item.get("id"),
+                    "run_id": item.get("run_id"),
+                    "strategy_name": item.get("strategy_name"),
+                    "market_id": item.get("market_id"),
+                    "calendar_risk": analysis.get("calendar_risk"),
+                    "bucket": bucket_name,
+                    **summary,
+                }
+            )
+    return rows
+
+
+def _calendar_policy(calendar: dict[str, object], name: str) -> dict[str, object]:
+    policies = calendar.get("policy_backtests") if isinstance(calendar.get("policy_backtests"), list) else []
+    for policy in policies:
+        if isinstance(policy, dict) and policy.get("policy") == name:
+            return policy
+    return {}
 
 
 def _market_regimes(run: dict[str, object]) -> list[dict[str, object]]:
@@ -847,7 +1002,7 @@ Bars: {bars_note}
 
 Pattern diagnostics: `bar_analysis.json`, `regime_segments.csv`, `regime_pnl.csv`, `regime_gated_backtests.csv`, `monthly_pnl.csv`, `session_pnl.csv`, and `pattern_warnings.csv` describe regime fit and concentration risks where available.
 
-Market context: `market_context.json` and `market_context_events.csv` include FMP economic-calendar risk summaries where available.
+Market context: `market_context.json` and `market_context_events.csv` include FMP economic-calendar risk summaries where available. `calendar_context_analysis.json`, `calendar_policy_backtests.csv`, and `calendar_pnl.csv` show whether strategy profit survives major-event blackout checks.
 
 No API keys, passwords, or secret tokens are intentionally included in this export.
 """

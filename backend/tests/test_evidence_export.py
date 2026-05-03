@@ -54,6 +54,9 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
         assert "trials.json" in names
         assert "candidates.csv" in names
         assert "capital_scenarios.csv" in names
+        assert "calendar_context_analysis.json" in names
+        assert "calendar_policy_backtests.csv" in names
+        assert "calendar_pnl.csv" in names
         assert "bar_analysis.json" in names
         assert "regime_pnl.csv" in names
         assert "regime_gated_backtests.csv" in names
@@ -66,9 +69,12 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
         bar_analysis = json.loads(archive.read("bar_analysis.json"))
         capital_csv = archive.read("capital_scenarios.csv").decode()
         trials_csv = archive.read("trials.csv").decode()
+        calendar_policy_csv = archive.read("calendar_policy_backtests.csv").decode()
+        calendar_pnl_csv = archive.read("calendar_pnl.csv").decode()
         bars_csv = archive.read("bars/NAS100_5min.csv").decode()
 
     assert manifest["data_completeness"]["exact_run_bars_available"] is True
+    assert manifest["data_completeness"]["calendar_backtest_evidence_available"] is True
     assert manifest["bar_snapshots"][0]["sha256"] == snapshot["sha256"]
     assert snapshot["sha256"]
     assert run["config"]["api_token"] == "***"
@@ -77,6 +83,10 @@ def test_research_export_bundle_contains_capital_scenarios_bars_and_no_secrets(t
     assert "10000.0" in capital_csv
     assert "positive_fold_rate" in trials_csv
     assert "single_fold_profit_share" in trials_csv
+    assert "event_day_net_profit" in trials_csv
+    assert "avoid_event_window" in calendar_policy_csv
+    assert "calendar_dependent_edge" in calendar_policy_csv
+    assert "event_window" in calendar_pnl_csv
     assert "timestamp" in bars_csv
 
 
@@ -212,6 +222,61 @@ def _evaluation(name: str) -> CandidateEvaluation:
                     "monthly_summary": [{"key": "2025-01", "net_profit": 100, "active_bars": 3}],
                     "session_summary": [{"key": "us_open", "net_profit": 100, "active_bars": 3}],
                     "regime_summary": [{"key": "trend_up", "net_profit": 100, "active_bars": 3}],
+                },
+                "calendar_context_analysis": {
+                    "schema": "calendar_context_analysis_v1",
+                    "available": True,
+                    "calendar_risk": "elevated",
+                    "event_dates": ["2025-01-02"],
+                    "event_window_dates": ["2025-01-01", "2025-01-02", "2025-01-03"],
+                    "event_day_summary": {
+                        "net_profit": 60,
+                        "gross_profit": 70,
+                        "cost": 10,
+                        "trade_count": 2,
+                        "active_days": 1,
+                        "positive_profit_share": 0.6,
+                    },
+                    "event_window_summary": {
+                        "net_profit": 100,
+                        "gross_profit": 150,
+                        "cost": 50,
+                        "trade_count": 3,
+                        "active_days": 3,
+                        "positive_profit_share": 1.0,
+                    },
+                    "normal_day_summary": {
+                        "net_profit": 0,
+                        "gross_profit": 0,
+                        "cost": 0,
+                        "trade_count": 0,
+                        "active_days": 0,
+                        "positive_profit_share": 0.0,
+                    },
+                    "policy_backtests": [
+                        {
+                            "policy": "baseline",
+                            "net_profit": 100,
+                            "test_profit": 40,
+                            "daily_pnl_sharpe": 1.0,
+                            "sharpe_days": 140,
+                            "trade_count": 20,
+                            "max_drawdown": 10,
+                            "total_cost": 50,
+                        },
+                        {
+                            "policy": "avoid_event_window",
+                            "net_profit": 20,
+                            "test_profit": 10,
+                            "daily_pnl_sharpe": 0.4,
+                            "sharpe_days": 140,
+                            "trade_count": 5,
+                            "max_drawdown": 4,
+                            "total_cost": 12,
+                        },
+                    ],
+                    "recommended_policy": "none",
+                    "warnings": ["calendar_dependent_edge"],
                 },
             },
             [0.1, 0.9],

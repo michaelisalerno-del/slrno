@@ -37,6 +37,15 @@ export function getMarketContextSummary(params = {}) {
   return request(`/market-context/summary${suffix}`);
 }
 
+export function getMarketContextStack(params = {}) {
+  const query = new URLSearchParams();
+  if (params.start) query.set("start", params.start);
+  if (params.end) query.set("end", params.end);
+  if (params.marketId) query.set("market_id", params.marketId);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request(`/market-context/stack${suffix}`);
+}
+
 export function getResearchSummary(limit = 24) {
   return request(`/research/summary?limit=${limit}`);
 }

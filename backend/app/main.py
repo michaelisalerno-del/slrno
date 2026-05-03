@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import date, timedelta
+from math import isfinite
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,7 @@ from .market_plugins import get_market_plugin, list_market_plugins
 from .market_registry import MarketMapping, MarketRegistry
 from .providers.eodhd import EODHDProvider
 from .providers.fmp import FMPProvider
+from .providers.fred import FREDProvider
 from .providers.ig import IGDemoProvider
 from .research_critic import ResearchCritic
 from .research_lab import ResearchStack
@@ -211,6 +213,103 @@ def _market_context_unavailable(reason: str, start: str, end: str, market_id: st
     return summary
 
 
+async def _fred_context_summary_for_range(start: str, end: str) -> dict[str, object]:
+    provider = FREDProvider()
+    vix = await _safe_fred_series(provider, "VIXCLS", start, end)
+    high_yield = await _safe_fred_series(provider, "BAMLH0A0HYM2", start, end)
+    yield_curve = await _safe_fred_series(provider, "T10Y2Y", start, end)
+    return {
+        "volatility": _vix_context(vix),
+        "macro": {
+            "provider": "fred_public_csv",
+            "available": bool(high_yield.get("available") or yield_curve.get("available")),
+            "high_yield_spread": _spread_context(high_yield),
+            "yield_curve_10y2y": _yield_curve_context(yield_curve),
+        },
+    }
+
+
+async def _safe_fred_series(provider: FREDProvider, series_id: str, start: str, end: str) -> dict[str, object]:
+    try:
+        rows = await provider.series(series_id, start=start, end=end)
+    except Exception as exc:
+        return {"series_id": series_id, "available": False, "reason": _public_error(exc), "rows": []}
+    return {"series_id": series_id, "available": bool(rows), "rows": rows}
+
+
+def _vix_context(series: dict[str, object]) -> dict[str, object]:
+    payload = _series_stats(series)
+    latest = float(payload.get("latest_value") or 0.0)
+    avg20 = float(payload.get("average_20") or 0.0)
+    if not payload.get("available"):
+        regime = "unavailable"
+    elif latest >= 25 or (avg20 > 0 and latest > avg20 * 1.25):
+        regime = "high_volatility"
+    elif latest >= 20 or (avg20 > 0 and latest > avg20 * 1.1):
+        regime = "elevated_volatility"
+    elif latest <= 15 and (avg20 <= 0 or latest <= avg20):
+        regime = "low_volatility"
+    else:
+        regime = "normal_volatility"
+    return {"provider": "fred_public_csv", "name": "VIXCLS", "regime": regime, **payload}
+
+
+def _spread_context(series: dict[str, object]) -> dict[str, object]:
+    payload = _series_stats(series)
+    latest = float(payload.get("latest_value") or 0.0)
+    change20 = float(payload.get("change_20") or 0.0)
+    if not payload.get("available"):
+        risk = "unavailable"
+    elif latest >= 6 or change20 >= 0.5:
+        risk = "credit_stress"
+    elif latest >= 4 or change20 >= 0.25:
+        risk = "credit_widening"
+    else:
+        risk = "credit_stable"
+    return {"name": "BAMLH0A0HYM2", "risk": risk, **payload}
+
+
+def _yield_curve_context(series: dict[str, object]) -> dict[str, object]:
+    payload = _series_stats(series)
+    latest = float(payload.get("latest_value") or 0.0)
+    if not payload.get("available"):
+        regime = "unavailable"
+    elif latest < 0:
+        regime = "inverted"
+    elif latest < 0.5:
+        regime = "flat"
+    else:
+        regime = "normal"
+    return {"name": "T10Y2Y", "regime": regime, **payload}
+
+
+def _series_stats(series: dict[str, object]) -> dict[str, object]:
+    rows = series.get("rows") if isinstance(series.get("rows"), list) else []
+    values = [float(row["value"]) for row in rows if isinstance(row, dict) and _is_number(row.get("value"))]
+    latest_row = next((row for row in reversed(rows) if isinstance(row, dict) and _is_number(row.get("value"))), None)
+    if not values or latest_row is None:
+        return {"available": False, "series_id": series.get("series_id"), "reason": series.get("reason"), "observation_count": 0}
+    window = values[-20:]
+    previous = values[-21] if len(values) > 20 else values[0]
+    latest = float(latest_row["value"])
+    return {
+        "available": True,
+        "series_id": series.get("series_id"),
+        "latest_date": latest_row.get("date"),
+        "latest_value": round(latest, 6),
+        "average_20": round(sum(window) / len(window), 6) if window else 0.0,
+        "change_20": round(latest - previous, 6),
+        "observation_count": len(values),
+    }
+
+
+def _is_number(value: object) -> bool:
+    try:
+        return isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 @app.get("/cockpit/summary")
 def cockpit_summary() -> dict[str, object]:
     runs = research_store.list_runs()
@@ -359,6 +458,53 @@ async def market_context_summary(
     if end_date < start_date:
         raise HTTPException(status_code=400, detail="Market context end date must be on or after start date")
     return await _market_context_summary_for_range(start_date.isoformat(), end_date.isoformat(), market_id=market_id, limit=16)
+
+
+@app.get("/market-context/stack")
+async def market_context_stack(
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
+    market_id: str = "",
+) -> dict[str, object]:
+    today = date.today()
+    start_date = start or today - timedelta(days=90)
+    end_date = end or today
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="Market context end date must be on or after start date")
+    calendar = await _market_context_summary_for_range(
+        (today - timedelta(days=7)).isoformat(),
+        (today + timedelta(days=21)).isoformat(),
+        market_id=market_id,
+        limit=12,
+    )
+    macro = await _fred_context_summary_for_range(start_date.isoformat(), end_date.isoformat())
+    return {
+        "schema": "market_context_stack_v1",
+        "market_id": market_id,
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "calendar": calendar,
+        "volatility": macro["volatility"],
+        "macro": macro["macro"],
+        "positioning": {
+            "provider": "cftc_cot",
+            "available": False,
+            "status": "planned",
+            "next_use": "COT positioning filter for index, FX, metals, and oil templates.",
+        },
+        "breadth": {
+            "provider": "market_breadth",
+            "available": False,
+            "status": "planned",
+            "next_use": "Breadth confirmation for S&P/Nasdaq trend and breakout templates.",
+        },
+        "tick_quote": {
+            "provider": "shortlisted_market_quote_data",
+            "available": False,
+            "status": "shortlist_only",
+            "next_use": "Use only after a template survives bars, calendar, macro, costs, OOS, and paper evidence.",
+        },
+    }
 
 
 @app.post("/settings/eodhd")
@@ -779,6 +925,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         repair_mode=payload.repair_mode,
                         account_size=payload.account_size,
                         source_template=payload.source_template,
+                        market_context=market_status.get("market_context") if isinstance(market_status.get("market_context"), dict) else {},
                     ),
                 )
                 market_evaluations = list(result.evaluations)

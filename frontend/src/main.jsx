@@ -30,6 +30,7 @@ import {
   getBrokerSummary,
   getCockpitSummary,
   getIgCostProfile,
+  getMarketContextStack,
   getMarketContextSummary,
   getMarketDataCacheStatus,
   getMarketPlugins,
@@ -230,12 +231,14 @@ function App() {
       if (moduleId === "cockpit") {
         const [summary, context] = await Promise.all([
           getCockpitSummary(),
-          getMarketContextSummary().catch((error) => ({
-            available: false,
-            calendar_risk: "unavailable",
-            reason: error.message,
-            events: [],
-          })),
+          getMarketContextStack()
+            .catch(() => getMarketContextSummary())
+            .catch((error) => ({
+              available: false,
+              calendar_risk: "unavailable",
+              reason: error.message,
+              events: [],
+            })),
         ]);
         setCockpit(summary);
         setMarketContext(context);
@@ -1496,7 +1499,10 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
   const runs = summary?.runs ?? {};
   const latest = runs.latest;
   const risk = summary?.risk ?? {};
-  const contextEvents = marketContext?.events ?? [];
+  const calendarContext = marketContext?.calendar ?? marketContext ?? {};
+  const contextEvents = calendarContext?.events ?? [];
+  const volatility = marketContext?.volatility ?? {};
+  const macro = marketContext?.macro ?? {};
   return (
     <section className="lab-shell cockpit">
       <div className="lab-header">
@@ -1538,15 +1544,23 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
           <div className="context-card">
             <div className="label-row">
               <div>
-                <strong>{marketContext?.available ? calendarRiskLabel(marketContext.calendar_risk) : "FMP calendar unavailable"}</strong>
-                <span>{marketContext?.available ? `${marketContext.high_impact_count ?? 0} high-impact events · ${marketContext.major_event_count ?? 0} major` : marketContext?.reason ?? "Connect FMP in Settings."}</span>
+                <strong>{calendarContext?.available ? calendarRiskLabel(calendarContext.calendar_risk) : "FMP calendar unavailable"}</strong>
+                <span>{calendarContext?.available ? `${calendarContext.high_impact_count ?? 0} high-impact events · ${calendarContext.major_event_count ?? 0} major` : calendarContext?.reason ?? "Connect FMP in Settings."}</span>
               </div>
-              <span className={`badge ${calendarRiskClass(marketContext?.calendar_risk)}`}>{marketContext?.calendar_risk ?? "unknown"}</span>
+              <span className={`badge ${calendarRiskClass(calendarContext?.calendar_risk)}`}>{calendarContext?.calendar_risk ?? "unknown"}</span>
             </div>
-            {marketContext?.next_major_event && (
+            {calendarContext?.next_major_event && (
               <div className="context-next">
                 <span>Next major</span>
-                <strong>{marketContext.next_major_event.day} · {marketContext.next_major_event.event}</strong>
+                <strong>{calendarContext.next_major_event.day} · {calendarContext.next_major_event.event}</strong>
+              </div>
+            )}
+            {(volatility.available || macro.available) && (
+              <div className="mini-metrics context-mini">
+                <Metric label="VIX regime" value={volatility.regime ?? "n/a"} />
+                <Metric label="VIX latest" value={round(volatility.latest_value)} />
+                <Metric label="Credit" value={macro.high_yield_spread?.risk ?? "n/a"} />
+                <Metric label="Yield curve" value={macro.yield_curve_10y2y?.regime ?? "n/a"} />
               </div>
             )}
             <div className="context-events">
@@ -1556,7 +1570,7 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
                   <span>{event.currency || event.country || "Global"} · {event.event}</span>
                 </div>
               ))}
-              {marketContext?.available && contextEvents.length === 0 && <span className="muted">No major market-context events in the current window.</span>}
+              {calendarContext?.available && contextEvents.length === 0 && <span className="muted">No major market-context events in the current window.</span>}
             </div>
             <button type="button" className="ghost" onClick={() => setActiveModule("settings")}>Open Settings</button>
           </div>
@@ -2709,6 +2723,26 @@ function RegimeEvidenceMetrics({ pattern }) {
   );
 }
 
+function CalendarEvidenceMetrics({ analysis }) {
+  if (!analysis?.available) {
+    return null;
+  }
+  const eventDay = analysis.event_day_summary ?? {};
+  const eventWindow = analysis.event_window_summary ?? {};
+  const normalDay = analysis.normal_day_summary ?? {};
+  const avoidWindow = (analysis.policy_backtests ?? []).find((item) => item.policy === "avoid_event_window") ?? {};
+  return (
+    <>
+      <Metric label="Calendar policy" value={calendarPolicyLabel(analysis.recommended_policy)} />
+      <Metric label="Event-day net" value={formatMoney(eventDay.net_profit)} />
+      <Metric label="Event-window net" value={formatMoney(eventWindow.net_profit)} />
+      <Metric label="Normal-day net" value={formatMoney(normalDay.net_profit)} />
+      <Metric label="Event trades" value={eventWindow.trade_count ?? 0} />
+      <Metric label="Avoid-window net" value={formatMoney(avoidWindow.net_profit)} />
+    </>
+  );
+}
+
 function TemplateUtilizationMetrics({ backtest, pattern }) {
   const profile = templateUtilizationProfile(backtest, pattern);
   if (!profile.available) {
@@ -2732,6 +2766,7 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, 
   const capital = accountFeasibility(trial.capital_scenarios, accountSize);
   const accountScenario = accountScenarioFor(trial.capital_scenarios, accountSize);
   const pattern = trial.parameters?.bar_pattern_analysis ?? {};
+  const calendarAnalysis = trial.parameters?.calendar_context_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(trial);
   const marketId = trialMarketId(trial);
@@ -2793,6 +2828,7 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, 
         <Metric label={gatedMetricLabel(pattern, "Gated net", "Target net")} value={formatMoney(gated.net_profit)} />
         <Metric label={gatedMetricLabel(pattern, "Gated OOS", "Target OOS")} value={formatMoney(gated.test_profit)} />
         <RegimeEvidenceMetrics pattern={pattern} />
+        <CalendarEvidenceMetrics analysis={calendarAnalysis} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
         <Metric label="Active folds" value={`${evidence.active_fold_count ?? 0}/${evidence.fold_count ?? 0}`} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
@@ -2915,6 +2951,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
   const capital = accountFeasibility(candidate.capital_scenarios, accountSize);
   const accountScenario = accountScenarioFor(candidate.capital_scenarios, accountSize);
   const pattern = candidate.audit?.candidate?.parameters?.bar_pattern_analysis ?? {};
+  const calendarAnalysis = candidate.audit?.candidate?.parameters?.calendar_context_analysis ?? {};
   const gated = pattern.regime_gated_backtest ?? {};
   const evidence = evidenceProfileForSource(candidate);
   const searchAudit = candidate.audit?.candidate?.parameters?.search_audit ?? {};
@@ -2978,6 +3015,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
         <Metric label={gatedMetricLabel(pattern, "Gated net", "Target net")} value={formatMoney(gated.net_profit)} />
         <Metric label={gatedMetricLabel(pattern, "Gated OOS", "Target OOS")} value={formatMoney(gated.test_profit)} />
         <RegimeEvidenceMetrics pattern={pattern} />
+        <CalendarEvidenceMetrics analysis={calendarAnalysis} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
         <Metric label="Active folds" value={`${evidence.active_fold_count ?? 0}/${evidence.fold_count ?? 0}`} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
@@ -4449,6 +4487,16 @@ function calendarRiskClass(value) {
   return "base";
 }
 
+function calendarPolicyLabel(value) {
+  return {
+    avoid_event_window: "Avoid event window",
+    avoid_major_event_days: "Avoid event days",
+    reduce_or_avoid_event_window: "Reduce/avoid events",
+    none: "No filter",
+    unavailable: "Unavailable",
+  }[value] ?? value ?? "No filter";
+}
+
 function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {
   const scenario = accountScenarioFor(scenarios, accountSize);
   if (!scenario) {
@@ -4553,6 +4601,12 @@ function humanWarnings(warnings = []) {
     needs_ig_price_validation: "Needs IG price validation",
     not_paper_ready_research_lead: "Research lead only",
     calendar_effect_needs_longer_history: "Needs longer calendar history",
+    calendar_dependent_edge: "Calendar-dependent edge",
+    calendar_filtered_oos_negative: "Calendar-filtered OOS negative",
+    calendar_sample_too_thin: "Thin calendar-event sample",
+    calendar_blackout_improves_result: "Calendar blackout helps",
+    event_strategy_requires_label: "Needs event-strategy label",
+    major_event_window_dependency: "Event-window dependency",
     known_edge_needs_cross_market_validation: "Needs independent market check",
     high_sharpe_low_trade_count: "High Sharpe, low trades",
     high_sharpe_short_sample: "High Sharpe, short sample",
@@ -4621,8 +4675,12 @@ function warningSeverity(warning) {
 
 const PAPER_BLOCKER_WARNINGS = new Set([
   "below_ig_min_deal_size",
+  "calendar_dependent_edge",
+  "calendar_filtered_oos_negative",
+  "calendar_sample_too_thin",
   "costs_overwhelm_edge",
   "drawdown_too_high",
+  "event_strategy_requires_label",
   "historical_daily_loss_stop_breached",
   "historical_drawdown_too_large",
   "insufficient_account_for_margin",
@@ -4639,6 +4697,7 @@ const PAPER_BLOCKER_WARNINGS = new Set([
   "no_walk_forward_folds",
   "regime_gated_backtest_negative",
   "regime_gated_oos_negative",
+  "major_event_window_dependency",
   "risk_budget_exceeded",
   "short_sharpe_sample",
   "target_regime_low_oos_trades",
@@ -4649,6 +4708,7 @@ const PAPER_BLOCKER_WARNINGS = new Set([
 
 const REPAIR_WARNINGS = new Set([
   "best_trades_dominate",
+  "calendar_blackout_improves_result",
   "calendar_effect_needs_longer_history",
   "fails_higher_slippage",
   "funding_eats_swing_edge",
