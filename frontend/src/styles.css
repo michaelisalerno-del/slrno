@@ -941,6 +941,46 @@ button.ghost {
   gap: 10px;
 }
 
+.context-card,
+.context-events,
+.context-event,
+.context-next {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-card .label-row > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.context-card strong,
+.context-card span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.context-card .label-row span:not(.badge),
+.context-next span,
+.context-event span {
+  color: #5f6875;
+  font-size: 13px;
+}
+
+.context-next,
+.context-event {
+  padding: 10px;
+  border: 1px solid #e1e7ee;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.context-event strong {
+  font-size: 13px;
+}
+
 .compact-status {
   grid-template-columns: 1fr auto;
   align-items: center;

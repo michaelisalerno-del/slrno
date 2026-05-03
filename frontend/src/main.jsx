@@ -5,6 +5,7 @@ import {
   Archive,
   BarChart3,
   BookOpen,
+  CalendarDays,
   Database,
   Download,
   Home,
@@ -29,6 +30,7 @@ import {
   getBrokerSummary,
   getCockpitSummary,
   getIgCostProfile,
+  getMarketContextSummary,
   getMarketDataCacheStatus,
   getMarketPlugins,
   getMarkets,
@@ -163,6 +165,7 @@ function App() {
   const [activeModule, setActiveModule] = React.useState("cockpit");
   const [loadingModule, setLoadingModule] = React.useState("");
   const [cockpit, setCockpit] = React.useState(null);
+  const [marketContext, setMarketContext] = React.useState(null);
   const [paper, setPaper] = React.useState(null);
   const [broker, setBroker] = React.useState(null);
   const [risk, setRisk] = React.useState(null);
@@ -225,8 +228,17 @@ function App() {
     setLoadingModule(moduleId);
     try {
       if (moduleId === "cockpit") {
-        const summary = await getCockpitSummary();
+        const [summary, context] = await Promise.all([
+          getCockpitSummary(),
+          getMarketContextSummary().catch((error) => ({
+            available: false,
+            calendar_risk: "unavailable",
+            reason: error.message,
+            events: [],
+          })),
+        ]);
         setCockpit(summary);
+        setMarketContext(context);
         setStatus(summary.providers ?? []);
       } else if (moduleId === "research") {
         const summary = await getResearchSummary();
@@ -1039,7 +1051,7 @@ function App() {
       {message && <div className="notice">{message}</div>}
       {loadingModule && <div className="notice loading">Loading {moduleLabel(loadingModule)}...</div>}
 
-      {activeModule === "cockpit" && <CockpitView summary={cockpit} setActiveModule={setActiveModule} />}
+      {activeModule === "cockpit" && <CockpitView summary={cockpit} marketContext={marketContext} setActiveModule={setActiveModule} />}
       {activeModule === "guide" && <GuideView setActiveModule={setActiveModule} />}
       {activeModule === "templates" && (
         <TemplateLibraryView
@@ -1480,10 +1492,11 @@ function App() {
   );
 }
 
-function CockpitView({ summary, setActiveModule }) {
+function CockpitView({ summary, marketContext, setActiveModule }) {
   const runs = summary?.runs ?? {};
   const latest = runs.latest;
   const risk = summary?.risk ?? {};
+  const contextEvents = marketContext?.events ?? [];
   return (
     <section className="lab-shell cockpit">
       <div className="lab-header">
@@ -1520,6 +1533,33 @@ function CockpitView({ summary, setActiveModule }) {
               <button className="secondary" type="button" onClick={() => setActiveModule("backtests")}>Open Backtests</button>
             </div>
           ) : <span className="muted">No research runs yet.</span>}
+        </Panel>
+        <Panel icon={<CalendarDays />} title="Market Context">
+          <div className="context-card">
+            <div className="label-row">
+              <div>
+                <strong>{marketContext?.available ? calendarRiskLabel(marketContext.calendar_risk) : "FMP calendar unavailable"}</strong>
+                <span>{marketContext?.available ? `${marketContext.high_impact_count ?? 0} high-impact events · ${marketContext.major_event_count ?? 0} major` : marketContext?.reason ?? "Connect FMP in Settings."}</span>
+              </div>
+              <span className={`badge ${calendarRiskClass(marketContext?.calendar_risk)}`}>{marketContext?.calendar_risk ?? "unknown"}</span>
+            </div>
+            {marketContext?.next_major_event && (
+              <div className="context-next">
+                <span>Next major</span>
+                <strong>{marketContext.next_major_event.day} · {marketContext.next_major_event.event}</strong>
+              </div>
+            )}
+            <div className="context-events">
+              {contextEvents.slice(0, 5).map((event) => (
+                <div className="context-event" key={`${event.day}-${event.time}-${event.event}`}>
+                  <strong>{event.day}{event.time ? ` ${event.time}` : ""}</strong>
+                  <span>{event.currency || event.country || "Global"} · {event.event}</span>
+                </div>
+              ))}
+              {marketContext?.available && contextEvents.length === 0 && <span className="muted">No major market-context events in the current window.</span>}
+            </div>
+            <button type="button" className="ghost" onClick={() => setActiveModule("settings")}>Open Settings</button>
+          </div>
         </Panel>
       </div>
     </section>
@@ -3005,7 +3045,7 @@ function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, sub
           ))}
         </div>
       </Panel>
-      <Panel icon={<Database />} title="EODHD Cache">
+      <Panel icon={<Database />} title="Market Data Cache">
         <div className="metrics four">
           <Metric label="Cached API payloads" value={cacheStatus?.stats?.payload_entry_count ?? cacheStatus?.stats?.entry_count ?? 0} />
           <Metric label="Expired" value={cacheStatus?.stats?.expired_count ?? 0} />
@@ -3019,7 +3059,7 @@ function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, sub
               <span>{item.entry_count} cached API payloads · {item.expired_count} expired</span>
             </div>
           ))}
-          {(cacheStatus?.namespaces ?? []).length === 0 && <span className="muted">No cached EODHD payloads yet.</span>}
+          {(cacheStatus?.namespaces ?? []).length === 0 && <span className="muted">No cached provider payloads yet.</span>}
         </div>
         <div className="status-list">
           {(cacheStatus?.recent_entries ?? []).slice(0, 5).map((item) => (
@@ -4387,6 +4427,26 @@ function repairModeLabel(value) {
     auto_refine: "Auto-refine",
     frozen_validation: "Frozen validation",
   }[value] ?? value ?? "Standard search";
+}
+
+function calendarRiskLabel(value) {
+  return {
+    clear: "Calendar risk clear",
+    watch: "Calendar risk on watch",
+    elevated: "Elevated calendar risk",
+    high: "High calendar risk",
+    unavailable: "Calendar unavailable",
+  }[value] ?? "Calendar context";
+}
+
+function calendarRiskClass(value) {
+  if (value === "clear") {
+    return "good";
+  }
+  if (value === "watch" || value === "elevated" || value === "high") {
+    return "warn";
+  }
+  return "base";
 }
 
 function accountFeasibility(scenarios = [], accountSize = WORKING_ACCOUNT_SIZE) {

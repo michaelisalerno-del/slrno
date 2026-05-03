@@ -47,6 +47,7 @@ def build_research_export_zip(
     warning_rows = _warning_rows(exported_trials, exported_candidates)
     capital_rows = _capital_rows(exported_trials, exported_candidates)
     bar_analysis = _bar_analysis_payload(run, exported_trials, exported_candidates)
+    market_context = _market_context_payload(run)
     manifest = {
         "app": "slrno",
         "schema": "research_evidence_bundle_v1",
@@ -62,6 +63,7 @@ def build_research_export_zip(
             "bars_note": _bars_note(bool(bar_snapshots), bool(cached_bar_exports)),
             "trial_count": len(trials),
             "candidate_count": len(candidates),
+            "market_context_available": any(item.get("available") for item in market_context),
         },
     }
 
@@ -76,6 +78,8 @@ def build_research_export_zip(
         archive.writestr("capital_scenarios.csv", _csv_bytes(capital_rows))
         archive.writestr("cost_profiles.json", _json_bytes(_redact_sensitive(cost_profiles)))
         archive.writestr("warnings.csv", _csv_bytes(warning_rows))
+        archive.writestr("market_context.json", _json_bytes(_redact_sensitive(market_context)))
+        archive.writestr("market_context_events.csv", _csv_bytes(_market_context_rows(market_context)))
         archive.writestr("bar_analysis.json", _json_bytes(_redact_sensitive(bar_analysis)))
         archive.writestr("regime_segments.csv", _csv_bytes(_regime_segment_rows(run)))
         archive.writestr("regime_pnl.csv", _csv_bytes(_pattern_summary_rows(bar_analysis, "regime_summary")))
@@ -103,6 +107,88 @@ def build_research_export_zip(
                     "No exact per-run bars were saved for this historical run. Re-run the backtest to create a reproducible bar snapshot.\n",
                 )
     return buffer.getvalue()
+
+
+def _market_context_payload(run: dict[str, object]) -> list[dict[str, object]]:
+    config = run.get("config") if isinstance(run.get("config"), dict) else {}
+    market_statuses = config.get("market_statuses") if isinstance(config.get("market_statuses"), list) else []
+    output: list[dict[str, object]] = []
+    for status in market_statuses:
+        if not isinstance(status, dict):
+            continue
+        context = status.get("market_context") if isinstance(status.get("market_context"), dict) else {}
+        output.append(
+            {
+                "market_id": status.get("market_id"),
+                "interval": status.get("interval"),
+                "start": status.get("start"),
+                "end": status.get("end"),
+                "available": bool(context.get("available")),
+                "calendar_risk": context.get("calendar_risk"),
+                "event_count": context.get("event_count"),
+                "relevant_event_count": context.get("relevant_event_count"),
+                "high_impact_count": context.get("high_impact_count"),
+                "major_event_count": context.get("major_event_count"),
+                "blackout_dates": context.get("blackout_dates") if isinstance(context.get("blackout_dates"), list) else [],
+                "reason": context.get("reason"),
+                "events": context.get("events") if isinstance(context.get("events"), list) else [],
+            }
+        )
+    return output
+
+
+def _market_context_rows(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for context in contexts:
+        events = context.get("events") if isinstance(context.get("events"), list) else []
+        if not events:
+            rows.append(
+                {
+                    "market_id": context.get("market_id"),
+                    "interval": context.get("interval"),
+                    "available": context.get("available"),
+                    "calendar_risk": context.get("calendar_risk"),
+                    "event_count": context.get("event_count"),
+                    "relevant_event_count": context.get("relevant_event_count"),
+                    "high_impact_count": context.get("high_impact_count"),
+                    "major_event_count": context.get("major_event_count"),
+                    "blackout_dates": ",".join(str(item) for item in context.get("blackout_dates", [])),
+                    "event_day": "",
+                    "event_time": "",
+                    "event": "",
+                    "currency": "",
+                    "impact": "",
+                    "category": "",
+                    "importance": "",
+                    "reason": context.get("reason"),
+                }
+            )
+            continue
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            rows.append(
+                {
+                    "market_id": context.get("market_id"),
+                    "interval": context.get("interval"),
+                    "available": context.get("available"),
+                    "calendar_risk": context.get("calendar_risk"),
+                    "event_count": context.get("event_count"),
+                    "relevant_event_count": context.get("relevant_event_count"),
+                    "high_impact_count": context.get("high_impact_count"),
+                    "major_event_count": context.get("major_event_count"),
+                    "blackout_dates": ",".join(str(item) for item in context.get("blackout_dates", [])),
+                    "event_day": event.get("day"),
+                    "event_time": event.get("time"),
+                    "event": event.get("event"),
+                    "currency": event.get("currency"),
+                    "impact": event.get("impact"),
+                    "category": event.get("category"),
+                    "importance": event.get("importance"),
+                    "reason": context.get("reason"),
+                }
+            )
+    return rows
 
 
 def _cached_bar_exports(run: dict[str, object], cache: MarketDataCache | None = None) -> list[dict[str, object]]:
@@ -760,6 +846,8 @@ This bundle is designed for offline review and Codex-assisted analysis. JSON fil
 Bars: {bars_note}
 
 Pattern diagnostics: `bar_analysis.json`, `regime_segments.csv`, `regime_pnl.csv`, `regime_gated_backtests.csv`, `monthly_pnl.csv`, `session_pnl.csv`, and `pattern_warnings.csv` describe regime fit and concentration risks where available.
+
+Market context: `market_context.json` and `market_context_events.csv` include FMP economic-calendar risk summaries where available.
 
 No API keys, passwords, or secret tokens are intentionally included in this export.
 """

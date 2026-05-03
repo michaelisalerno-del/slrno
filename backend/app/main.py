@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +24,7 @@ from .config import allowed_origins
 from .evidence_export import build_research_export_zip
 from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile, select_ig_market_candidate
 from .ig_spread_bet_engines import list_spread_bet_engines
+from .market_context import summarize_economic_calendar, unavailable_market_context
 from .market_data_cache import MarketDataCache
 from .market_plugins import get_market_plugin, list_market_plugins
 from .market_registry import MarketMapping, MarketRegistry
@@ -191,6 +192,25 @@ def _settings_provider_statuses() -> list[dict[str, object]]:
     ]
 
 
+async def _market_context_summary_for_range(start: str, end: str, market_id: str = "", limit: int = 12) -> dict[str, object]:
+    api_key = settings.get_secret("fmp", "api_key")
+    if not api_key:
+        return _market_context_unavailable("FMP API key is not configured", start, end, market_id)
+    provider = FMPProvider(api_key)
+    try:
+        events = await provider.economic_calendar(start, end)
+    except Exception as exc:
+        detail = _public_error(exc)
+        return _market_context_unavailable(detail, start, end, market_id)
+    return summarize_economic_calendar(events, start, end, market_id=market_id, limit=limit)
+
+
+def _market_context_unavailable(reason: str, start: str, end: str, market_id: str = "") -> dict[str, object]:
+    summary = unavailable_market_context(reason)
+    summary.update({"start": start, "end": end, "market_id": market_id})
+    return summary
+
+
 @app.get("/cockpit/summary")
 def cockpit_summary() -> dict[str, object]:
     runs = research_store.list_runs()
@@ -325,6 +345,20 @@ def settings_summary() -> dict[str, object]:
 @app.get("/settings/status")
 def settings_status() -> list[dict[str, object]]:
     return _settings_provider_statuses()
+
+
+@app.get("/market-context/summary")
+async def market_context_summary(
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
+    market_id: str = "",
+) -> dict[str, object]:
+    today = date.today()
+    start_date = start or today - timedelta(days=7)
+    end_date = end or today + timedelta(days=21)
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="Market context end date must be on or after start date")
+    return await _market_context_summary_for_range(start_date.isoformat(), end_date.isoformat(), market_id=market_id, limit=16)
 
 
 @app.post("/settings/eodhd")
@@ -641,6 +675,8 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             market_status["requested_start"] = payload.start
             market_status["history_expanded"] = True
         market_statuses.append(market_status)
+        persist_status()
+        market_status["market_context"] = await _market_context_summary_for_range(start, payload.end, market_id=market.market_id, limit=8)
         persist_status()
         if not market.enabled:
             _mark_market_failed(market_status, market_failures, market, f"Market {market.market_id} is disabled")
