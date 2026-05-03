@@ -417,11 +417,24 @@ function App() {
     if (!autoRefinementPlan) {
       return;
     }
-    const runConfig = applyAutoRefinementPlan(autoRefinementPlan);
+    await launchAutoRefinementPlan(autoRefinementPlan, "Launching make-tradeable repair run...");
+  }
+
+  async function makeTradeable(source) {
+    const template = refinementTemplateFromSource(source, researchRun);
+    const plan = autoRefinementPlanForTemplate(template, researchRun, enabledMarkets, template.market_id ? [template.market_id] : activeMarketIds);
+    setRefinementTemplate(template);
+    await launchAutoRefinementPlan(plan, "Launching make-tradeable repair run...");
+  }
+
+  async function launchAutoRefinementPlan(plan, launchMessage = "Launching auto-refine run...") {
+    const runConfig = applyAutoRefinementPlan(plan);
+    setActiveModule("backtests");
+    setActiveTab("results");
     try {
-      if (autoRefinementPlan.syncCosts) {
-        setMessage("Auto-refine: syncing IG cost profiles...");
-        const result = await syncIgCosts({ market_ids: autoRefinementPlan.marketIds });
+      if (plan.syncCosts) {
+        setMessage("Make tradeable: syncing IG cost profiles...");
+        const result = await syncIgCosts({ market_ids: plan.marketIds });
         setCostProfiles((current) => {
           const next = { ...current };
           for (const profile of result.profiles ?? []) {
@@ -430,7 +443,7 @@ function App() {
           return next;
         });
       }
-      await launchResearchRun(runConfig, autoRefinementPlan.marketIds, "Launching auto-refine run...");
+      await launchResearchRun(runConfig, plan.marketIds, launchMessage);
     } catch (error) {
       setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
@@ -496,11 +509,11 @@ function App() {
     setResearchRun(runConfig);
     setActiveTab("builder");
     if (!plan.syncCosts) {
-      setMessage(`Refine further staged: ${plan.steps.slice(0, 3).join("; ")}.`);
+      setMessage(`Make tradeable staged: ${plan.steps.slice(0, 3).join("; ")}.`);
       return;
     }
     try {
-      setMessage("Refine further: syncing IG cost profiles...");
+      setMessage("Make tradeable: syncing IG cost profiles...");
       const result = await syncIgCosts({ market_ids: plan.marketIds });
       setCostProfiles((current) => {
         const next = { ...current };
@@ -509,9 +522,9 @@ function App() {
         }
         return next;
       });
-      setMessage(`Refine further staged and synced ${result.profile_count ?? 0} IG cost profile${result.profile_count === 1 ? "" : "s"}.`);
+      setMessage(`Make tradeable staged and synced ${result.profile_count ?? 0} IG cost profile${result.profile_count === 1 ? "" : "s"}.`);
     } catch (error) {
-      setMessage(`Refine further staged, but IG validation still needs attention: ${error.message}`);
+      setMessage(`Make tradeable staged, but IG validation still needs attention: ${error.message}`);
     }
   }
 
@@ -843,7 +856,7 @@ function App() {
             </div>
             <button type="button" className="secondary" onClick={() => loadModule("research")}><RefreshCw size={16} /> Refresh</button>
           </div>
-          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} />
+          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} onMakeTradeable={makeTradeable} />
         </section>
       )}
 
@@ -921,7 +934,7 @@ function App() {
                       <div className="auto-refine-card">
                         <div className="auto-refine-heading">
                           <div>
-                            <strong><Sparkles size={16} /> Auto-refine plan</strong>
+                            <strong><ShieldCheck size={16} /> Make tradeable plan</strong>
                             <span>{autoRefinementPlan.summary}</span>
                           </div>
                           <div className="badge-group">
@@ -931,14 +944,14 @@ function App() {
                         </div>
                         {autoRefinementPlan.targetRegime && (
                           <div className="auto-refine-target">
-                            <strong>Auto-refine target: {regimeLabel(autoRefinementPlan.targetRegime)} only</strong>
+                            <strong>Tradeability target: {regimeLabel(autoRefinementPlan.targetRegime)} only</strong>
                             <span>Trades outside {regimeLabel(autoRefinementPlan.targetRegime)} are forced flat. The search is scored on the selected regime, with full-history gated evidence kept for context.</span>
                           </div>
                         )}
                         {autoRefinementPlan.crossMarketDiscovery && (
                           <div className="auto-refine-target">
                             <strong>Cross-market discovery is separate</strong>
-                            <span>Auto-refine stays on this template's source market. If a winning regime is known, it stays gated to that regime. Use Find similar elsewhere to create independent leads; those scores are not blended into this template.</span>
+                            <span>Make tradeable stays on this template's source market. If a winning regime is known, it stays gated to that regime. Use Find similar elsewhere to create independent leads; those scores are not blended into this template.</span>
                           </div>
                         )}
                         <div className="auto-refine-steps">
@@ -946,8 +959,18 @@ function App() {
                             <span key={step}>{step}</span>
                           ))}
                         </div>
+                        {autoRefinementPlan.targets.length > 0 && (
+                          <div className="tradeability-targets">
+                            <strong>Promotion checks this run is trying to clear</strong>
+                            <div>
+                              {autoRefinementPlan.targets.map((target) => (
+                                <span key={target}>{target}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                         <div className="button-row">
-                          <button type="button" className="secondary" onClick={runAutoRefinement}><Sparkles size={16} /> Run auto-refine</button>
+                          <button type="button" className="secondary" onClick={runAutoRefinement}><ShieldCheck size={16} /> Run next repair</button>
                           <button type="button" className="ghost" onClick={stageAutoRefinement}>Stage only</button>
                         </div>
                       </div>
@@ -1126,6 +1149,7 @@ function App() {
                 deleteRuns={deleteRuns}
                 onRefineTemplate={refineTemplate}
                 onRefineFurther={refineFurther}
+                onMakeTradeable={makeTradeable}
                 exportIncludeBars={exportIncludeBars}
               />
             )}
@@ -1269,13 +1293,13 @@ function GuideView({ setActiveModule }) {
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
-    ["5", "Use Refine further", "Use Best by market first, then click Refine further to stage the locked repair plan. If a best regime exists, refinement stays on that market and grades that regime only."],
+    ["5", "Make it tradeable", "Use Best by market first, then click Make tradeable. The app chooses the next repair from the blockers, locks the market/family/regime, syncs IG costs when needed, and launches the repair run."],
     ["6", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
     ["7", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, and regime gates are clear."],
   ];
   const modules = [
     ["Cockpit", "The home view for system status, provider health, current mode, and next actions."],
-    ["Backtests", "Run builder, run history, trial cards, regime evidence, repair workflow, archives, and exports."],
+    ["Backtests", "Run builder, run history, trial cards, regime evidence, Make tradeable repair workflow, archives, and exports."],
     ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Broker", "Order previews only. Live order placement remains disabled."],
     ["Risk", "Capital scenarios, selected testing capital, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
@@ -1302,12 +1326,12 @@ function GuideView({ setActiveModule }) {
     ["Warning colours", "Red blocks paper promotion, orange needs repair, blue is a specialist/regime identity, and grey is diagnostic."],
   ];
   const repairs = [
-    ["Too few trades / low OOS", "Auto-refine runs a deeper longer-history retest. If a best regime exists, the retest grades that regime only and forces the rest flat."],
+    ["Too few trades / low OOS", "Make tradeable runs a deeper longer-history retest. If a best regime exists, the retest grades that regime only and forces the rest flat."],
     ["Fragile folds", "Use Longer history and Evidence first. The result needs to work across several walk-forward folds."],
     ["Single-month profit", "Use Exclude month. The run removes the dominant month from saved bars and retests."],
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
     ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
-    ["Missing IG validation", "Use Refine further or Sync costs, then rerun. Do not promote stale or generic cost evidence."],
+    ["Missing IG validation", "Use Make tradeable or Sync costs. The app refreshes spread, slippage, margin, and minimum stake before rerunning."],
     ["Capital fit blocked", "Use Capital fit. It reruns the same market and family with conservative sizing, smaller stops, and ranking weighted toward the selected account size."],
     ["Multiple-testing haircut", "Use Evidence first for this template. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
     ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
@@ -1645,7 +1669,7 @@ function moduleLabel(id) {
   return MODULES.find((item) => item[0] === id)?.[1] ?? id;
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, exportIncludeBars }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, onMakeTradeable, exportIncludeBars }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
@@ -1897,7 +1921,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
           <span className="warning-chip info">Diagnostic</span>
         </div>
         <div className="trial-list">
-          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} />)}
+          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} />)}
         </div>
         {filteredTrials.length === 0 && trials.length > 0 && (
           <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
@@ -1989,7 +2013,7 @@ function TemplateUtilizationMetrics({ backtest, pattern }) {
   );
 }
 
-function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
+function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable }) {
   const backtest = trial.backtest ?? {};
   const accountSize = testingAccountSizeForSource(trial);
   const accountLabel = accountSizeLabel(accountSize);
@@ -2018,8 +2042,8 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther }) {
           <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`, scoreBasis].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="button-row trial-actions">
-          <button type="button" className="secondary" onClick={() => onRefineFurther(trial)}>
-            <Sparkles size={16} /> Refine further
+          <button type="button" className="secondary" onClick={() => onMakeTradeable(trial)}>
+            <ShieldCheck size={16} /> Make tradeable
           </button>
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
             <RefreshCw size={16} /> Refine
@@ -2093,7 +2117,7 @@ function ParetoCard({ item, onRefineTemplate }) {
   );
 }
 
-function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther }) {
+function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther, onMakeTradeable }) {
   const visibleCandidates = candidates.slice(0, 24);
   const queue = candidateQueueSummary(candidates);
   return (
@@ -2128,7 +2152,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
       <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} />)}
+          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} />)}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
           {candidates.length > visibleCandidates.length && (
             <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
@@ -2160,7 +2184,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
   );
 }
 
-function CandidateCard({ candidate, onRefineTemplate, onRefineFurther }) {
+function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTradeable }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssueCodes(readiness);
   const accountSize = testingAccountSizeForSource(candidate);
@@ -2195,8 +2219,8 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther }) {
         <WarningChips warnings={issues} limit={8} empty="Gate clear" />
       </div>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={() => onRefineFurther(candidate)}>
-          <Sparkles size={16} /> Refine further
+        <button type="button" className="secondary" onClick={() => onMakeTradeable(candidate)}>
+          <ShieldCheck size={16} /> Make tradeable
         </button>
         <button type="button" className="ghost" onClick={() => onRefineTemplate(candidate)}>
           <RefreshCw size={16} /> Refine
@@ -2977,6 +3001,12 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
       steps.push(step);
     }
   };
+  const targets = [];
+  const addTarget = (target) => {
+    if (!targets.includes(target)) {
+      targets.push(target);
+    }
+  };
   const hasAny = (...codes) => codes.some((code) => warnings.has(code));
   const tooFewTrades = hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "target_regime_low_oos_trades", "calendar_effect_needs_longer_history");
   const regimeDependent =
@@ -3014,11 +3044,13 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const excludedMonths = [];
 
   if (runTargetRegime) {
-    addStep(`Auto-refine target: ${regimeLabel(runTargetRegime)} only`);
+    addStep(`Make tradeable target: ${regimeLabel(runTargetRegime)} only`);
     addStep(`Force flat outside ${regimeLabel(runTargetRegime)}`);
+    addTarget(`Prove the edge inside ${regimeLabel(runTargetRegime)}`);
   }
   if (syncCosts) {
     addStep("Refresh IG costs, spread, slippage, margin, and minimum stake");
+    addTarget("Clear IG validation");
   }
   if (capitalBlocked) {
     budget = 120;
@@ -3029,11 +3061,13 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     repairMode = "capital_fit";
     addStep(`Rank by ${accountSizeLabel(optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE)} capital fit first`);
     addStep("Search smaller stakes and tighter stops before profit");
+    addTarget(`Fit ${accountSizeLabel(optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE)} risk and IG minimums`);
   }
   if (tooFewTrades) {
     budget = 120;
     start = earlierDate(start, longEvidenceStartForTemplate(template));
     addStep("Deep locked-family retest over longer history");
+    addTarget(targetRegime ? "Increase target-regime OOS trades" : "Increase OOS trades");
     if (targetRegime) {
       runTargetRegime = targetRegime;
       includeRegimeScans = false;
@@ -3057,15 +3091,18 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   if (monthDependent && dominantMonth) {
     excludedMonths.push(dominantMonth);
     addStep(`Exclude ${dominantMonth} and require the edge to survive`);
+    addTarget("Reduce best-month dependence");
   }
   if (fragileFolds) {
     budget = Math.max(budget, 120);
     start = earlierDate(start, longEvidenceStartForTemplate(template));
     addStep("Use longer-history fold and OOS evidence");
+    addTarget("Improve fold consistency");
   }
   if (scanBias) {
     stress = Math.max(stress, 2.5);
     addStep("Use evidence-first ranking to reduce scan bias");
+    addTarget("Reduce scan bias");
   }
   if (crossMarketDiscovery) {
     stress = Math.max(stress, 2.5);
@@ -3075,9 +3112,11 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   if (costStress) {
     stress = Math.max(stress, 3.0);
     addStep("Stress costs before trusting the net edge");
+    addTarget("Survive higher costs");
   }
   if (steps.length === 0) {
     addStep("Focused locked-family confirmation");
+    addTarget("Confirm the template without changing the market");
   }
 
   const runPatch = {
@@ -3105,7 +3144,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     ? "Tests both the broader trade-count repair and the winning-regime specialist path."
     : crossMarketDiscovery
     ? "Keeps this template on its source market; other markets are separate discovery leads."
-    : "Combines the active blockers into one locked-family repair run.";
+    : "Chooses the next repair run from the active promotion blockers.";
   return {
     marketIds,
     runPatch,
@@ -3114,7 +3153,8 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     summary,
     targetRegime: runTargetRegime,
     crossMarketDiscovery,
-    stageMessage: `Auto-refine staged: ${steps.slice(0, 3).join("; ")}.`,
+    targets: targets.slice(0, 5),
+    stageMessage: `Make tradeable staged: ${steps.slice(0, 3).join("; ")}.`,
   };
 }
 

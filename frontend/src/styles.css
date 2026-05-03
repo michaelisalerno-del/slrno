@@ -888,6 +888,39 @@ button.ghost {
   font-weight: 700;
 }
 
+.tradeability-targets {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #dbe6f4;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.tradeability-targets strong {
+  color: #2d3748;
+  font-size: 13px;
+}
+
+.tradeability-targets div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tradeability-targets span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid #badbcc;
+  border-radius: 999px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .repair-plan {
   display: grid;
   gap: 8px;
