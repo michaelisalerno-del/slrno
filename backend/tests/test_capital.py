@@ -11,8 +11,9 @@ def test_capital_scenarios_include_default_account_sizes_and_feasibility():
     )
 
     assert [item["account_size"] for item in scenarios] == [250.0, 500.0, 1000.0, 3000.0, 10000.0]
-    assert all("below_ig_min_deal_size" in item["violations"] for item in scenarios)
-    assert capital_summary(scenarios)["smallest_feasible_account"] is None
+    assert all(item["stake_floor_applied"] is True for item in scenarios)
+    assert all("below_ig_min_deal_size" not in item["violations"] for item in scenarios)
+    assert capital_summary(scenarios)["smallest_feasible_account"] == 250.0
 
 
 def test_capital_scenarios_include_selected_testing_account_size():

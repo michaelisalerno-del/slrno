@@ -22,6 +22,7 @@ class CapitalScenario:
     projected_return_pct: float
     requested_stake: float
     effective_stake: float
+    stake_floor_applied: bool
     min_deal_size: float
     estimated_margin: float
     estimated_stop_loss: float
@@ -43,6 +44,7 @@ class CapitalScenario:
             "projected_return_pct": self.projected_return_pct,
             "requested_stake": self.requested_stake,
             "effective_stake": self.effective_stake,
+            "stake_floor_applied": self.stake_floor_applied,
             "min_deal_size": self.min_deal_size,
             "estimated_margin": self.estimated_margin,
             "estimated_stop_loss": self.estimated_stop_loss,
@@ -103,8 +105,6 @@ def capital_scenarios(
         violations: list[str] = []
         if not has_reference_price:
             violations.append("missing_reference_price")
-        if min_deal_size and requested_stake < min_deal_size:
-            violations.append("below_ig_min_deal_size")
         if estimated_stop_loss > risk_budget:
             violations.append("risk_budget_exceeded")
         if estimated_margin > account_size * MAX_MARGIN_FRACTION:
@@ -127,6 +127,7 @@ def capital_scenarios(
                 projected_return_pct=round(return_pct, 4) if compounding_enabled and source_starting_cash > 0 else round((projected_net_profit / account_size) * 100, 4),
                 requested_stake=round(requested_stake, 6),
                 effective_stake=round(effective_stake, 6),
+                stake_floor_applied=bool(min_deal_size and requested_stake < min_deal_size),
                 min_deal_size=round(min_deal_size, 6),
                 estimated_margin=round(estimated_margin, 4),
                 estimated_stop_loss=round(estimated_stop_loss, 4),
