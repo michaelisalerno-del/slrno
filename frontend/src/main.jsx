@@ -1439,7 +1439,7 @@ function GuideView({ setActiveModule }) {
     ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
     ["Missing IG validation", "Use Make tradeable or Sync costs. The app refreshes spread, slippage, margin, and minimum stake before rerunning."],
     ["Capital fit blocked", "Use Capital fit. It reruns the same market and family with conservative sizing, smaller stops, and ranking weighted toward the selected account size."],
-    ["Multiple-testing haircut", "Make tradeable runs Freeze validate when exact parameters are available. If not, use Evidence first. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
+    ["Multiple-testing haircut", "Make tradeable runs Freeze validate first when exact parameters are available, after IG costs are known. If not, use Evidence first. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
     ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
     ["Template ready for library", "Use Freeze validate before paper/demo. It keeps the exact parameters, target regime, market, and timeframe unchanged."],
   ];
@@ -3227,7 +3227,8 @@ function repairActionsForTemplate(template) {
     dominantRegimeShare >= 0.5 ||
     verdict === "regime_specific";
   const needsRegimeRepair = hardRegimeWarning || (regimeIdentity && !targetRegime);
-  const needsFrozenValidation = hasAny("multiple_testing_haircut") && canFreezeValidate && !hasAny("isolated_parameter_peak");
+  const needsCostSync = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
+  const needsFrozenValidation = hasAny("multiple_testing_haircut") && canFreezeValidate && !needsCostSync;
   const actions = [];
   const add = (action) => {
     if (!actions.some((item) => item.id === action.id)) {
@@ -3235,7 +3236,7 @@ function repairActionsForTemplate(template) {
     }
   };
 
-  if (hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage")) {
+  if (needsCostSync) {
     add({
       id: "sync-costs",
       kind: "sync_costs",
@@ -3243,6 +3244,16 @@ function repairActionsForTemplate(template) {
       detail: "Refresh the spread, slippage, margin, and minimum stake rules before trusting the result.",
       button: "Sync costs",
       primary: true,
+    });
+  }
+  if (needsFrozenValidation) {
+    add({
+      id: "freeze-validation",
+      preset: "frozen_validation",
+      title: "Freeze validation required",
+      detail: "Retest the exact market, regime, timeframe, and parameters with no new search before trying any further repairs.",
+      button: "Freeze validate",
+      primary: actions.length === 0,
     });
   }
   if (hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high")) {
@@ -3284,16 +3295,6 @@ function repairActionsForTemplate(template) {
       title: "Check regime dependence",
       detail: dominantRegime ? `Run gated specialists around ${regimeLabel(dominantRegime)} and compare full-period evidence.` : "Run capped regime specialists and keep full-period gates active.",
       button: "Regime repair",
-      primary: actions.length === 0,
-    });
-  }
-  if (needsFrozenValidation) {
-    add({
-      id: "freeze-validation",
-      preset: "frozen_validation",
-      title: "Freeze validation required",
-      detail: "Retest the exact market, regime, timeframe, and parameters with no new search. This is the direct way to clear multiple-testing bias.",
-      button: "Freeze validate",
       primary: actions.length === 0,
     });
   }
@@ -3417,14 +3418,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const shouldFreezeValidate =
     canFreezeValidate &&
     hasAny("multiple_testing_haircut") &&
-    !hasAny("isolated_parameter_peak") &&
-    !tooFewTrades &&
-    !capitalBlocked &&
-    !syncCosts &&
-    !costStress &&
-    !monthDependent &&
-    !crossMarket &&
-    !regimeNeedsRepair;
+    !syncCosts;
   const shouldConfirmFrozenValidation =
     canFreezeValidate &&
     !scanBias &&
@@ -3458,7 +3452,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     addStep("Refresh IG costs, spread, slippage, margin, and minimum stake");
     addTarget("Clear IG validation");
   }
-  if (capitalBlocked) {
+  if (capitalBlocked && !shouldFreezeValidate) {
     budget = 120;
     stress = Math.max(stress, 2.5);
     start = earlierDate(start, longEvidenceStartForTemplate(template));
@@ -3469,7 +3463,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     addStep("Search smaller stakes and tighter stops before profit");
     addTarget(`Fit ${accountSizeLabel(optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE)} risk and IG minimums`);
   }
-  if (tooFewTrades) {
+  if (tooFewTrades && !shouldFreezeValidate) {
     budget = 120;
     start = earlierDate(start, longEvidenceStartForTemplate(template));
     addStep("Deep locked-family retest over longer history");
@@ -3484,7 +3478,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
       addStep(dominantRegime ? `Compare more trades with ${regimeLabel(dominantRegime)} specialists` : "Compare more trades with regime specialists");
     }
   }
-  if (regimeDependent && !includeRegimeScans) {
+  if (regimeDependent && !includeRegimeScans && !shouldFreezeValidate) {
     if (targetRegime) {
       runTargetRegime = targetRegime;
       addStep(`Keep scoring locked to ${regimeLabel(targetRegime)} only`);
@@ -3494,7 +3488,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
       addStep(dominantRegime ? `Run regime-gated specialists around ${regimeLabel(dominantRegime)}` : "Run regime-gated specialist checks");
     }
   }
-  if (monthDependent && dominantMonth) {
+  if (monthDependent && dominantMonth && !shouldFreezeValidate) {
     excludedMonths.push(dominantMonth);
     addStep(`Exclude ${dominantMonth} and require the edge to survive`);
     addTarget("Reduce best-month dependence");
@@ -3510,12 +3504,12 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     addStep("Use evidence-first ranking to reduce scan bias");
     addTarget("Reduce scan bias");
   }
-  if (crossMarketDiscovery) {
+  if (crossMarketDiscovery && !shouldFreezeValidate) {
     stress = Math.max(stress, 2.5);
     addStep("Keep this refinement on the source market only");
     addStep("Use Find similar elsewhere as a separate discovery run");
   }
-  if (costStress) {
+  if (costStress && !shouldFreezeValidate) {
     stress = Math.max(stress, 3.0);
     addStep("Stress costs before trusting the net edge");
     addTarget("Survive higher costs");
