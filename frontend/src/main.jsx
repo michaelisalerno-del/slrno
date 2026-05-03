@@ -102,6 +102,33 @@ const OBJECTIVES = [
   { id: "profit_first", label: "Profit first" },
 ];
 
+const CANDIDATE_FACTORY_MODES = [
+  {
+    id: "balanced",
+    label: "Balanced factory",
+    badge: "Recommended",
+    detail: "Find-anything-robust, regime templates on, realistic costs, and enough breadth to create leads without overloading the 2 vCPU server.",
+    preset: "balanced",
+    budgetLabel: "54 base trials / market + capped regime specialists",
+  },
+  {
+    id: "deep_one_market",
+    label: "Deep one-market factory",
+    badge: "Best for gold",
+    detail: "Uses only the first selected market and spends the whole budget there. Best when you want templates for every regime on one instrument.",
+    preset: "deep",
+    budgetLabel: "120 base trials + 18 trials / eligible regime",
+  },
+  {
+    id: "evidence_first",
+    label: "Evidence-first factory",
+    badge: "Cleaner leads",
+    detail: "Keeps discovery broad but ranks harder on OOS, folds, costs, and selected-capital fit before you start repairing.",
+    preset: "balanced",
+    budgetLabel: "54 base trials / market with stricter evidence ranking",
+  },
+];
+
 const MODULES = [
   ["cockpit", "Cockpit", Home],
   ["guide", "Guide", BookOpen],
@@ -204,12 +231,13 @@ function App() {
         setCritique(summary.critique ?? null);
         getResearchCritique().then(setCritique).catch(() => undefined);
       } else if (moduleId === "backtests") {
-        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary] = await Promise.all([
+        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary] = await Promise.all([
           getStatus(),
           getMarkets(),
           getMarketPlugins(),
           getMarketDataCacheStatus().catch(() => null),
           getBacktestsSummary(includeArchivedRuns),
+          getResearchSummary(80).catch(() => ({ candidates: [] })),
         ]);
         setStatus(nextStatus);
         setMarkets(nextMarkets);
@@ -218,6 +246,7 @@ function App() {
         setEngines((summary.engines ?? []).length ? summary.engines : FALLBACK_ENGINES);
         setSpreadBetEngines(summary.spread_bet_engines ?? []);
         setResearchRuns(summary.runs ?? []);
+        setCandidates(researchSummary.candidates ?? []);
         resumeLatestActiveRun(summary.runs ?? []);
       } else if (moduleId === "templates") {
         setTemplates(await getTemplatesSummary());
@@ -245,7 +274,7 @@ function App() {
   }, [activeModule, includeArchivedRuns, loadModule]);
 
   React.useEffect(() => {
-    if (activeModule === "backtests" && !["builder", "results"].includes(activeTab)) {
+    if (activeModule === "backtests" && !["builder", "factory", "results"].includes(activeTab)) {
       setActiveTab("builder");
     }
   }, [activeModule, activeTab]);
@@ -431,6 +460,54 @@ function App() {
       return;
     }
     await launchAutoRefinementPlan(autoRefinementPlan, "Launching make-tradeable repair run...");
+  }
+
+  function stageCandidateFactory(mode = "balanced") {
+    const plan = candidateFactoryPlan(mode, researchRun, enabledMarkets, activeMarketIds);
+    if (plan.stopReason) {
+      setMessage(plan.stopReason);
+      return;
+    }
+    setRefinementTemplate(null);
+    setActiveMarketIds(plan.marketIds);
+    for (const marketId of plan.marketIds) {
+      loadCostProfile(marketId).catch(() => undefined);
+    }
+    setResearchRun({ ...researchRun, ...plan.runPatch });
+    setActiveTab("builder");
+    setMessage(plan.stageMessage);
+  }
+
+  async function runCandidateFactory(mode = "balanced") {
+    const plan = candidateFactoryPlan(mode, researchRun, enabledMarkets, activeMarketIds);
+    if (plan.stopReason) {
+      setMessage(plan.stopReason);
+      return;
+    }
+    const runConfig = { ...researchRun, ...plan.runPatch };
+    setRefinementTemplate(null);
+    setActiveMarketIds(plan.marketIds);
+    for (const marketId of plan.marketIds) {
+      loadCostProfile(marketId).catch(() => undefined);
+    }
+    setResearchRun(runConfig);
+    setActiveModule("backtests");
+    setActiveTab("results");
+    try {
+      setMessage("Candidate Factory: syncing IG cost profiles...");
+      const result = await syncIgCosts({ market_ids: plan.marketIds });
+      setCostProfiles((current) => {
+        const next = { ...current };
+        for (const profile of result.profiles ?? []) {
+          next[profile.market_id] = profile;
+        }
+        return next;
+      });
+      await launchResearchRun(runConfig, plan.marketIds, plan.launchMessage);
+    } catch (error) {
+      setResearchState({ status: "error", detail: error.message, progress: 100 });
+      setMessage(error.message);
+    }
   }
 
   async function makeTradeable(source) {
@@ -993,6 +1070,7 @@ function App() {
             <div className="tabs">
               {[
                 ["builder", "New Test"],
+                ["factory", "Candidate Factory"],
                 ["results", "Runs"],
               ].map(([id, label]) => (
                 <button className={activeTab === id ? "tab active" : "tab"} key={id} type="button" onClick={() => setActiveTab(id)}>
@@ -1257,6 +1335,25 @@ function App() {
               </form>
             )}
 
+            {activeTab === "factory" && (
+              <CandidateFactoryView
+                candidates={candidates}
+                runDetail={runDetail}
+                researchRuns={researchRuns}
+                enabledMarkets={enabledMarkets}
+                activeMarketIds={activeMarketIds}
+                selectedMarkets={selectedMarkets}
+                researchRun={researchRun}
+                toggleMarket={toggleMarket}
+                onRunFactory={runCandidateFactory}
+                onStageFactory={stageCandidateFactory}
+                onMakeTradeable={makeTradeable}
+                onRepairRemaining={repairRemaining}
+                onSaveTemplate={saveTemplateFromSource}
+                onRefresh={() => loadModule("backtests")}
+              />
+            )}
+
             {activeTab === "results" && (
               <ResultsView
                 runDetail={runDetail}
@@ -1412,7 +1509,7 @@ function GuideView({ setActiveModule }) {
   const workflow = [
     ["1", "Connect providers", "Use Settings for EODHD bars and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
-    ["3", "Run a regime-template search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Build regime templates on."],
+    ["3", "Run Candidate Factory", "Start with one market, Balanced factory, realistic dates, cost stress 2.0, and regime templates on. This creates leads without lowering paper gates."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, cost/gross, drawdown, capital fit, and warnings."],
     ["5", "Make it tradeable", "Use Best by market first, then click Make tradeable. The app chooses the next repair from the blockers, locks the market/family/regime, syncs IG costs when needed, and launches the repair run."],
     ["6", "Save and freeze", "Save promising repaired results to Templates, then use Freeze validate. This retests the exact rules with no parameter hunting, so the OOS period does not quietly become training data."],
@@ -1421,7 +1518,7 @@ function GuideView({ setActiveModule }) {
   ];
   const modules = [
     ["Cockpit", "The home view for system status, provider health, current mode, and next actions."],
-    ["Backtests", "Run builder, run history, trial cards, regime evidence, Make tradeable repair workflow, archives, and exports."],
+    ["Backtests", "Candidate Factory, run builder, run history, trial cards, regime evidence, Make tradeable repair workflow, archives, and exports."],
     ["Templates", "Saved strategy templates with frozen rules, market/timeframe/regime identity, readiness, and reuse actions."],
     ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Broker", "Order previews only. Live order placement remains disabled."],
@@ -2230,6 +2327,214 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
         )}
       </section>
     </div>
+  );
+}
+
+function CandidateFactoryView({
+  candidates,
+  runDetail,
+  researchRuns,
+  enabledMarkets,
+  activeMarketIds,
+  selectedMarkets,
+  researchRun,
+  toggleMarket,
+  onRunFactory,
+  onStageFactory,
+  onMakeTradeable,
+  onRepairRemaining,
+  onSaveTemplate,
+  onRefresh,
+}) {
+  const leads = factoryLeads(candidates, runDetail, activeMarketIds);
+  const summary = factoryLeadSummary(leads);
+  const coverage = factoryCoverageRows(leads);
+  const gaps = factoryRegimeGaps(runDetail, leads, activeMarketIds);
+  const latestRun = researchRuns[0];
+  const selectedMarketText = selectedMarkets.length
+    ? selectedMarkets.map((market) => market.market_id).join(" / ")
+    : "Choose markets";
+  const topLeads = leads.slice(0, 8);
+  return (
+    <div className="lab-grid candidate-factory">
+      <section className="lab-section span-2 factory-hero">
+        <div>
+          <h3><Sparkles size={18} /> Candidate Factory</h3>
+          <p>
+            Build more raw material without lowering the paper gate: scan one market or a small group, split by regime,
+            shortlist the best leads, then repair only the ones with enough evidence to deserve it.
+          </p>
+        </div>
+        <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh leads</button>
+      </section>
+
+      <section className="lab-section span-2">
+        <h3>Factory Status</h3>
+        <div className="metrics four">
+          <Metric label="Selected markets" value={selectedMarkets.length || 0} />
+          <Metric label="Research leads" value={summary.researchLeads} />
+          <Metric label="Paper-ready" value={summary.paperReady} />
+          <Metric label="Market/regime cells" value={summary.coveredCells} />
+        </div>
+        <div className="factory-flow">
+          {[
+            ["1", "Discover", "Run factory scans with regime templates on."],
+            ["2", "Shortlist", "Use best by market/regime, not best headline score only."],
+            ["3", "Repair", "Make tradeable chooses blocker-specific repair."],
+            ["4", "Freeze", "Retest exact rules with no parameter hunting."],
+            ["5", "Paper", "Only fresh, IG-validated, capital-fit candidates move forward."],
+          ].map(([step, title, detail]) => (
+            <div className="factory-step" key={title}>
+              <span>{step}</span>
+              <strong>{title}</strong>
+              <small>{detail}</small>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="lab-section span-2">
+        <div className="label-row table-heading">
+          <h3>Markets To Feed</h3>
+          <span className="badge market-badge">{selectedMarketText}</span>
+        </div>
+        <div className="market-picker">
+          {enabledMarkets.map((item) => (
+            <button type="button" className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"} key={item.market_id} onClick={() => toggleMarket(item.market_id)}>
+              <strong>{item.market_id}</strong>
+              <span>{item.name} · {normalizeInterval(item.default_timeframe)}</span>
+            </button>
+          ))}
+        </div>
+        {selectedMarkets.length > 3 && (
+          <small className="muted">For cleaner candidates, prefer one market at a time. Multi-market factory runs are capped for speed.</small>
+        )}
+      </section>
+
+      <section className="lab-section span-2">
+        <h3>Run A Factory Scan</h3>
+        <div className="factory-mode-grid">
+          {CANDIDATE_FACTORY_MODES.map((mode) => {
+            const plan = candidateFactoryPlan(mode.id, researchRun, enabledMarkets, activeMarketIds);
+            return (
+              <div className="factory-mode-card" key={mode.id}>
+                <div className="label-row">
+                  <strong>{mode.label}</strong>
+                  <span className="badge base">{mode.badge}</span>
+                </div>
+                <span>{mode.detail}</span>
+                <div className="mini-metrics">
+                  <Metric label="Preset" value={mode.preset} />
+                  <Metric label="Budget" value={mode.budgetLabel} />
+                  <Metric label="Markets" value={plan.marketIds.join(" / ") || "none"} />
+                  <Metric label="Start" value={plan.runPatch.start ?? researchRun.start} />
+                </div>
+                <div className="button-row">
+                  <button type="button" className="secondary" onClick={() => onRunFactory(mode.id)} disabled={Boolean(plan.stopReason)}>
+                    <Sparkles size={16} /> Run
+                  </button>
+                  <button type="button" className="ghost" onClick={() => onStageFactory(mode.id)} disabled={Boolean(plan.stopReason)}>
+                    Stage
+                  </button>
+                </div>
+                {plan.stopReason && <small className="muted">{plan.stopReason}</small>}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="lab-section">
+        <h3>Coverage Board</h3>
+        <div className="status-list">
+          {coverage.slice(0, 10).map((row) => (
+            <div className="status compact-status" key={`${row.marketId}-${row.regime}`}>
+              <strong>{row.marketId} · {regimeLabel(row.regime)}</strong>
+              <span>{row.count} lead{row.count === 1 ? "" : "s"} · best {round(row.bestScore)} · {tierLabel(row.bestTier)}</span>
+              <small>OOS {formatMoney(row.bestOos)} · trades {row.bestTrades} · cost/gross {percent(row.bestCostToGross)}</small>
+            </div>
+          ))}
+          {coverage.length === 0 && <span className="muted">No market/regime leads yet. Run a factory scan first.</span>}
+        </div>
+      </section>
+
+      <section className="lab-section">
+        <h3>Gaps To Hunt</h3>
+        <div className="status-list">
+          {gaps.slice(0, 10).map((gap) => (
+            <div className="status compact-status" key={`${gap.marketId}-${gap.regime}`}>
+              <strong>{gap.marketId} · {regimeLabel(gap.regime)}</strong>
+              <span>{gap.tradingDays} regime days · no saved lead yet</span>
+              <small>Run a factory scan or deep one-market scan to search this specialist slot.</small>
+            </div>
+          ))}
+          {gaps.length === 0 && (
+            <span className="muted">
+              {runDetail ? "No obvious regime gaps in the loaded run." : "Load a run in Runs to see eligible regime gaps."}
+            </span>
+          )}
+        </div>
+      </section>
+
+      <section className="lab-section span-2">
+        <div className="label-row table-heading">
+          <h3>Best Leads To Feed Into Repair</h3>
+          {latestRun && <span className="badge muted-badge">Latest run {latestRun.id} · {latestRun.status}</span>}
+        </div>
+        <div className="factory-lead-grid">
+          {topLeads.map((lead) => (
+            <FactoryLeadCard
+              key={lead.key}
+              lead={lead}
+              onMakeTradeable={onMakeTradeable}
+              onRepairRemaining={onRepairRemaining}
+              onSaveTemplate={onSaveTemplate}
+            />
+          ))}
+          {topLeads.length === 0 && <span className="muted">No leads yet. Start with Balanced factory on one market, then inspect Best Leads.</span>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function FactoryLeadCard({ lead, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
+  const showRepairRemaining = shouldShowRepairRemaining(lead.source);
+  return (
+    <article className="factory-lead-card">
+      <div className="label-row">
+        <strong>{lead.name}</strong>
+        <div className="badge-group">
+          <span className="badge market-badge">{lead.marketId || "Market"}</span>
+          {lead.regime && <span className="badge base">{regimeLabel(lead.regime)}</span>}
+          <span className={`badge ${tierBadgeClass(lead.tier)}`}>{tierLabel(lead.tier)}</span>
+        </div>
+      </div>
+      <span>{[lead.interval, strategyFamilyLabel(lead.family), `score ${round(lead.score)}`].filter(Boolean).join(" · ")}</span>
+      <div className="mini-metrics">
+        <Metric label="Net" value={formatMoney(lead.net)} />
+        <Metric label="OOS" value={formatMoney(lead.oos)} />
+        <Metric label="Trades" value={lead.trades} />
+        <Metric label="Cost/gross" value={percent(lead.costToGross)} />
+      </div>
+      <div className="warning-row">
+        <WarningChips warnings={lead.warnings} limit={5} empty="Gate clear" />
+      </div>
+      <div className="button-row compact-actions">
+        {showRepairRemaining ? (
+          <button type="button" className="secondary" onClick={() => onRepairRemaining(lead.source)}>
+            <ShieldCheck size={16} /> Repair
+          </button>
+        ) : (
+          <button type="button" className="secondary" onClick={() => onMakeTradeable(lead.source)}>
+            <ShieldCheck size={16} /> Make tradeable
+          </button>
+        )}
+        <button type="button" className="ghost" onClick={() => onSaveTemplate(lead.source)}>
+          <Save size={16} /> Save
+        </button>
+      </div>
+    </article>
   );
 }
 
@@ -3121,6 +3426,188 @@ function runQualitySummary(trials = []) {
     .slice(0, 4)
     .map(([warning, count]) => ({ warning, count }));
   return { paperReady, researchWatch, incubator, rejected, costFragile, topWarnings };
+}
+
+function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMarketIds = []) {
+  const mode = CANDIDATE_FACTORY_MODES.find((item) => item.id === modeId) ?? CANDIDATE_FACTORY_MODES[0];
+  const enabledIds = new Set(enabledMarkets.map((market) => market.market_id));
+  const selected = activeMarketIds.filter((marketId) => enabledIds.has(marketId));
+  const fallbackMarket = enabledMarkets.find((market) => market.market_id === "XAUUSD")?.market_id
+    ?? enabledMarkets[0]?.market_id
+    ?? researchRun.market_id;
+  let marketIds = selected.length ? selected : [fallbackMarket].filter(Boolean);
+  if (mode.id === "deep_one_market") {
+    marketIds = marketIds.slice(0, 1);
+  }
+  if (marketIds.length === 0) {
+    return { marketIds: [], runPatch: {}, stopReason: "Choose at least one enabled market before running the factory." };
+  }
+  const preset = mode.id === "deep_one_market" ? "deep" : "balanced";
+  const budget = mode.id === "deep_one_market" ? "120" : mode.id === "evidence_first" ? "54" : "";
+  const interval = marketIds.length > 1 ? "market_default" : (researchRun.interval || "market_default");
+  const start = factoryStartForMarkets(marketIds, enabledMarkets, interval, researchRun.start);
+  const runPatch = {
+    market_id: marketIds[0],
+    interval,
+    start,
+    end: researchRun.end,
+    trading_style: "find_anything_robust",
+    objective: "profit_first",
+    risk_profile: "balanced",
+    search_preset: preset,
+    search_budget: budget,
+    strategy_families: [],
+    cost_stress_multiplier: mode.id === "evidence_first" ? 2.5 : 2.0,
+    include_regime_scans: true,
+    regime_scan_budget_per_regime: "",
+    target_regime: "",
+    excluded_months: [],
+    repair_mode: mode.id === "evidence_first" ? "evidence_first" : "standard",
+    account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
+    source_template: {},
+  };
+  const specialistBudget = regimePresetBudget(preset);
+  const trialPlan = mode.id === "deep_one_market"
+    ? `120 base trials plus up to ${specialistBudget} per eligible regime`
+    : `${preset === "balanced" ? 54 : 18} base trials per market plus up to ${specialistBudget} per eligible regime`;
+  return {
+    mode,
+    marketIds,
+    runPatch,
+    launchMessage: `Launching Candidate Factory: ${marketIds.join(" / ")} · ${trialPlan}.`,
+    stageMessage: `Candidate Factory staged for ${marketIds.join(" / ")}: find-anything-robust, regime templates on, ${trialPlan}.`,
+  };
+}
+
+function factoryStartForMarkets(marketIds = [], enabledMarkets = [], interval, currentStart) {
+  const selected = enabledMarkets.filter((market) => marketIds.includes(market.market_id));
+  const requestedInterval = intervalValue(interval);
+  const dailyRequested = requestedInterval === "1day";
+  const allDailyMarkets = selected.length > 0 && selected.every((market) => intervalValue(market.default_timeframe) === "1day");
+  const targetStart = dailyRequested || allDailyMarkets ? "2020-01-01" : "2024-01-01";
+  return earlierDate(currentStart, targetStart);
+}
+
+function factoryLeads(candidates = [], runDetail = null, activeMarketIds = []) {
+  const selected = new Set(activeMarketIds.filter(Boolean));
+  const sources = [...arrayValue(candidates), ...arrayValue(runDetail?.trials)];
+  const seen = new Set();
+  const leads = [];
+  for (const source of sources) {
+    const lead = factoryLeadFromSource(source);
+    if (!lead || (selected.size > 0 && lead.marketId && !selected.has(lead.marketId))) {
+      continue;
+    }
+    if (seen.has(lead.dedupeKey)) {
+      continue;
+    }
+    seen.add(lead.dedupeKey);
+    leads.push(lead);
+  }
+  return leads.sort((left, right) => factoryLeadRank(right) - factoryLeadRank(left));
+}
+
+function factoryLeadFromSource(source = {}) {
+  const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? {};
+  const backtest = source.audit?.backtest ?? source.backtest ?? {};
+  const pattern = parameters.bar_pattern_analysis ?? {};
+  const evidence = evidenceProfileForSource(source);
+  const warnings = warningCodesForSource(source);
+  const marketId = String(source.market_id || parameters.market_id || "").trim();
+  const regime = String(parameters.target_regime || pattern.target_regime || pattern.dominant_profit_regime?.key || "").trim();
+  const name = String(source.strategy_name || source.name || "").trim();
+  if (!name) {
+    return null;
+  }
+  const tier = String(source.promotion_tier || source.audit?.promotion_tier || "watchlist");
+  return {
+    key: `${source.run_id ?? "x"}-${source.id ?? name}-${marketId}-${regime}`,
+    dedupeKey: `${source.run_id ?? "x"}-${name}-${marketId}-${regime}`,
+    source,
+    id: source.id,
+    runId: source.run_id,
+    name,
+    marketId,
+    regime,
+    tier,
+    family: source.strategy_family || parameters.family || source.style || "",
+    interval: normalizeInterval(parameters.timeframe || parameters.interval || ""),
+    score: Number(source.robustness_score ?? 0),
+    net: Number(backtest.net_profit ?? 0),
+    oos: Number(evidence.oos_net_profit ?? backtest.test_profit ?? 0),
+    trades: Number(backtest.trade_count ?? 0),
+    oosTrades: Number(evidence.oos_trade_count ?? 0),
+    costToGross: Number(backtest.cost_to_gross_ratio ?? 0),
+    warnings,
+  };
+}
+
+function factoryLeadRank(lead = {}) {
+  const tierScore = { validated_candidate: 500, paper_candidate: 450, research_candidate: 320, incubator: 260, watchlist: 180, reject: 40 }[lead.tier] ?? 100;
+  const oosBonus = lead.oos > 0 ? 60 : 0;
+  const tradeBonus = Math.min(40, Number(lead.oosTrades || lead.trades || 0));
+  const blockerPenalty = lead.warnings.filter((warning) => warningSeverity(warning) === "blocker").length * 18;
+  const costPenalty = Number(lead.costToGross ?? 0) > 0.65 ? 40 : Number(lead.costToGross ?? 0) > 0.4 ? 16 : 0;
+  return tierScore + Number(lead.score ?? 0) + oosBonus + tradeBonus - blockerPenalty - costPenalty;
+}
+
+function factoryLeadSummary(leads = []) {
+  const coveredCells = new Set(leads.map((lead) => `${lead.marketId}-${lead.regime || "unknown"}`)).size;
+  return {
+    researchLeads: leads.filter((lead) => lead.tier !== "reject").length,
+    paperReady: leads.filter((lead) => ["paper_candidate", "validated_candidate"].includes(lead.tier)).length,
+    coveredCells,
+  };
+}
+
+function factoryCoverageRows(leads = []) {
+  const grouped = new Map();
+  for (const lead of leads) {
+    const key = `${lead.marketId || "Unknown"}-${lead.regime || "unknown"}`;
+    const current = grouped.get(key) ?? {
+      marketId: lead.marketId || "Unknown",
+      regime: lead.regime || "unknown",
+      count: 0,
+      bestScore: 0,
+      bestTier: "reject",
+      bestOos: 0,
+      bestTrades: 0,
+      bestCostToGross: 0,
+      rank: -Infinity,
+    };
+    const rank = factoryLeadRank(lead);
+    current.count += 1;
+    if (rank > current.rank) {
+      current.rank = rank;
+      current.bestScore = lead.score;
+      current.bestTier = lead.tier;
+      current.bestOos = lead.oos;
+      current.bestTrades = lead.trades;
+      current.bestCostToGross = lead.costToGross;
+    }
+    grouped.set(key, current);
+  }
+  return [...grouped.values()].sort((left, right) => right.rank - left.rank);
+}
+
+function factoryRegimeGaps(runDetail = null, leads = [], activeMarketIds = []) {
+  const selected = new Set(activeMarketIds.filter(Boolean));
+  const covered = new Set(leads.map((lead) => `${lead.marketId}-${lead.regime}`));
+  const gaps = [];
+  for (const status of arrayValue(runDetail?.config?.market_statuses)) {
+    const marketId = String(status.market_id || "").trim();
+    if (selected.size > 0 && marketId && !selected.has(marketId)) {
+      continue;
+    }
+    for (const item of arrayValue(status.eligible_regimes)) {
+      const regime = String(item.regime || "").trim();
+      if (!regime || covered.has(`${marketId}-${regime}`)) {
+        continue;
+      }
+      gaps.push({ marketId, regime, tradingDays: Number(item.trading_days ?? 0) });
+    }
+  }
+  return gaps.sort((left, right) => right.tradingDays - left.tradingDays);
 }
 
 function candidateQueueSummary(candidates = []) {

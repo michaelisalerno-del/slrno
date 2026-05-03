@@ -635,7 +635,9 @@ button.ghost {
 
 .cost-grid,
 .pareto-grid,
-.candidate-grid {
+.candidate-grid,
+.factory-mode-grid,
+.factory-lead-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
@@ -649,6 +651,8 @@ button.ghost {
 
 .cost-card,
 .pareto-card,
+.factory-mode-card,
+.factory-lead-card,
 .regime-template-card,
 .candidate-card,
 .template-card,
@@ -662,6 +666,69 @@ button.ghost {
   border: 1px solid #e0e6ed;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.candidate-factory {
+  align-items: start;
+}
+
+.factory-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid #b7cef6;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.factory-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.factory-step {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e1e7ee;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.factory-step > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: #ffffff;
+  background: #1f6feb;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.factory-step small,
+.factory-mode-card > span,
+.factory-lead-card > span {
+  color: #5f6875;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.factory-mode-card,
+.factory-lead-card {
+  align-content: start;
+  min-width: 0;
+}
+
+.factory-mode-card .mini-metrics,
+.factory-lead-card .mini-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .regime-template-grid {
@@ -1117,6 +1184,9 @@ th {
   .cost-grid,
   .pareto-grid,
   .candidate-grid,
+  .factory-flow,
+  .factory-mode-grid,
+  .factory-lead-grid,
   .template-grid,
   .metrics.four {
     grid-template-columns: 1fr;
