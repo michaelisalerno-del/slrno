@@ -217,6 +217,7 @@ function App() {
   const fmpStatus = providerStatus(status, "fmp");
   const igStatus = providerStatus(status, "ig");
   const enabledMarkets = markets.filter((item) => item.enabled);
+  const disabledMarkets = markets.filter((item) => !item.enabled);
   const selectedMarkets = enabledMarkets.filter((item) => activeMarketIds.includes(item.market_id));
   const selectedEngine = engines.find((engine) => engine.id === researchRun.engine) ?? engines[0] ?? FALLBACK_ENGINES[0];
   const selectedPreset = SEARCH_PRESETS.find((preset) => preset.id === researchRun.search_preset) ?? SEARCH_PRESETS[1];
@@ -1260,6 +1261,13 @@ function App() {
                         <span>{item.name}</span>
                       </button>
                     ))}
+                    {disabledMarkets.map((item) => (
+                      <button type="button" className="market-chip unavailable" key={item.market_id} disabled title={marketAvailabilityNote(item)}>
+                        <strong>{item.market_id}</strong>
+                        <span>{item.name}</span>
+                        <span>{marketAvailabilityNote(item)}</span>
+                      </button>
+                    ))}
                   </div>
                 </section>
 
@@ -1374,6 +1382,7 @@ function App() {
                 runDetail={runDetail}
                 researchRuns={researchRuns}
                 enabledMarkets={enabledMarkets}
+                disabledMarkets={disabledMarkets}
                 activeMarketIds={activeMarketIds}
                 selectedMarkets={selectedMarkets}
                 researchRun={researchRun}
@@ -2095,7 +2104,7 @@ function MarketTable({ markets }) {
               <td>{item.ig_name || "search required"}</td>
               <td>{item.ig_epic || "manual"}</td>
               <td>{normalizeInterval(item.default_timeframe)} · est {round(item.estimated_spread_bps ?? item.spread_bps)} / {round(item.estimated_slippage_bps ?? item.slippage_bps)} bps</td>
-              <td>{item.enabled ? "Yes" : "No"}</td>
+              <td>{item.enabled ? "Yes" : marketAvailabilityNote(item)}</td>
             </tr>
           ))}
         </tbody>
@@ -2411,6 +2420,7 @@ function CandidateFactoryView({
   runDetail,
   researchRuns,
   enabledMarkets,
+  disabledMarkets = [],
   activeMarketIds,
   selectedMarkets,
   researchRun,
@@ -2479,6 +2489,13 @@ function CandidateFactoryView({
             <button type="button" className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"} key={item.market_id} onClick={() => toggleMarket(item.market_id)}>
               <strong>{item.market_id}</strong>
               <span>{item.name} · {normalizeInterval(item.default_timeframe)}</span>
+            </button>
+          ))}
+          {disabledMarkets.map((item) => (
+            <button type="button" className="market-chip unavailable" key={item.market_id} disabled title={marketAvailabilityNote(item)}>
+              <strong>{item.market_id}</strong>
+              <span>{item.name} · {normalizeInterval(item.default_timeframe)}</span>
+              <span>{marketAvailabilityNote(item)}</span>
             </button>
           ))}
         </div>
@@ -3320,6 +3337,19 @@ function intervalValue(value) {
     return "1hour";
   }
   return value || "5min";
+}
+
+function marketAvailabilityNote(market = {}) {
+  if (market.enabled) {
+    return "Backtest-ready";
+  }
+  if (market.market_id === "SA40") {
+    return "Broker-only: IG market found, bars unavailable";
+  }
+  if (market.ig_epic) {
+    return "Broker-only: enable after bar data is mapped";
+  }
+  return "Disabled in market registry";
 }
 
 function trialMarketId(item) {

@@ -295,6 +295,14 @@ p {
   border-color: #1f6feb;
 }
 
+.market-chip.unavailable {
+  color: #66717f;
+  background: #f7f8fa;
+  border-style: dashed;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
 .market-chip,
 .run-pill {
   display: grid;
@@ -482,6 +490,11 @@ button {
 button:disabled {
   opacity: 0.65;
   cursor: progress;
+}
+
+.market-chip.unavailable:disabled {
+  cursor: not-allowed;
+  opacity: 1;
 }
 
 button.secondary {
