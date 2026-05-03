@@ -186,12 +186,14 @@ def _event_category(title: str) -> str:
 
 
 def _event_importance(title: str, impact: str, category: str) -> str:
+    if "high" in impact or impact in {"3", "3-star", "red"}:
+        return "major" if category != "calendar" else "high"
+    if "medium" in impact or impact in {"2", "2-star", "orange"}:
+        return "high" if category != "calendar" else "medium"
+    if "low" in impact or impact in {"1", "1-star", "yellow"}:
+        return "low"
     if category != "calendar":
         return "major"
-    if "high" in impact or impact in {"3", "3-star", "red"}:
-        return "high"
-    if "medium" in impact or impact in {"2", "2-star", "orange"}:
-        return "medium"
     return "low"
 
 

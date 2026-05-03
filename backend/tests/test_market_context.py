@@ -38,6 +38,21 @@ def test_calendar_context_marks_us_cpi_relevant_for_gold():
     assert summary["events"][0]["category"] == "inflation"
 
 
+def test_low_impact_global_macro_events_do_not_overstate_cockpit_risk():
+    summary = summarize_economic_calendar(
+        [
+            {"date": "2026-05-12 13:30:00", "country": "BH", "currency": "BHD", "event": "CPI MoM", "impact": "Low"},
+            {"date": "2026-05-13 19:00:00", "country": "US", "currency": "USD", "event": "FOMC Interest Rate Decision", "impact": "High"},
+        ],
+        "2026-05-01",
+        "2026-05-31",
+    )
+
+    assert summary["major_event_count"] == 1
+    assert summary["high_impact_count"] == 1
+    assert summary["blackout_dates"] == ["2026-05-13"]
+
+
 def test_market_context_summary_returns_unavailable_without_fmp_key(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "settings", SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher()))
 
