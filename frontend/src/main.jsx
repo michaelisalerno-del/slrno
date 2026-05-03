@@ -166,6 +166,7 @@ function App() {
     excluded_months: [],
     repair_mode: "standard",
     account_size: String(WORKING_ACCOUNT_SIZE),
+    source_template: {},
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready.", progress: 0 });
   const activePollRunIdRef = React.useRef(null);
@@ -385,6 +386,7 @@ function App() {
         excluded_months: uniqueMonths(runConfig.excluded_months),
         repair_mode: runConfig.repair_mode || "standard",
         account_size: testingCapital,
+        source_template: runConfig.source_template && Object.keys(runConfig.source_template).length ? runConfig.source_template : {},
         product_mode: "spread_bet",
       });
       setActiveTab("results");
@@ -492,6 +494,7 @@ function App() {
       strategy_families: template.family ? [template.family] : [],
       cost_stress_multiplier: current.cost_stress_multiplier || 2.0,
       target_regime: template.target_regime,
+      source_template: frozenTemplatePayload(template),
     }));
     setActiveTab("builder");
     setMessage(`Refining ${source.strategy_name} on ${marketId || "selected market"}.`);
@@ -557,7 +560,7 @@ function App() {
 
   function clearRefinementTemplate() {
     setRefinementTemplate(null);
-    setResearchRun((current) => ({ ...current, strategy_families: [], excluded_months: [], target_regime: "" }));
+    setResearchRun((current) => ({ ...current, strategy_families: [], excluded_months: [], target_regime: "", source_template: {} }));
   }
 
   function applyRobustnessPreset(preset) {
@@ -594,6 +597,20 @@ function App() {
         targetRegime: templateTargetRegime,
         repairMode: "evidence_first",
         label: "Evidence-first retest staged with a smaller locked search and stricter fold ranking.",
+      },
+      frozen_validation: {
+        marketIds: selectedMarket,
+        budget: "1",
+        stress: 2.5,
+        start: longEvidenceStartForTemplate(refinementTemplate),
+        end: researchRun.end,
+        interval: refinementTemplate.interval,
+        targetRegime: templateTargetRegime,
+        repairMode: "frozen_validation",
+        sourceTemplate: frozenTemplatePayload(refinementTemplate),
+        label: templateTargetRegime
+          ? `Frozen validation staged: exact rules retest inside ${regimeLabel(templateTargetRegime)} with no parameter hunting.`
+          : "Frozen validation staged: exact rules retest with no parameter hunting.",
       },
       capital_fit: {
         marketIds: selectedMarket,
@@ -713,6 +730,7 @@ function App() {
       excluded_months: presetConfig.excludedMonths ?? [],
       repair_mode: presetConfig.repairMode ?? "standard",
       account_size: presetConfig.accountSize ?? current.account_size,
+      source_template: presetConfig.sourceTemplate ?? frozenTemplatePayload(refinementTemplate),
     }));
     setMessage(presetConfig.label);
   }
@@ -1001,6 +1019,7 @@ function App() {
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("cross_market")}>Find similar elsewhere</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("longer_history")}>Longer history</button>
                       <button type="button" className="ghost" onClick={() => applyRobustnessPreset("regime_scan")}>Regime repair</button>
+                      <button type="button" className="ghost" onClick={() => applyRobustnessPreset("frozen_validation")}>Freeze validate</button>
                     </div>
                   </section>
                 )}
@@ -1294,8 +1313,9 @@ function GuideView({ setActiveModule }) {
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
     ["5", "Make it tradeable", "Use Best by market first, then click Make tradeable. The app chooses the next repair from the blockers, locks the market/family/regime, syncs IG costs when needed, and launches the repair run."],
-    ["6", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
-    ["7", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, and regime gates are clear."],
+    ["6", "Freeze before paper", "Once repairs look clean, use Freeze validate. This retests the exact template rules with no parameter hunting, so the OOS period does not quietly become training data."],
+    ["7", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
+    ["8", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, frozen validation, and regime gates are clear."],
   ];
   const modules = [
     ["Cockpit", "The home view for system status, provider health, current mode, and next actions."],
@@ -1335,6 +1355,7 @@ function GuideView({ setActiveModule }) {
     ["Capital fit blocked", "Use Capital fit. It reruns the same market and family with conservative sizing, smaller stops, and ranking weighted toward the selected account size."],
     ["Multiple-testing haircut", "Use Evidence first for this template. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
     ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
+    ["Template ready for library", "Use Freeze validate before paper/demo. It keeps the exact parameters, target regime, market, and timeframe unchanged."],
   ];
   const gates = [
     "Fresh Sharpe days and no stale-data warnings.",
@@ -1343,6 +1364,7 @@ function GuideView({ setActiveModule }) {
     "Enough trades and enough walk-forward evidence.",
     "No one fold, month, or rare regime carries the whole result.",
     "Regime-gated retest remains positive.",
+    "Frozen validation passes after parameter changes have stopped.",
     "Selected testing capital scenario is feasible under margin, stop, and drawdown checks.",
     "Live trading remains locked; good candidates go to paper/demo review first.",
   ];
@@ -2832,6 +2854,49 @@ function uniqueMonths(months = []) {
   return [...new Set(arrayValue(months).map((month) => String(month).trim()).filter((month) => /^\d{4}-\d{2}$/.test(month)))];
 }
 
+function frozenTemplatePayload(template = {}) {
+  const parameters = template.parameters ?? {};
+  const allowedKeys = [
+    "confidence_quantile",
+    "direction",
+    "false_breakout_filter",
+    "lookback",
+    "max_hold_bars",
+    "min_hold_bars",
+    "min_trade_spacing",
+    "month_end_window",
+    "month_start_window",
+    "position_size",
+    "previous_day_filter",
+    "regime_filter",
+    "stop_loss_bps",
+    "take_profit_bps",
+    "threshold_bps",
+    "volatility_multiplier",
+    "weekday",
+    "z_threshold",
+  ];
+  const frozenParameters = {};
+  for (const key of allowedKeys) {
+    if (parameters[key] !== undefined && parameters[key] !== null && parameters[key] !== "") {
+      frozenParameters[key] = parameters[key];
+    }
+  }
+  if (Object.keys(frozenParameters).length === 0) {
+    return {};
+  }
+  return {
+    name: template.name,
+    source_id: template.id,
+    market_id: template.market_id,
+    family: template.family,
+    style: template.style,
+    interval: template.interval,
+    target_regime: templateSpecificRegime(template),
+    parameters: frozenParameters,
+  };
+}
+
 function templateSpecificRegime(template) {
   return String(template?.target_regime || template?.parameters?.target_regime || template?.pattern?.target_regime || "").trim();
 }
@@ -3030,6 +3095,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
   const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
   const capitalBlocked = hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high");
+  const sourceTemplate = frozenTemplatePayload(template);
 
   let marketIds = selectedMarket;
   let budget = 54;
@@ -3114,6 +3180,24 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     addStep("Stress costs before trusting the net edge");
     addTarget("Survive higher costs");
   }
+  if (
+    !tooFewTrades &&
+    !capitalBlocked &&
+    !syncCosts &&
+    !costStress &&
+    !fragileFolds &&
+    !monthDependent &&
+    !scanBias &&
+    Object.keys(sourceTemplate.parameters ?? {}).length > 0
+  ) {
+    budget = 1;
+    stress = Math.max(stress, 2.5);
+    start = earlierDate(start, longEvidenceStartForTemplate(template));
+    repairMode = "frozen_validation";
+    addStep("Freeze exact template parameters");
+    addStep("Retest without parameter hunting");
+    addTarget("Pass frozen validation");
+  }
   if (steps.length === 0) {
     addStep("Focused locked-family confirmation");
     addTarget("Confirm the template without changing the market");
@@ -3137,8 +3221,11 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     excluded_months: uniqueMonths(excludedMonths),
     repair_mode: repairMode,
     account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
+    source_template: sourceTemplate,
   };
-  const summary = runTargetRegime
+  const summary = repairMode === "frozen_validation"
+    ? "Frozen validation retests the exact template with no parameter search."
+    : runTargetRegime
     ? `Regime-specific refine: results are scored inside ${regimeLabel(runTargetRegime)} with full-history gated evidence kept alongside.`
     : tooFewTrades && includeRegimeScans
     ? "Tests both the broader trade-count repair and the winning-regime specialist path."
@@ -3202,6 +3289,7 @@ function repairModeLabel(value) {
     month_exclusion: "Month exclusion",
     longer_history: "Longer history",
     auto_refine: "Auto-refine",
+    frozen_validation: "Frozen validation",
   }[value] ?? value ?? "Standard search";
 }
 
