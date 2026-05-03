@@ -2372,7 +2372,7 @@ function CandidateFactoryView({
         <h3>Factory Status</h3>
         <div className="metrics four">
           <Metric label="Selected markets" value={selectedMarkets.length || 0} />
-          <Metric label="Research leads" value={summary.researchLeads} />
+          <Metric label="Viable leads" value={summary.researchLeads} />
           <Metric label="Paper-ready" value={summary.paperReady} />
           <Metric label="Market/regime cells" value={summary.coveredCells} />
         </div>
@@ -3498,6 +3498,9 @@ function factoryLeads(candidates = [], runDetail = null, activeMarketIds = []) {
     if (!lead || (selected.size > 0 && lead.marketId && !selected.has(lead.marketId))) {
       continue;
     }
+    if (!factoryViableLead(lead)) {
+      continue;
+    }
     if (seen.has(lead.dedupeKey)) {
       continue;
     }
@@ -3540,6 +3543,13 @@ function factoryLeadFromSource(source = {}) {
     costToGross: Number(backtest.cost_to_gross_ratio ?? 0),
     warnings,
   };
+}
+
+function factoryViableLead(lead = {}) {
+  if (["paper_candidate", "validated_candidate", "research_candidate", "incubator", "watchlist"].includes(lead.tier)) {
+    return lead.trades > 0 || lead.net > 0 || lead.oos > 0;
+  }
+  return lead.score >= 25 && lead.net > 0 && lead.trades >= 5 && (lead.oos > 0 || lead.oosTrades >= 6);
 }
 
 function factoryLeadRank(lead = {}) {
