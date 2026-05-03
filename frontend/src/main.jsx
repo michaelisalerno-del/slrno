@@ -9,10 +9,12 @@ import {
   Download,
   Home,
   KeyRound,
+  Library,
   LineChart,
   LockKeyhole,
   Plug,
   RefreshCw,
+  Save,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -37,6 +39,7 @@ import {
   getRiskSummary,
   getSettingsSummary,
   getStatus,
+  getTemplatesSummary,
   installMarketPlugin,
   previewBrokerOrder,
   pruneMarketDataCache,
@@ -45,7 +48,9 @@ import {
   saveIg,
   saveMarket,
   saveResearchSchedule,
+  saveStrategyTemplate,
   syncIgCosts,
+  updateStrategyTemplateStatus,
 } from "./api";
 import "./styles.css";
 
@@ -100,6 +105,7 @@ const MODULES = [
   ["cockpit", "Cockpit", Home],
   ["guide", "Guide", BookOpen],
   ["backtests", "Backtests", BarChart3],
+  ["templates", "Templates", Library],
   ["research", "Research", Sparkles],
   ["paper", "Paper Trading", LineChart],
   ["broker", "Broker", Wallet],
@@ -115,6 +121,7 @@ function App() {
   const [spreadBetEngines, setSpreadBetEngines] = React.useState([]);
   const [engines, setEngines] = React.useState(FALLBACK_ENGINES);
   const [researchRuns, setResearchRuns] = React.useState([]);
+  const [templates, setTemplates] = React.useState(null);
   const [candidates, setCandidates] = React.useState([]);
   const [critique, setCritique] = React.useState(null);
   const [runDetail, setRunDetail] = React.useState(null);
@@ -210,6 +217,8 @@ function App() {
         setSpreadBetEngines(summary.spread_bet_engines ?? []);
         setResearchRuns(summary.runs ?? []);
         resumeLatestActiveRun(summary.runs ?? []);
+      } else if (moduleId === "templates") {
+        setTemplates(await getTemplatesSummary());
       } else if (moduleId === "paper") {
         setPaper(await getPaperSummary());
       } else if (moduleId === "broker") {
@@ -529,6 +538,64 @@ function App() {
     } catch (error) {
       setMessage(`Make tradeable staged, but IG validation still needs attention: ${error.message}`);
     }
+  }
+
+  async function saveTemplateFromSource(source) {
+    const template = refinementTemplateFromSource(source, researchRun);
+    const ids = templateSourceIds(source);
+    const readiness = source.audit?.promotion_readiness ?? source.promotion_readiness ?? {};
+    const payload = {
+      name: template.name,
+      market_id: template.market_id,
+      interval: template.interval,
+      strategy_family: template.family,
+      style: template.style,
+      target_regime: templateSpecificRegime(template),
+      status: "active",
+      source_run_id: source.run_id ?? null,
+      source_trial_id: ids.trialId,
+      source_candidate_id: ids.candidateId,
+      source_kind: ids.kind,
+      promotion_tier: source.promotion_tier ?? source.audit?.promotion_tier ?? "research_candidate",
+      readiness_status: readiness.status ?? source.promotion_readiness?.status ?? "blocked",
+      robustness_score: Number(source.robustness_score ?? 0),
+      testing_account_size: testingAccountSizeForSource(source),
+      payload: {
+        source_template: frozenTemplatePayload(template),
+        parameters: template.parameters,
+        backtest: template.backtest,
+        pattern: template.pattern,
+        evidence: template.evidence,
+        readiness,
+        warnings: template.warnings,
+        search_audit: template.parameters?.search_audit ?? {},
+        capital_scenarios: source.capital_scenarios ?? [],
+        source_kind: ids.kind,
+      },
+    };
+    const saved = await saveStrategyTemplate(payload);
+    setMessage(`Saved ${saved.name} to Template Library.`);
+    if (activeModule === "templates") {
+      await loadModule("templates");
+    }
+  }
+
+  function useSavedTemplate(template) {
+    const source = savedTemplateAsSource(template);
+    refineTemplate(source);
+    setActiveModule("backtests");
+    setActiveTab("builder");
+    setMessage(`Loaded ${template.name} into the Backtests builder.`);
+  }
+
+  async function makeSavedTemplateTradeable(template) {
+    await makeTradeable(savedTemplateAsSource(template));
+  }
+
+  async function archiveSavedTemplate(template) {
+    await updateStrategyTemplateStatus(template.id, "archived");
+    setMessage(`Archived template ${template.name}.`);
+    await loadModule("templates");
   }
 
   function refinementTemplateFromSource(source, currentRun = researchRun) {
@@ -864,6 +931,15 @@ function App() {
 
       {activeModule === "cockpit" && <CockpitView summary={cockpit} setActiveModule={setActiveModule} />}
       {activeModule === "guide" && <GuideView setActiveModule={setActiveModule} />}
+      {activeModule === "templates" && (
+        <TemplateLibraryView
+          summary={templates}
+          onUseTemplate={useSavedTemplate}
+          onMakeTradeable={makeSavedTemplateTradeable}
+          onArchive={archiveSavedTemplate}
+          onRefresh={() => loadModule("templates")}
+        />
+      )}
 
       {activeModule === "research" && (
         <section className="lab-shell">
@@ -874,7 +950,7 @@ function App() {
             </div>
             <button type="button" className="secondary" onClick={() => loadModule("research")}><RefreshCw size={16} /> Refresh</button>
           </div>
-          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} onMakeTradeable={makeTradeable} />
+          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} onMakeTradeable={makeTradeable} onSaveTemplate={saveTemplateFromSource} />
         </section>
       )}
 
@@ -1169,6 +1245,7 @@ function App() {
                 onRefineTemplate={refineTemplate}
                 onRefineFurther={refineFurther}
                 onMakeTradeable={makeTradeable}
+                onSaveTemplate={saveTemplateFromSource}
                 exportIncludeBars={exportIncludeBars}
               />
             )}
@@ -1313,13 +1390,14 @@ function GuideView({ setActiveModule }) {
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
     ["5", "Make it tradeable", "Use Best by market first, then click Make tradeable. The app chooses the next repair from the blockers, locks the market/family/regime, syncs IG costs when needed, and launches the repair run."],
-    ["6", "Freeze before paper", "Once repairs look clean, use Freeze validate. This retests the exact template rules with no parameter hunting, so the OOS period does not quietly become training data."],
+    ["6", "Save and freeze", "Save promising repaired results to Templates, then use Freeze validate. This retests the exact rules with no parameter hunting, so the OOS period does not quietly become training data."],
     ["7", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
     ["8", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, frozen validation, and regime gates are clear."],
   ];
   const modules = [
     ["Cockpit", "The home view for system status, provider health, current mode, and next actions."],
     ["Backtests", "Run builder, run history, trial cards, regime evidence, Make tradeable repair workflow, archives, and exports."],
+    ["Templates", "Saved strategy templates with frozen rules, market/timeframe/regime identity, readiness, and reuse actions."],
     ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
     ["Broker", "Order previews only. Live order placement remains disabled."],
     ["Risk", "Capital scenarios, selected testing capital, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
@@ -1488,6 +1566,140 @@ function GuideView({ setActiveModule }) {
         </p>
       </section>
     </section>
+  );
+}
+
+function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onArchive, onRefresh }) {
+  const templates = summary?.templates ?? [];
+  const counts = summary?.counts ?? {};
+  const [marketFilter, setMarketFilter] = React.useState("all");
+  const [statusFilter, setStatusFilter] = React.useState("active");
+  const markets = [...new Set(templates.map((template) => template.market_id).filter(Boolean))].sort();
+  const visibleTemplates = templates.filter((template) => {
+    if (marketFilter !== "all" && template.market_id !== marketFilter) {
+      return false;
+    }
+    if (statusFilter === "active") {
+      return template.status === "active";
+    }
+    if (statusFilter === "paper") {
+      return template.readiness_status === "ready_for_paper" || ["paper_candidate", "validated_candidate"].includes(template.promotion_tier);
+    }
+    if (statusFilter === "blocked") {
+      return template.readiness_status === "blocked";
+    }
+    return true;
+  });
+  return (
+    <section className="lab-shell">
+      <div className="lab-header">
+        <div>
+          <h2><Library size={20} /> Template Library</h2>
+          <p>Saved strategy templates, frozen rules, regime identity, and promotion evidence.</p>
+        </div>
+        <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh</button>
+      </div>
+      <div className="metrics four">
+        <Metric label="Active" value={counts.active ?? 0} />
+        <Metric label="Frozen rules" value={counts.frozen ?? 0} />
+        <Metric label="Paper-ready" value={counts.paper_ready ?? 0} />
+        <Metric label="Markets" value={counts.markets ?? 0} />
+      </div>
+      <div className="tabs template-filters">
+        <div className="segmented compact-filter">
+          {[
+            ["active", "Active"],
+            ["blocked", "Blocked"],
+            ["paper", "Paper-ready"],
+            ["all", "All"],
+          ].map(([id, label]) => (
+            <button className={statusFilter === id ? "segment active" : "segment"} key={id} type="button" onClick={() => setStatusFilter(id)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {markets.length > 0 && (
+          <div className="segmented compact-filter">
+            <button className={marketFilter === "all" ? "segment active" : "segment"} type="button" onClick={() => setMarketFilter("all")}>All markets</button>
+            {markets.slice(0, 8).map((marketId) => (
+              <button className={marketFilter === marketId ? "segment active" : "segment"} key={marketId} type="button" onClick={() => setMarketFilter(marketId)}>
+                {marketId}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="warning-legend">
+        <span className="warning-chip blocker">Paper blocker</span>
+        <span className="warning-chip repair">Needs repair</span>
+        <span className="warning-chip specialist">Specialist identity</span>
+        <span className="warning-chip info">Diagnostic</span>
+      </div>
+      <div className="template-grid">
+        {visibleTemplates.map((template) => (
+          <TemplateCard
+            key={template.id}
+            template={template}
+            onUseTemplate={onUseTemplate}
+            onMakeTradeable={onMakeTradeable}
+            onArchive={onArchive}
+          />
+        ))}
+        {templates.length === 0 && <span className="muted">No templates saved yet.</span>}
+        {templates.length > 0 && visibleTemplates.length === 0 && <span className="muted">No templates match this filter.</span>}
+      </div>
+    </section>
+  );
+}
+
+function TemplateCard({ template, onUseTemplate, onMakeTradeable, onArchive }) {
+  const payload = template.payload ?? {};
+  const backtest = template.backtest ?? payload.backtest ?? {};
+  const pattern = template.pattern ?? payload.pattern ?? {};
+  const evidence = payload.evidence ?? {};
+  const searchAudit = payload.search_audit ?? {};
+  const accountSize = template.testing_account_size || WORKING_ACCOUNT_SIZE;
+  const frozenParameterCount = Object.keys(template.source_template?.parameters ?? payload.source_template?.parameters ?? {}).length;
+  const capital = accountFeasibility(template.capital_scenarios ?? payload.capital_scenarios, accountSize);
+  return (
+    <article className="template-card">
+      <div className="template-card-header">
+        <div>
+          <div className="label-row">
+            <strong>{template.name}</strong>
+            <div className="badge-group">
+              <span className="badge market-badge">{template.market_id}</span>
+              <span className={`badge ${tierBadgeClass(template.promotion_tier)}`}>{tierLabel(template.promotion_tier)}</span>
+            </div>
+          </div>
+          <span>{[normalizeInterval(template.interval), strategyFamilyLabel(template.strategy_family), template.target_regime ? `${regimeLabel(template.target_regime)} only` : "", `score ${round(template.robustness_score)}`].filter(Boolean).join(" · ")}</span>
+        </div>
+        <div className="template-status">
+          <small>{template.status}</small>
+          <strong>{readinessLabel(template.readiness_status)}</strong>
+        </div>
+      </div>
+      <div className="mini-metrics template-metrics">
+        <Metric label="Frozen params" value={frozenParameterCount} />
+        <Metric label="Paper score" value={round(searchAudit.paper_readiness_score)} />
+        <Metric label={`${accountSizeLabel(accountSize)} fit`} value={capital} />
+        <Metric label="Net" value={formatMoney(backtest.net_profit)} />
+        <Metric label="OOS net" value={formatMoney(evidence.oos_net_profit ?? backtest.test_profit)} />
+        <Metric label="OOS trades" value={evidence.oos_trade_count ?? 0} />
+        <Metric label="Drawdown" value={formatMoney(backtest.max_drawdown)} />
+        <Metric label="Trades" value={backtest.trade_count ?? 0} />
+        <Metric label="Regime verdict" value={regimeVerdictLabel(pattern.regime_verdict)} />
+        <Metric label="Best regime" value={regimeLabel(pattern.dominant_profit_regime?.key || template.target_regime)} />
+      </div>
+      <div className="warning-row">
+        <WarningChips warnings={template.warnings ?? payload.warnings} limit={8} empty="Gate clear" />
+      </div>
+      <div className="button-row">
+        <button type="button" className="secondary" onClick={() => onMakeTradeable(template)}><ShieldCheck size={16} /> Make tradeable</button>
+        <button type="button" className="ghost" onClick={() => onUseTemplate(template)}><RefreshCw size={16} /> Use</button>
+        <button type="button" className="ghost" onClick={() => onArchive(template)}><Archive size={16} /> Archive</button>
+      </div>
+    </article>
   );
 }
 
@@ -1691,7 +1903,7 @@ function moduleLabel(id) {
   return MODULES.find((item) => item[0] === id)?.[1] ?? id;
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, onMakeTradeable, exportIncludeBars }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate, exportIncludeBars }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
@@ -1943,7 +2155,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
           <span className="warning-chip info">Diagnostic</span>
         </div>
         <div className="trial-list">
-          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} />)}
+          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onSaveTemplate={onSaveTemplate} />)}
         </div>
         {filteredTrials.length === 0 && trials.length > 0 && (
           <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
@@ -2035,7 +2247,7 @@ function TemplateUtilizationMetrics({ backtest, pattern }) {
   );
 }
 
-function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable }) {
+function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate }) {
   const backtest = trial.backtest ?? {};
   const accountSize = testingAccountSizeForSource(trial);
   const accountLabel = accountSizeLabel(accountSize);
@@ -2069,6 +2281,9 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable }
           </button>
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
             <RefreshCw size={16} /> Refine
+          </button>
+          <button type="button" className="ghost" onClick={() => onSaveTemplate(trial)}>
+            <Save size={16} /> Save
           </button>
         </div>
         <div className="trial-net">
@@ -2139,7 +2354,7 @@ function ParetoCard({ item, onRefineTemplate }) {
   );
 }
 
-function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther, onMakeTradeable }) {
+function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate }) {
   const visibleCandidates = candidates.slice(0, 24);
   const queue = candidateQueueSummary(candidates);
   return (
@@ -2174,7 +2389,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
       <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} />)}
+          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onSaveTemplate={onSaveTemplate} />)}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
           {candidates.length > visibleCandidates.length && (
             <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
@@ -2206,7 +2421,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
   );
 }
 
-function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTradeable }) {
+function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssueCodes(readiness);
   const accountSize = testingAccountSizeForSource(candidate);
@@ -2246,6 +2461,9 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
         </button>
         <button type="button" className="ghost" onClick={() => onRefineTemplate(candidate)}>
           <RefreshCw size={16} /> Refine
+        </button>
+        <button type="button" className="ghost" onClick={() => onSaveTemplate(candidate)}>
+          <Save size={16} /> Save
         </button>
       </div>
       <div className="mini-metrics">
@@ -2899,6 +3117,54 @@ function frozenTemplatePayload(template = {}) {
 
 function templateSpecificRegime(template) {
   return String(template?.target_regime || template?.parameters?.target_regime || template?.pattern?.target_regime || "").trim();
+}
+
+function templateSourceIds(source = {}) {
+  const numericId = Number(source.id);
+  const candidateId = source.audit && numericId > 0 ? numericId : null;
+  const trialId = source.trial_id
+    ?? source.audit?.derived_from_trial_id
+    ?? (source.audit && numericId < 0 ? Math.abs(numericId) : null)
+    ?? (source.parameters && numericId > 0 ? numericId : null);
+  const kind = candidateId ? "candidate" : trialId ? "trial" : "source";
+  return { candidateId, trialId, kind };
+}
+
+function savedTemplateAsSource(template = {}) {
+  const payload = template.payload ?? {};
+  const sourceTemplate = template.source_template ?? payload.source_template ?? {};
+  const sourceParameters = sourceTemplate.parameters ?? {};
+  const parameters = {
+    ...(payload.parameters ?? {}),
+    ...sourceParameters,
+    market_id: template.market_id,
+    family: template.strategy_family,
+    style: template.style,
+    timeframe: template.interval,
+    target_regime: template.target_regime,
+    bar_pattern_analysis: payload.pattern ?? payload.parameters?.bar_pattern_analysis ?? {},
+    search_audit: payload.search_audit ?? payload.parameters?.search_audit ?? {},
+    testing_account_size: template.testing_account_size,
+  };
+  return {
+    id: template.source_candidate_id ?? (template.source_trial_id ? -Math.abs(Number(template.source_trial_id)) : template.id),
+    strategy_name: template.name,
+    market_id: template.market_id,
+    strategy_family: template.strategy_family,
+    style: template.style,
+    robustness_score: template.robustness_score,
+    promotion_tier: template.promotion_tier,
+    warnings: template.warnings ?? payload.warnings ?? [],
+    capital_scenarios: template.capital_scenarios ?? payload.capital_scenarios ?? [],
+    audit: {
+      candidate: { parameters },
+      backtest: template.backtest ?? payload.backtest ?? {},
+      warnings: template.warnings ?? payload.warnings ?? [],
+      promotion_readiness: template.readiness ?? payload.readiness ?? {},
+      promotion_tier: template.promotion_tier,
+      derived_from_trial_id: template.source_trial_id,
+    },
+  };
 }
 
 function regimeRefineTarget(template) {

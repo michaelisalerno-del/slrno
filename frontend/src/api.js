@@ -36,6 +36,24 @@ export function getBacktestsSummary(includeArchived = false) {
   return request(`/backtests/summary?include_archived=${includeArchived}`);
 }
 
+export function getTemplatesSummary(includeInactive = false) {
+  return request(`/templates/summary?include_inactive=${includeInactive}`);
+}
+
+export function saveStrategyTemplate(payload) {
+  return request("/templates", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateStrategyTemplateStatus(templateId, status) {
+  return request(`/templates/${templateId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
 export function getPaperSummary() {
   return request("/paper/summary");
 }

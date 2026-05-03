@@ -125,6 +125,29 @@ class ResearchSchedulePayload(BaseModel):
     interval: str = "5min"
 
 
+class StrategyTemplatePayload(BaseModel):
+    name: str
+    market_id: str
+    interval: str = "5min"
+    strategy_family: str = ""
+    style: str = "find_anything_robust"
+    target_regime: str = ""
+    status: str = "active"
+    source_run_id: int | None = None
+    source_trial_id: int | None = None
+    source_candidate_id: int | None = None
+    source_kind: str = ""
+    promotion_tier: str = "research_candidate"
+    readiness_status: str = "blocked"
+    robustness_score: float = 0
+    testing_account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class StrategyTemplateStatusPayload(BaseModel):
+    status: str
+
+
 class IGCostSyncPayload(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
 
@@ -181,6 +204,46 @@ def backtests_summary(include_archived: bool = False) -> dict[str, object]:
         "engines": available_research_engines(),
         "spread_bet_engines": list_spread_bet_engines(),
     }
+
+
+@app.get("/templates/summary")
+def templates_summary(include_inactive: bool = False, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, object]:
+    templates = research_store.list_templates(include_inactive=include_inactive, limit=limit)
+    active = [item for item in templates if item["status"] == "active"]
+    frozen = [item for item in templates if (item.get("source_template") or {}).get("parameters")]
+    paper_ready = [
+        item
+        for item in templates
+        if item.get("readiness_status") == "ready_for_paper" or item.get("promotion_tier") in {"paper_candidate", "validated_candidate"}
+    ]
+    blocked = [item for item in templates if item.get("readiness_status") == "blocked"]
+    return {
+        "templates": templates,
+        "counts": {
+            "visible": len(templates),
+            "active": len(active),
+            "frozen": len(frozen),
+            "paper_ready": len(paper_ready),
+            "blocked": len(blocked),
+            "markets": len({str(item.get("market_id") or "") for item in templates if item.get("market_id")}),
+            "target_regimes": len({str(item.get("target_regime") or "") for item in templates if item.get("target_regime")}),
+        },
+    }
+
+
+@app.post("/templates")
+def save_strategy_template(payload: StrategyTemplatePayload) -> dict[str, object]:
+    return research_store.save_template(payload.model_dump())
+
+
+@app.patch("/templates/{template_id}/status")
+def update_strategy_template_status(template_id: int, payload: StrategyTemplateStatusPayload) -> dict[str, object]:
+    if payload.status not in {"active", "paused", "archived"}:
+        raise HTTPException(status_code=400, detail="Template status must be active, paused, or archived")
+    template = research_store.update_template_status(template_id, payload.status)
+    if template is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return template
 
 
 @app.get("/paper/summary")
