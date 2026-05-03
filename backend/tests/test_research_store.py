@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from app.backtesting import BacktestResult
 from app.research_lab import CandidateEvaluation
 from app.research_metrics import ClassificationMetrics
@@ -52,6 +54,23 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     error_run = store.get_run(run_id)
     assert error_run is not None
     assert error_run["error"] == "fixture failure"
+
+
+def test_research_store_surfaces_weak_research_leads_as_incubator(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("NAS100", {"interval": "1h"}, status="running")
+    evaluation = _evaluation("thin_oos", passed=False, promotion_tier="research_candidate")
+    evaluation = replace(
+        evaluation,
+        candidate=replace(evaluation.candidate, parameters={**evaluation.candidate.parameters, "stress_net_profit": 25}),
+        warnings=("low_oos_trades", "weak_oos_evidence"),
+    )
+
+    store.save_trial(run_id, evaluation)
+
+    [trial] = store.list_trials(run_id)
+    assert trial["promotion_tier"] == "incubator"
+    assert "low_oos_trades" in trial["promotion_readiness"]["blockers"]
 
 
 def test_research_store_deletes_run_trials_and_candidates(tmp_path):

@@ -15,6 +15,20 @@ from .providers.base import OHLCBar
 from .research_lab import CandidateEvaluation
 
 
+INCUBATOR_RESEARCH_BLOCKERS = {
+    "best_trades_dominate",
+    "insufficient_regime_sample",
+    "low_oos_trades",
+    "one_fold_dependency",
+    "profit_concentrated_single_month",
+    "profit_concentrated_single_regime",
+    "profits_not_consistent_across_folds",
+    "target_regime_low_oos_trades",
+    "too_few_trades",
+    "weak_oos_evidence",
+}
+
+
 def research_db_path() -> Path:
     return app_home() / "research.sqlite3"
 
@@ -859,7 +873,7 @@ def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
     backtest = _normalized_backtest_payload(asdict(evaluation.backtest), evaluation.candidate.parameters)
     warnings = _readiness_augmented_warnings(backtest, evaluation.warnings, parameters)
     readiness = promotion_readiness(backtest, warnings, parameters)
-    promotion_tier = gate_promotion_tier(_raw_evaluation_tier(evaluation), readiness)
+    promotion_tier = _display_promotion_tier(_raw_evaluation_tier(evaluation), readiness, backtest, parameters)
     return {
         "candidate": _compact_candidate(asdict(evaluation.candidate)),
         "metrics": asdict(evaluation.metrics),
@@ -872,6 +886,32 @@ def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
     }
 
 
+def _display_promotion_tier(
+    tier: str,
+    readiness: dict[str, object],
+    backtest: dict[str, object],
+    parameters: dict[str, object],
+) -> str:
+    gated = gate_promotion_tier(tier, readiness)
+    if gated != "research_candidate" or readiness.get("status") == "ready_for_paper":
+        return gated
+    blockers = set(readiness.get("blockers") or []) | set(readiness.get("validation_warnings") or [])
+    if not blockers.intersection(INCUBATOR_RESEARCH_BLOCKERS):
+        return gated
+    stress_raw = parameters.get("stress_net_profit")
+    stress_ok = stress_raw is None or _safe_float(stress_raw) > 0
+    cost_ok = _safe_float(backtest.get("cost_to_gross_ratio")) <= 0.85 and _safe_float(backtest.get("net_cost_ratio")) >= 0.2
+    if (
+        _safe_float(backtest.get("net_profit")) > 0
+        and _safe_float(backtest.get("test_profit")) > 0
+        and int(_safe_float(backtest.get("trade_count"))) >= 10
+        and stress_ok
+        and cost_ok
+    ):
+        return "incubator"
+    return gated
+
+
 def _raw_evaluation_tier(evaluation: CandidateEvaluation) -> str:
     if evaluation.promotion_tier != "reject" or not evaluation.passed:
         return evaluation.promotion_tier
@@ -882,7 +922,8 @@ def _evaluation_tier(evaluation: CandidateEvaluation) -> str:
     parameters = evaluation.candidate.parameters
     backtest = _normalized_backtest_payload(asdict(evaluation.backtest), parameters)
     warnings = _readiness_augmented_warnings(backtest, evaluation.warnings, parameters)
-    return gate_promotion_tier(_raw_evaluation_tier(evaluation), promotion_readiness(backtest, warnings, parameters))
+    readiness = promotion_readiness(backtest, warnings, parameters)
+    return _display_promotion_tier(_raw_evaluation_tier(evaluation), readiness, backtest, parameters)
 
 
 def _is_material_watchlist_lead(evaluation: CandidateEvaluation) -> bool:
@@ -1010,7 +1051,7 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
         "folds": json.loads(row[11]),
         "costs": costs,
         "tags": json.loads(row[13]),
-        "promotion_tier": gate_promotion_tier(str(row[14]), readiness),
+        "promotion_tier": _display_promotion_tier(str(row[14]), readiness, backtest, parameters),
         "promotion_readiness": readiness,
     }
 
@@ -1195,7 +1236,7 @@ def _compact_audit(audit: dict[str, object]) -> dict[str, object]:
         readiness = promotion_readiness(backtest, warnings, parameters)
         audit["warnings"] = warnings
         audit["promotion_readiness"] = readiness
-        audit["promotion_tier"] = gate_promotion_tier(str(audit.get("promotion_tier") or "reject"), readiness)
+        audit["promotion_tier"] = _display_promotion_tier(str(audit.get("promotion_tier") or "reject"), readiness, backtest, parameters)
     return audit
 
 
