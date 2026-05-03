@@ -641,9 +641,16 @@ button.ghost {
   gap: 12px;
 }
 
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .cost-card,
 .pareto-card,
 .candidate-card,
+.template-card,
 .trial-card,
 .status,
 .plugin,
@@ -679,6 +686,44 @@ button.ghost {
 
 .trial-card {
   gap: 10px;
+}
+
+.template-card {
+  align-content: start;
+}
+
+.template-card-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.template-card-header > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.template-card-header span,
+.template-status small {
+  color: #6b7480;
+  font-size: 13px;
+}
+
+.template-status {
+  display: grid;
+  gap: 3px;
+  min-width: 96px;
+  text-align: right;
+}
+
+.template-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.template-filters {
+  align-items: center;
 }
 
 .trial-summary,
@@ -1035,6 +1080,7 @@ th {
   .cost-grid,
   .pareto-grid,
   .candidate-grid,
+  .template-grid,
   .metrics.four {
     grid-template-columns: 1fr;
     display: grid;
@@ -1048,8 +1094,13 @@ th {
 
   .row,
   .compact,
+  .template-card-header,
   .refinement-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .template-status {
+    text-align: left;
   }
 
   .run-state {

@@ -121,6 +121,46 @@ class ResearchStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_templates (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  market_id TEXT NOT NULL,
+                  interval TEXT NOT NULL,
+                  strategy_family TEXT NOT NULL,
+                  style TEXT NOT NULL,
+                  target_regime TEXT NOT NULL DEFAULT '',
+                  source_run_id INTEGER,
+                  source_trial_id INTEGER,
+                  source_candidate_id INTEGER,
+                  source_kind TEXT NOT NULL DEFAULT '',
+                  promotion_tier TEXT NOT NULL DEFAULT 'research_candidate',
+                  readiness_status TEXT NOT NULL DEFAULT 'blocked',
+                  robustness_score REAL NOT NULL DEFAULT 0,
+                  testing_account_size REAL NOT NULL DEFAULT 0,
+                  source_fingerprint TEXT NOT NULL DEFAULT '',
+                  payload_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            self._add_column(conn, "strategy_templates", "target_regime", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "strategy_templates", "source_run_id", "INTEGER")
+            self._add_column(conn, "strategy_templates", "source_trial_id", "INTEGER")
+            self._add_column(conn, "strategy_templates", "source_candidate_id", "INTEGER")
+            self._add_column(conn, "strategy_templates", "source_kind", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "strategy_templates", "promotion_tier", "TEXT NOT NULL DEFAULT 'research_candidate'")
+            self._add_column(conn, "strategy_templates", "readiness_status", "TEXT NOT NULL DEFAULT 'blocked'")
+            self._add_column(conn, "strategy_templates", "robustness_score", "REAL NOT NULL DEFAULT 0")
+            self._add_column(conn, "strategy_templates", "testing_account_size", "REAL NOT NULL DEFAULT 0")
+            self._add_column(conn, "strategy_templates", "source_fingerprint", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "strategy_templates", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_templates_status ON strategy_templates(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_templates_market ON strategy_templates(market_id, interval)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_templates_fingerprint ON strategy_templates(source_fingerprint)")
 
     def _add_column(self, conn: sqlite3.Connection, table: str, name: str, definition: str) -> None:
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -666,6 +706,153 @@ class ResearchStore:
             )
             return int(cursor.lastrowid)
 
+    def save_template(self, payload: dict[str, object]) -> dict[str, object]:
+        normalized = _normalized_template_payload(payload)
+        now = _now()
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM strategy_templates
+                WHERE source_fingerprint = ? AND source_fingerprint != ''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (normalized["source_fingerprint"],),
+            ).fetchone()
+            if existing is not None:
+                template_id = int(existing[0])
+                conn.execute(
+                    """
+                    UPDATE strategy_templates SET
+                      updated_at = ?,
+                      status = ?,
+                      name = ?,
+                      market_id = ?,
+                      interval = ?,
+                      strategy_family = ?,
+                      style = ?,
+                      target_regime = ?,
+                      source_run_id = ?,
+                      source_trial_id = ?,
+                      source_candidate_id = ?,
+                      source_kind = ?,
+                      promotion_tier = ?,
+                      readiness_status = ?,
+                      robustness_score = ?,
+                      testing_account_size = ?,
+                      payload_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        now,
+                        normalized["status"],
+                        normalized["name"],
+                        normalized["market_id"],
+                        normalized["interval"],
+                        normalized["strategy_family"],
+                        normalized["style"],
+                        normalized["target_regime"],
+                        normalized["source_run_id"],
+                        normalized["source_trial_id"],
+                        normalized["source_candidate_id"],
+                        normalized["source_kind"],
+                        normalized["promotion_tier"],
+                        normalized["readiness_status"],
+                        normalized["robustness_score"],
+                        normalized["testing_account_size"],
+                        json.dumps(normalized["payload"], sort_keys=True),
+                        template_id,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO strategy_templates(
+                      created_at, updated_at, status, name, market_id, interval, strategy_family, style,
+                      target_regime, source_run_id, source_trial_id, source_candidate_id, source_kind,
+                      promotion_tier, readiness_status, robustness_score, testing_account_size,
+                      source_fingerprint, payload_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        now,
+                        now,
+                        normalized["status"],
+                        normalized["name"],
+                        normalized["market_id"],
+                        normalized["interval"],
+                        normalized["strategy_family"],
+                        normalized["style"],
+                        normalized["target_regime"],
+                        normalized["source_run_id"],
+                        normalized["source_trial_id"],
+                        normalized["source_candidate_id"],
+                        normalized["source_kind"],
+                        normalized["promotion_tier"],
+                        normalized["readiness_status"],
+                        normalized["robustness_score"],
+                        normalized["testing_account_size"],
+                        normalized["source_fingerprint"],
+                        json.dumps(normalized["payload"], sort_keys=True),
+                    ),
+                )
+                template_id = int(cursor.lastrowid)
+        template = self.get_template(template_id)
+        if template is None:
+            raise RuntimeError("Saved template could not be reloaded")
+        return template
+
+    def get_template(self, template_id: int) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, created_at, updated_at, status, name, market_id, interval,
+                       strategy_family, style, target_regime, source_run_id, source_trial_id,
+                       source_candidate_id, source_kind, promotion_tier, readiness_status,
+                       robustness_score, testing_account_size, source_fingerprint, payload_json
+                FROM strategy_templates
+                WHERE id = ?
+                """,
+                (template_id,),
+            ).fetchone()
+        return _template_from_row(row) if row is not None else None
+
+    def list_templates(self, include_inactive: bool = False, limit: int | None = None) -> list[dict[str, object]]:
+        where = "" if include_inactive else "WHERE status != 'archived'"
+        params: list[object] = []
+        query = f"""
+            SELECT id, created_at, updated_at, status, name, market_id, interval,
+                   strategy_family, style, target_regime, source_run_id, source_trial_id,
+                   source_candidate_id, source_kind, promotion_tier, readiness_status,
+                   robustness_score, testing_account_size, source_fingerprint, payload_json
+            FROM strategy_templates
+            {where}
+            ORDER BY
+              CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+              robustness_score DESC,
+              updated_at DESC,
+              id DESC
+        """
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_template_from_row(row) for row in rows]
+
+    def update_template_status(self, template_id: int, status: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM strategy_templates WHERE id = ?", (template_id,)).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE strategy_templates SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _now(), template_id),
+            )
+        return self.get_template(template_id)
+
 
 def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
     parameters = evaluation.candidate.parameters
@@ -826,6 +1013,170 @@ def _trial_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
         "promotion_tier": gate_promotion_tier(str(row[14]), readiness),
         "promotion_readiness": readiness,
     }
+
+
+def _normalized_template_payload(payload: dict[str, object]) -> dict[str, object]:
+    raw = dict(payload or {})
+    details = _dict_value(raw.get("payload"))
+    source_template = _dict_value(details.get("source_template") or raw.get("source_template"))
+    parameters = _dict_value(details.get("parameters"))
+    backtest = _dict_value(details.get("backtest"))
+    pattern = _dict_value(details.get("pattern") or parameters.get("bar_pattern_analysis"))
+    evidence = _dict_value(details.get("evidence"))
+    readiness = _dict_value(details.get("readiness"))
+    search_audit = _dict_value(details.get("search_audit") or parameters.get("search_audit"))
+    capital_scenarios = _list_value(details.get("capital_scenarios"))
+    warnings = _dedupe_strings(
+        _list_value(raw.get("warnings"))
+        + _list_value(details.get("warnings"))
+        + _list_value(pattern.get("warnings"))
+        + _list_value(readiness.get("blockers"))
+        + _list_value(readiness.get("validation_warnings"))
+    )
+    name = _clean_string(raw.get("name") or source_template.get("name") or "Saved template")
+    market_id = _clean_string(raw.get("market_id") or source_template.get("market_id") or parameters.get("market_id"))
+    interval = _clean_string(raw.get("interval") or source_template.get("interval") or parameters.get("timeframe") or parameters.get("interval") or "5min")
+    strategy_family = _clean_string(raw.get("strategy_family") or source_template.get("family") or parameters.get("family"))
+    style = _clean_string(raw.get("style") or source_template.get("style") or parameters.get("style") or search_audit.get("trading_style") or "find_anything_robust")
+    target_regime = _clean_string(raw.get("target_regime") or source_template.get("target_regime") or parameters.get("target_regime") or pattern.get("target_regime"))
+    promotion_tier = _clean_string(raw.get("promotion_tier") or details.get("promotion_tier") or "research_candidate")
+    readiness_status = _clean_string(raw.get("readiness_status") or readiness.get("status") or "blocked")
+    testing_account_size = _safe_float(raw.get("testing_account_size") or parameters.get("testing_account_size") or search_audit.get("testing_account_size"))
+    detail_payload = dict(details)
+    detail_payload.update(
+        {
+            "source_template": source_template,
+            "parameters": parameters,
+            "backtest": backtest,
+            "pattern": pattern,
+            "evidence": evidence,
+            "readiness": readiness,
+            "warnings": warnings,
+            "search_audit": search_audit,
+            "capital_scenarios": capital_scenarios,
+        }
+    )
+    fingerprint_payload = {
+        "name": name,
+        "market_id": market_id,
+        "interval": interval,
+        "family": strategy_family,
+        "style": style,
+        "target_regime": target_regime,
+        "source_run_id": _safe_int_or_none(raw.get("source_run_id")),
+        "source_trial_id": _safe_int_or_none(raw.get("source_trial_id")),
+        "source_candidate_id": _safe_int_or_none(raw.get("source_candidate_id")),
+        "template_parameters": source_template.get("parameters") or parameters,
+    }
+    fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return {
+        "status": _template_status(raw.get("status")),
+        "name": name,
+        "market_id": market_id,
+        "interval": interval,
+        "strategy_family": strategy_family,
+        "style": style,
+        "target_regime": target_regime,
+        "source_run_id": _safe_int_or_none(raw.get("source_run_id")),
+        "source_trial_id": _safe_int_or_none(raw.get("source_trial_id")),
+        "source_candidate_id": _safe_int_or_none(raw.get("source_candidate_id")),
+        "source_kind": _clean_string(raw.get("source_kind") or details.get("source_kind")),
+        "promotion_tier": promotion_tier,
+        "readiness_status": readiness_status,
+        "robustness_score": _safe_float(raw.get("robustness_score")),
+        "testing_account_size": testing_account_size,
+        "source_fingerprint": fingerprint,
+        "payload": detail_payload,
+    }
+
+
+def _template_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
+    payload = _json_dict(row[19])
+    source_template = _dict_value(payload.get("source_template"))
+    parameters = _dict_value(payload.get("parameters"))
+    backtest = _dict_value(payload.get("backtest"))
+    pattern = _dict_value(payload.get("pattern") or parameters.get("bar_pattern_analysis"))
+    readiness = _dict_value(payload.get("readiness"))
+    warnings = _dedupe_strings(
+        _list_value(payload.get("warnings"))
+        + _list_value(pattern.get("warnings"))
+        + _list_value(readiness.get("blockers"))
+        + _list_value(readiness.get("validation_warnings"))
+    )
+    return {
+        "id": row[0],
+        "created_at": row[1],
+        "updated_at": row[2],
+        "status": row[3],
+        "name": row[4],
+        "market_id": row[5],
+        "interval": row[6],
+        "strategy_family": row[7],
+        "style": row[8],
+        "target_regime": row[9],
+        "source_run_id": row[10],
+        "source_trial_id": row[11],
+        "source_candidate_id": row[12],
+        "source_kind": row[13],
+        "promotion_tier": row[14],
+        "readiness_status": row[15],
+        "robustness_score": row[16],
+        "testing_account_size": row[17],
+        "source_fingerprint": row[18],
+        "payload": payload,
+        "source_template": source_template,
+        "parameters": parameters,
+        "backtest": backtest,
+        "pattern": pattern,
+        "readiness": readiness,
+        "warnings": warnings,
+        "capital_scenarios": _list_value(payload.get("capital_scenarios")),
+    }
+
+
+def _template_status(value: object) -> str:
+    status = _clean_string(value or "active")
+    return status if status in {"active", "paused", "archived"} else "active"
+
+
+def _dict_value(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list_value(value: object) -> list[object]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _json_dict(value: object) -> dict[str, object]:
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _clean_string(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _safe_int_or_none(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dedupe_strings(values: list[object]) -> list[str]:
+    return list(dict.fromkeys(str(value) for value in values if value))
 
 
 def _compact_audit(audit: dict[str, object]) -> dict[str, object]:

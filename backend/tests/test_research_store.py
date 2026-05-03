@@ -90,6 +90,56 @@ def test_research_store_archives_runs_without_deleting_evidence(tmp_path):
     assert len(store.list_trials(run_id)) == 1
 
 
+def test_research_store_saves_and_archives_strategy_templates(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    payload = {
+        "name": "find_anything_robust_trend_1",
+        "market_id": "XAUUSD",
+        "interval": "1day",
+        "strategy_family": "intraday_trend",
+        "style": "find_anything_robust",
+        "target_regime": "trend_up",
+        "source_run_id": 7,
+        "source_trial_id": 42,
+        "promotion_tier": "research_candidate",
+        "readiness_status": "blocked",
+        "robustness_score": 72.0,
+        "testing_account_size": 3000,
+        "payload": {
+            "source_template": {
+                "name": "find_anything_robust_trend_1",
+                "market_id": "XAUUSD",
+                "interval": "1day",
+                "target_regime": "trend_up",
+                "parameters": {"lookback": 20, "threshold_bps": 15},
+            },
+            "parameters": {"market_id": "XAUUSD", "family": "intraday_trend", "timeframe": "1day"},
+            "backtest": {"net_profit": 100, "test_profit": 40, "trade_count": 12},
+            "pattern": {"warnings": ["target_regime_low_oos_trades"], "regime_verdict": "regime_specific"},
+            "readiness": {"status": "blocked", "blockers": ["target_regime_low_oos_trades"]},
+            "warnings": ["needs_ig_price_validation"],
+            "capital_scenarios": [{"account_size": 3000, "feasible": False}],
+        },
+    }
+
+    saved = store.save_template(payload)
+    updated = store.save_template({**payload, "robustness_score": 80.0})
+
+    assert updated["id"] == saved["id"]
+    assert updated["robustness_score"] == 80.0
+    assert updated["source_template"]["parameters"]["lookback"] == 20
+    assert updated["warnings"] == ["needs_ig_price_validation", "target_regime_low_oos_trades"]
+    assert updated["capital_scenarios"][0]["account_size"] == 3000
+    assert store.list_templates()[0]["name"] == "find_anything_robust_trend_1"
+
+    archived = store.update_template_status(saved["id"], "archived")
+
+    assert archived is not None
+    assert archived["status"] == "archived"
+    assert store.list_templates() == []
+    assert store.list_templates(include_inactive=True)[0]["status"] == "archived"
+
+
 def test_research_store_limits_trial_and_candidate_reads(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")
