@@ -55,6 +55,7 @@ import {
 import "./styles.css";
 
 const WORKING_ACCOUNT_SIZE = 3000;
+const MAX_REPAIR_ATTEMPTS = 3;
 
 const FALLBACK_ENGINES = [
   {
@@ -434,9 +435,22 @@ function App() {
 
   async function makeTradeable(source) {
     const template = refinementTemplateFromSource(source, researchRun);
-    const plan = autoRefinementPlanForTemplate(template, researchRun, enabledMarkets, template.market_id ? [template.market_id] : activeMarketIds);
+    const plan = autoRefinementPlanForTemplate(template, researchRun, enabledMarkets, template.market_id ? [template.market_id] : activeMarketIds, { mode: "make_tradeable" });
     setRefinementTemplate(template);
     await launchAutoRefinementPlan(plan, "Launching make-tradeable repair run...");
+  }
+
+  async function repairRemaining(source) {
+    const template = refinementTemplateFromSource(source, researchRun);
+    const plan = autoRefinementPlanForTemplate(template, researchRun, enabledMarkets, template.market_id ? [template.market_id] : activeMarketIds, { mode: "repair_remaining" });
+    setRefinementTemplate(template);
+    if (plan.stopReason) {
+      setActiveModule("backtests");
+      setActiveTab("builder");
+      setMessage(plan.stopReason);
+      return;
+    }
+    await launchAutoRefinementPlan(plan, `Launching repair attempt ${plan.repairAttempt}/${MAX_REPAIR_ATTEMPTS}...`);
   }
 
   async function launchAutoRefinementPlan(plan, launchMessage = "Launching auto-refine run...") {
@@ -616,6 +630,7 @@ function App() {
       interval: intervalValue(parameters.timeframe || currentRun.interval),
       risk_profile: String(searchAudit.risk_profile || currentRun.risk_profile),
       target_regime: targetRegime,
+      repair_attempt_count: repairAttemptCountForSource(source),
       recipe: researchRecipeLabel(parameters.research_recipe),
       warnings: warningCodesForSource(source),
       readiness: source.audit?.promotion_readiness ?? null,
@@ -937,6 +952,7 @@ function App() {
           summary={templates}
           onUseTemplate={useSavedTemplate}
           onMakeTradeable={makeSavedTemplateTradeable}
+          onRepairRemaining={repairRemaining}
           onArchive={archiveSavedTemplate}
           onRefresh={() => loadModule("templates")}
         />
@@ -951,7 +967,7 @@ function App() {
             </div>
             <button type="button" className="secondary" onClick={() => loadModule("research")}><RefreshCw size={16} /> Refresh</button>
           </div>
-          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} onMakeTradeable={makeTradeable} onSaveTemplate={saveTemplateFromSource} />
+          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} onMakeTradeable={makeTradeable} onRepairRemaining={repairRemaining} onSaveTemplate={saveTemplateFromSource} />
         </section>
       )}
 
@@ -1253,6 +1269,7 @@ function App() {
                 onRefineTemplate={refineTemplate}
                 onRefineFurther={refineFurther}
                 onMakeTradeable={makeTradeable}
+                onRepairRemaining={repairRemaining}
                 onSaveTemplate={saveTemplateFromSource}
                 exportIncludeBars={exportIncludeBars}
               />
@@ -1578,7 +1595,7 @@ function GuideView({ setActiveModule }) {
   );
 }
 
-function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onArchive, onRefresh }) {
+function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onRepairRemaining, onArchive, onRefresh }) {
   const templates = summary?.templates ?? [];
   const counts = summary?.counts ?? {};
   const [marketFilter, setMarketFilter] = React.useState("all");
@@ -1651,6 +1668,7 @@ function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onArchiv
             template={template}
             onUseTemplate={onUseTemplate}
             onMakeTradeable={onMakeTradeable}
+            onRepairRemaining={onRepairRemaining}
             onArchive={onArchive}
           />
         ))}
@@ -1661,7 +1679,7 @@ function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onArchiv
   );
 }
 
-function TemplateCard({ template, onUseTemplate, onMakeTradeable, onArchive }) {
+function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemaining, onArchive }) {
   const payload = template.payload ?? {};
   const backtest = template.backtest ?? payload.backtest ?? {};
   const pattern = template.pattern ?? payload.pattern ?? {};
@@ -1670,6 +1688,7 @@ function TemplateCard({ template, onUseTemplate, onMakeTradeable, onArchive }) {
   const accountSize = template.testing_account_size || WORKING_ACCOUNT_SIZE;
   const frozenParameterCount = Object.keys(template.source_template?.parameters ?? payload.source_template?.parameters ?? {}).length;
   const capital = accountFeasibility(template.capital_scenarios ?? payload.capital_scenarios, accountSize);
+  const showRepairRemaining = shouldShowRepairRemaining(template);
   return (
     <article className="template-card">
       <div className="template-card-header">
@@ -1704,7 +1723,11 @@ function TemplateCard({ template, onUseTemplate, onMakeTradeable, onArchive }) {
         <WarningChips warnings={template.warnings ?? payload.warnings} limit={8} empty="Gate clear" />
       </div>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={() => onMakeTradeable(template)}><ShieldCheck size={16} /> Make tradeable</button>
+        {showRepairRemaining ? (
+          <button type="button" className="secondary" onClick={() => onRepairRemaining(template)}><ShieldCheck size={16} /> Repair remaining</button>
+        ) : (
+          <button type="button" className="secondary" onClick={() => onMakeTradeable(template)}><ShieldCheck size={16} /> Make tradeable</button>
+        )}
         <button type="button" className="ghost" onClick={() => onUseTemplate(template)}><RefreshCw size={16} /> Use</button>
         <button type="button" className="ghost" onClick={() => onArchive(template)}><Archive size={16} /> Archive</button>
       </div>
@@ -1912,7 +1935,7 @@ function moduleLabel(id) {
   return MODULES.find((item) => item[0] === id)?.[1] ?? id;
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate, exportIncludeBars }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate, exportIncludeBars }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
@@ -2068,6 +2091,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
         <RegimeTemplateShortlist
           runDetail={runDetail}
           onMakeTradeable={onMakeTradeable}
+          onRepairRemaining={onRepairRemaining}
           onSaveTemplate={onSaveTemplate}
         />
       )}
@@ -2196,7 +2220,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
           <span className="warning-chip info">Diagnostic</span>
         </div>
         <div className="trial-list">
-          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onSaveTemplate={onSaveTemplate} />)}
+          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onRepairRemaining={onRepairRemaining} onSaveTemplate={onSaveTemplate} />)}
         </div>
         {filteredTrials.length === 0 && trials.length > 0 && (
           <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
@@ -2252,7 +2276,7 @@ function RegimeEvidence({ runDetail, trials }) {
   );
 }
 
-function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onSaveTemplate }) {
+function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
   const groups = runDetail?.regime_picks ?? [];
   if (groups.length === 0) {
     return null;
@@ -2276,9 +2300,15 @@ function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onSaveTemplate })
                     In-regime {formatMoney(trial.in_regime_net_profit)} · {trial.regime_trading_days ?? 0}d · cost/gross {percent(trial.cost_to_gross_ratio)}
                   </small>
                   <div className="button-row compact-actions">
-                    <button type="button" className="secondary" onClick={() => onMakeTradeable(trial)}>
-                      <ShieldCheck size={16} /> Make tradeable
-                    </button>
+                    {shouldShowRepairRemaining(trial) ? (
+                      <button type="button" className="secondary" onClick={() => onRepairRemaining(trial)}>
+                        <ShieldCheck size={16} /> Repair remaining
+                      </button>
+                    ) : (
+                      <button type="button" className="secondary" onClick={() => onMakeTradeable(trial)}>
+                        <ShieldCheck size={16} /> Make tradeable
+                      </button>
+                    )}
                     <button type="button" className="ghost" onClick={() => onSaveTemplate(trial)}>
                       <Save size={16} /> Save
                     </button>
@@ -2329,7 +2359,7 @@ function TemplateUtilizationMetrics({ backtest, pattern }) {
   );
 }
 
-function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate }) {
+function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
   const backtest = trial.backtest ?? {};
   const accountSize = testingAccountSizeForSource(trial);
   const accountLabel = accountSizeLabel(accountSize);
@@ -2343,6 +2373,7 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, 
   const searchAudit = trial.parameters?.search_audit ?? {};
   const scoreBasis = scoreBasisLabel(searchAudit);
   const discoveryLabel = discoveryBadgeLabel(trial.parameters?.search_audit);
+  const showRepairRemaining = shouldShowRepairRemaining(trial);
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -2358,9 +2389,15 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, 
           <span>{[interval, strategyFamilyLabel(trial.strategy_family || trial.style), `score ${round(trial.robustness_score)}`, scoreBasis].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="button-row trial-actions">
-          <button type="button" className="secondary" onClick={() => onMakeTradeable(trial)}>
-            <ShieldCheck size={16} /> Make tradeable
-          </button>
+          {showRepairRemaining ? (
+            <button type="button" className="secondary" onClick={() => onRepairRemaining(trial)}>
+              <ShieldCheck size={16} /> Repair remaining
+            </button>
+          ) : (
+            <button type="button" className="secondary" onClick={() => onMakeTradeable(trial)}>
+              <ShieldCheck size={16} /> Make tradeable
+            </button>
+          )}
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
             <RefreshCw size={16} /> Refine
           </button>
@@ -2437,7 +2474,7 @@ function ParetoCard({ item, onRefineTemplate }) {
   );
 }
 
-function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate }) {
+function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
   const visibleCandidates = candidates.slice(0, 24);
   const queue = candidateQueueSummary(candidates);
   return (
@@ -2472,7 +2509,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
       <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onSaveTemplate={onSaveTemplate} />)}
+          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onRepairRemaining={onRepairRemaining} onSaveTemplate={onSaveTemplate} />)}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
           {candidates.length > visibleCandidates.length && (
             <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
@@ -2504,7 +2541,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
   );
 }
 
-function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTradeable, onSaveTemplate }) {
+function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssueCodes(readiness);
   const accountSize = testingAccountSizeForSource(candidate);
@@ -2517,6 +2554,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
   const searchAudit = candidate.audit?.candidate?.parameters?.search_audit ?? {};
   const scoreBasis = scoreBasisLabel(searchAudit);
   const discoveryLabel = discoveryBadgeLabel(candidate.audit?.candidate?.parameters?.search_audit);
+  const showRepairRemaining = shouldShowRepairRemaining(candidate);
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -2539,9 +2577,15 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
         <WarningChips warnings={issues} limit={8} empty="Gate clear" />
       </div>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={() => onMakeTradeable(candidate)}>
-          <ShieldCheck size={16} /> Make tradeable
-        </button>
+        {showRepairRemaining ? (
+          <button type="button" className="secondary" onClick={() => onRepairRemaining(candidate)}>
+            <ShieldCheck size={16} /> Repair remaining
+          </button>
+        ) : (
+          <button type="button" className="secondary" onClick={() => onMakeTradeable(candidate)}>
+            <ShieldCheck size={16} /> Make tradeable
+          </button>
+        )}
         <button type="button" className="ghost" onClick={() => onRefineTemplate(candidate)}>
           <RefreshCw size={16} /> Refine
         </button>
@@ -3250,6 +3294,7 @@ function frozenTemplatePayload(template = {}) {
     style: template.style,
     interval: template.interval,
     target_regime: templateSpecificRegime(template),
+    repair_attempt_count: repairAttemptCountForTemplate(template),
     parameters: frozenParameters,
   };
 }
@@ -3260,6 +3305,40 @@ function templateSpecificRegime(template) {
 
 function hasFrozenTemplateParameters(template) {
   return Object.keys(frozenTemplatePayload(template).parameters ?? {}).length > 0;
+}
+
+function repairAttemptCountForTemplate(template = {}) {
+  return repairAttemptCountForSource({
+    ...template,
+    parameters: template.parameters ?? {
+      ...(template.payload?.parameters ?? {}),
+      source_template: template.source_template ?? template.payload?.source_template ?? {},
+      search_audit: template.payload?.search_audit ?? template.payload?.parameters?.search_audit ?? {},
+    },
+  });
+}
+
+function repairAttemptCountForSource(source = {}) {
+  const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
+  const searchAudit = parameters.search_audit ?? source.search_audit ?? source.payload?.search_audit ?? {};
+  const sourceTemplate = parameters.source_template ?? source.source_template ?? source.payload?.source_template ?? {};
+  return Math.max(
+    0,
+    Math.floor(Number(
+      searchAudit.repair_attempt_count
+        ?? sourceTemplate.repair_attempt_count
+        ?? source.repair_attempt_count
+        ?? 0
+    ) || 0)
+  );
+}
+
+function shouldShowRepairRemaining(source = {}) {
+  const attempts = repairAttemptCountForSource(source);
+  const readiness = source.audit?.promotion_readiness ?? source.promotion_readiness ?? source.readiness ?? {};
+  const readinessStatus = readiness.status ?? source.readiness_status;
+  const tier = source.promotion_tier ?? source.audit?.promotion_tier;
+  return attempts > 0 && readinessStatus !== "ready_for_paper" && !["paper_candidate", "validated_candidate"].includes(tier);
 }
 
 function templateSourceIds(source = {}) {
@@ -3471,8 +3550,11 @@ function repairActionsForTemplate(template) {
   return actions.slice(0, 5);
 }
 
-function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [], activeMarketIds = []) {
+function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [], activeMarketIds = [], options = {}) {
   const warnings = new Set(template.warnings ?? []);
+  const mode = options.mode || "make_tradeable";
+  const priorRepairAttempt = repairAttemptCountForTemplate(template);
+  const repairAttempt = Math.min(MAX_REPAIR_ATTEMPTS, priorRepairAttempt + 1);
   const pattern = template.pattern ?? {};
   const dominantMonth = pattern.dominant_profit_month?.key;
   const dominantRegime = pattern.dominant_profit_regime?.key;
@@ -3530,7 +3612,10 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
   const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
   const capitalBlocked = hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high");
-  const sourceTemplate = frozenTemplatePayload(template);
+  const sourceTemplate = {
+    ...frozenTemplatePayload(template),
+    repair_attempt_count: repairAttempt,
+  };
   const canFreezeValidate = Object.keys(sourceTemplate.parameters ?? {}).length > 0;
   const regimeNeedsRepair = hardRegimeRepair || (regimeDependent && !targetRegime);
   const shouldFreezeValidate =
@@ -3560,6 +3645,41 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   let runTargetRegime = targetRegime;
   let regimeScanBudget = "";
   const excludedMonths = [];
+
+  if (mode === "repair_remaining" && priorRepairAttempt >= MAX_REPAIR_ATTEMPTS) {
+    return {
+      marketIds,
+      runPatch: {},
+      steps: [],
+      syncCosts: false,
+      summary: "Repair limit reached. Freeze validate, incubate, or reject this template instead of continuing to search around the same failures.",
+      targetRegime,
+      crossMarketDiscovery: false,
+      targets: [],
+      stageMessage: "Repair limit reached.",
+      repairAttempt: priorRepairAttempt,
+      priorRepairAttempt,
+      stopReason: `Repair limit reached (${priorRepairAttempt}/${MAX_REPAIR_ATTEMPTS}). Freeze validate, incubate, or reject it rather than looping again.`,
+    };
+  }
+  if (mode === "repair_remaining" && warnings.size === 0) {
+    return {
+      marketIds,
+      runPatch: {},
+      steps: [],
+      syncCosts: false,
+      summary: "No remaining blockers were attached to this result.",
+      targetRegime,
+      crossMarketDiscovery: false,
+      targets: [],
+      stageMessage: "No remaining blockers.",
+      repairAttempt: priorRepairAttempt,
+      priorRepairAttempt,
+      stopReason: "No remaining blockers were attached. Use Freeze validate or save the template instead of searching again.",
+    };
+  }
+
+  addStep(`Repair attempt ${repairAttempt}/${MAX_REPAIR_ATTEMPTS}`);
 
   if (runTargetRegime) {
     addStep(`Make tradeable target: ${regimeLabel(runTargetRegime)} only`);
@@ -3677,6 +3797,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     : crossMarketDiscovery
     ? "Keeps this template on its source market; other markets are separate discovery leads."
     : "Chooses the next repair run from the active promotion blockers.";
+  const stagePrefix = mode === "repair_remaining" ? "Repair remaining" : "Make tradeable";
   return {
     marketIds,
     runPatch,
@@ -3686,7 +3807,9 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     targetRegime: runTargetRegime,
     crossMarketDiscovery,
     targets: targets.slice(0, 5),
-    stageMessage: `Make tradeable staged: ${steps.slice(0, 3).join("; ")}.`,
+    stageMessage: `${stagePrefix} staged: ${steps.slice(0, 3).join("; ")}.`,
+    repairAttempt,
+    priorRepairAttempt,
   };
 }
 

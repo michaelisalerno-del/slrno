@@ -879,6 +879,39 @@ def test_target_regime_refine_gates_base_trials_to_that_regime():
                 assert row["active_bars"] == 0
 
 
+def test_repair_attempt_count_survives_source_template_audit():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    bars = _daily_trend_bars(90)
+
+    result = run_adaptive_search(
+        bars,
+        "TEST",
+        "1day",
+        profile,
+        AdaptiveSearchConfig(
+            preset="quick",
+            trading_style="intraday_only",
+            search_budget=1,
+            source_template={
+                "name": "fixture_template",
+                "market_id": "TEST",
+                "family": "intraday_trend",
+                "style": "find_anything_robust",
+                "interval": "1day",
+                "target_regime": "trend_up",
+                "repair_attempt_count": 2,
+                "parameters": {"lookback": 12, "direction": "long_only"},
+            },
+            seed=5,
+        ),
+    )
+
+    parameters = result.evaluations[0].candidate.parameters
+    assert parameters["source_template"]["repair_attempt_count"] == 2
+    assert parameters["search_audit"]["repair_attempt_count"] == 2
+
+
 def _trend_bars(count: int) -> list[OHLCBar]:
     start = datetime(2026, 1, 1, 9)
     price = 100.0

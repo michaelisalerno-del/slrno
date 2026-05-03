@@ -399,6 +399,7 @@ def _source_template(payload: object) -> dict[str, object]:
         "style": str(payload.get("style") or parameters.get("style") or ""),
         "interval": str(payload.get("interval") or parameters.get("timeframe") or ""),
         "target_regime": str(payload.get("target_regime") or parameters.get("target_regime") or ""),
+        "repair_attempt_count": _safe_int(payload.get("repair_attempt_count")),
         "parameters": {str(key): value for key, value in parameters.items() if str(key) in FROZEN_PARAMETER_KEYS},
     }
 
@@ -411,6 +412,7 @@ def _source_template_audit(template: dict[str, object]) -> dict[str, object]:
         "family": template.get("family"),
         "interval": template.get("interval"),
         "target_regime": template.get("target_regime"),
+        "repair_attempt_count": template.get("repair_attempt_count"),
         "frozen_parameters": dict(template.get("parameters") or {}),
     }
 
@@ -913,6 +915,9 @@ def _annotate_evaluations(
                 "objective": config.objective,
                 "risk_profile": config.risk_profile,
                 "repair_mode": config.repair_mode,
+                "repair_attempt_count": _safe_int((evaluation.candidate.parameters.get("source_template") or {}).get("repair_attempt_count"))
+                if isinstance(evaluation.candidate.parameters.get("source_template"), dict)
+                else 0,
                 "frozen_validation": bool(evaluation.candidate.parameters.get("frozen_template_validation")),
                 "source_template_name": (evaluation.candidate.parameters.get("source_template") or {}).get("name")
                 if isinstance(evaluation.candidate.parameters.get("source_template"), dict)
@@ -1682,3 +1687,10 @@ def _safe_float(value: object) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0

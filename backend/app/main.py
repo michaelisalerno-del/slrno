@@ -1057,6 +1057,7 @@ def _compact_source_template(source_template: dict[str, object]) -> dict[str, ob
         "style": str(source_template.get("style") or parameters.get("style") or ""),
         "interval": str(source_template.get("interval") or parameters.get("timeframe") or ""),
         "target_regime": str(source_template.get("target_regime") or parameters.get("target_regime") or ""),
+        "repair_attempt_count": _safe_int(source_template.get("repair_attempt_count")),
         "parameters": {
             str(key): value
             for key, value in parameters.items()
@@ -1083,6 +1084,13 @@ def _compact_source_template(source_template: dict[str, object]) -> dict[str, ob
             }
         },
     }
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _mark_market_failed(
