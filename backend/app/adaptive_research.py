@@ -59,6 +59,7 @@ FROZEN_PARAMETER_KEYS = {
 
 STYLE_FAMILIES = {
     "find_anything_robust": (
+        "everyday_long",
         "intraday_trend",
         "swing_trend",
         "calendar_turnaround_tuesday",
@@ -75,9 +76,11 @@ STYLE_FAMILIES = {
     "lower_drawdown": ("mean_reversion", "liquidity_sweep_reversal", "intraday_trend", "volatility_expansion"),
     "higher_profit": ("breakout", "liquidity_sweep_reversal", "swing_trend", "intraday_trend"),
     "research_ideas": ("calendar_turnaround_tuesday", "month_end_seasonality", "calendar_turnaround_tuesday", "month_end_seasonality"),
+    "everyday_long": ("everyday_long",),
 }
 
 CALENDAR_FAMILIES = {"calendar_turnaround_tuesday", "month_end_seasonality"}
+LONG_BIAS_FAMILIES = CALENDAR_FAMILIES | {"everyday_long"}
 
 ENGINE_DEFINITIONS = [
     {
@@ -541,8 +544,9 @@ def _sample_parameters(
         "swing_trend": (48, 72, 96, 144) if not trade_repair else (24, 36, 48, 72, 96),
         "calendar_turnaround_tuesday": (1,),
         "month_end_seasonality": (1,),
+        "everyday_long": (1,),
     }.get(family, (12, 24, 36))
-    direction = "long_only" if family in CALENDAR_FAMILIES else ("long_only", "short_only", "long_short")[trial_index % 3]
+    direction = "long_only" if family in LONG_BIAS_FAMILIES else ("long_only", "short_only", "long_short")[trial_index % 3]
     risk_scale = {"conservative": 0.7, "balanced": 1.0, "aggressive": 1.35}.get(risk_profile, 1.0)
     if capital_repair:
         risk_scale = min(risk_scale, 0.55)
@@ -580,6 +584,22 @@ def _sample_parameters(
                 "false_breakout_filter": 0,
                 "research_recipe": "turnaround_tuesday_after_down_previous_session",
                 "known_edge_reference": "public-paper-style calendar anomaly; validate across markets before paper use",
+            }
+        )
+    elif family == "everyday_long":
+        parameters.update(
+            {
+                "lookback": 1,
+                "threshold_bps": 0,
+                "confidence_quantile": 1.0,
+                "regime_filter": "any",
+                "false_breakout_filter": 0,
+                "min_hold_bars": rng.choice((1, 2, 3)),
+                "max_hold_bars": rng.choice((5, 10, 20, 40, 80) if not trade_repair else (3, 5, 8, 13, 21)),
+                "min_trade_spacing": rng.choice((0, 1, 2) if trade_repair else (0, 1, 2, 3)),
+                "direction": "long_only",
+                "research_recipe": "everyday_long_bias",
+                "known_edge_reference": "long-only benchmark; compare active templates against passive long exposure after IG costs",
             }
         )
     elif family == "month_end_seasonality":
@@ -680,6 +700,9 @@ def _generate_signals(bars: list[OHLCBar], family: str, parameters: dict[str, fl
                     if days_to_month_end < end_window or days_from_month_start < start_window:
                         signal = 1
                         confidence = 1.0 + max(0.0, (end_window - days_to_month_end) / max(1, end_window))
+            elif family == "everyday_long":
+                signal = 1
+                confidence = 1.0
             signal = _apply_regime_filter(bars, index, signal, parameters)
         raw.append(_apply_direction(signal, str(parameters["direction"])))
         confidences.append(confidence if signal else 0.0)

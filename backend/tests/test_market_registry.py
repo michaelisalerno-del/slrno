@@ -38,3 +38,7 @@ def test_market_registry_seeds_priority_ig_markets(tmp_path):
     assert markets["XAUUSD"].asset_class == "commodity"
     assert markets["XAUUSD"].ig_epic == "CS.D.USCGC.TODAY.IP"
     assert markets["UK10Y"].eodhd_symbol == "UK10Y.GBOND"
+    assert markets["KOSPI200"].default_timeframe == "1day"
+    assert markets["KOSPI200"].enabled is True
+    assert markets["SA40"].enabled is False
+    assert markets["SA40"].ig_epic == "IX.D.SAF.DAILY.IP"

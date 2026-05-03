@@ -93,6 +93,7 @@ const MULTI_MARKET_MIN_TRIALS_PER_MARKET = { quick: 6, balanced: 9, deep: 12 };
 
 const STYLE_OPTIONS = [
   { id: "find_anything_robust", label: "Find anything robust" },
+  { id: "everyday_long", label: "Everyday long" },
   { id: "research_ideas", label: "Known research ideas" },
   { id: "intraday_only", label: "Intraday only" },
   { id: "swing_trades", label: "Swing trades" },
@@ -4429,7 +4430,7 @@ function earlierDate(current, candidate) {
 function longEvidenceStartForTemplate(template = {}) {
   const family = String(template.family || template.parameters?.family || "");
   const interval = intervalValue(template.interval || template.parameters?.timeframe || template.parameters?.interval);
-  if (interval === "1day" || ["calendar_turnaround_tuesday", "month_end_seasonality"].includes(family)) {
+  if (interval === "1day" || ["calendar_turnaround_tuesday", "month_end_seasonality", "everyday_long"].includes(family)) {
     return "2020-01-01";
   }
   return "2024-01-01";
@@ -4814,6 +4815,7 @@ function strategyFamilyLabel(value) {
     mean_reversion: "Mean reversion",
     volatility_expansion: "Volatility expansion",
     liquidity_sweep_reversal: "Liquidity sweep",
+    everyday_long: "Everyday long",
     scalping: "Scalping",
     breakout: "Breakout",
     research_ideas: "Known research ideas",
@@ -4825,6 +4827,7 @@ function researchRecipeLabel(value) {
   return {
     turnaround_tuesday_after_down_previous_session: "Tests Tuesday rebounds after a down prior session",
     turn_of_month_long_bias: "Tests turn-of-month long bias",
+    everyday_long_bias: "Tests always-long exposure as a benchmark, or only inside the selected regime when regime-gated",
   }[value] ?? "";
 }
 

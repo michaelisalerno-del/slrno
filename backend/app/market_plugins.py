@@ -91,6 +91,8 @@ _SOURCE_URLS = {
     "US500": "https://www.ig.com/en/indices/markets-indices/us-spx-500",
     "FTSE100": "https://www.ig.com/uk/indices/markets-indices/ftse-100",
     "DE40": "https://www.ig.com/uk/indices/markets-indices/germany-40",
+    "KOSPI200": "https://www.ig.com/uk/markets",
+    "SA40": "https://www.ig.com/uk/help-and-support/spread-betting-and-cfds-5064504a/products-markets-and-trading-hours-008e7240/spread-bet-indices-product-details-1b3f8f8c",
     "XAUUSD": "https://www.ig.com/en/commodities/gold-trading",
 }
 

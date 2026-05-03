@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from random import Random
 
-from app.adaptive_research import AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _evidence_profile, _generate_signals, _promotion_tier, _sample_parameters, _warnings, balanced_score, run_adaptive_search
+from app.adaptive_research import STYLE_FAMILIES, AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _evidence_profile, _generate_signals, _promotion_tier, _sample_parameters, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import IGCostProfile, public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -748,6 +748,20 @@ def test_month_end_seasonality_signals_last_trading_days():
     active_dates = {bar.timestamp.date() for bar, signal in zip(bars, signals) if signal > 0}
     assert datetime(2026, 1, 29).date() in active_dates
     assert datetime(2026, 1, 30).date() in active_dates
+
+
+def test_everyday_long_template_stays_long_after_warmup():
+    bars = _trend_bars(24)
+    parameters = _sample_parameters(Random(2), "everyday_long", "balanced", 0)
+
+    assert "everyday_long" in STYLE_FAMILIES["find_anything_robust"]
+    assert parameters["direction"] == "long_only"
+    assert parameters["confidence_quantile"] == 1.0
+
+    signals = _generate_signals(bars, "everyday_long", parameters)
+
+    assert all(signal >= 0 for signal in signals)
+    assert any(signal > 0 for signal in signals[1:])
 
 
 def test_liquidity_sweep_reversal_signals_support_reclaim():
