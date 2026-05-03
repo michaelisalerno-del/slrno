@@ -2260,14 +2260,14 @@ function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onSaveTemplate })
   return (
     <section className="lab-section span-2">
       <h3>Regime Template Shortlist</h3>
-      <div className="pareto-grid">
+      <div className="regime-template-grid">
         {groups.map((group) => (
-          <div className="pareto-card" key={group.regime}>
+          <div className="regime-template-card" key={group.regime}>
             <span className="eyebrow">{regimeLabel(group.regime)}</span>
             <strong>{group.trials?.[0]?.market_id || runDetail.market_id || "Market"}</strong>
             <div className="status-list compact-regime-list">
               {(group.trials ?? []).map((trial) => (
-                <div className="status compact-status" key={trial.id}>
+                <div className="status regime-pick-card" key={trial.id}>
                   <strong>{trial.strategy_name}</strong>
                   <span>
                     {tierLabel(trial.promotion_tier)} · net {formatMoney(trial.net_profit)} · OOS {formatMoney(trial.oos_net_profit ?? trial.test_profit)}

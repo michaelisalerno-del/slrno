@@ -649,6 +649,7 @@ button.ghost {
 
 .cost-card,
 .pareto-card,
+.regime-template-card,
 .candidate-card,
 .template-card,
 .trial-card,
@@ -661,6 +662,42 @@ button.ghost {
   border: 1px solid #e0e6ed;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.regime-template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.regime-template-card,
+.regime-pick-card,
+.compact-regime-list {
+  min-width: 0;
+}
+
+.regime-template-card > strong,
+.regime-pick-card strong,
+.regime-pick-card span,
+.regime-pick-card small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.regime-pick-card {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  overflow: hidden;
+}
+
+.regime-pick-card .button-row {
+  justify-content: flex-start;
+}
+
+.regime-pick-card button {
+  max-width: 100%;
+  white-space: normal;
 }
 
 .cost-card > div:first-child,
