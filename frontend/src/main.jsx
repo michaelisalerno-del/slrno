@@ -1433,7 +1433,7 @@ function GuideView({ setActiveModule }) {
   ];
   const repairs = [
     ["Too few trades / low OOS", "Make tradeable runs a deeper longer-history retest. If a best regime exists, the retest grades that regime only and forces the rest flat."],
-    ["Fragile folds", "Use Longer history and Evidence first. The result needs to work across several walk-forward folds."],
+    ["Fragile folds", "If multiple-testing is also present, Make tradeable freezes the exact template first so the app stops hunting new parameters. Remaining fold warnings then need Longer history or rejection."],
     ["Single-month profit", "Use Exclude month. The run removes the dominant month from saved bars and retests."],
     ["Single-regime profit", "Use Regime repair. It retests full-history evidence and capped regime specialists."],
     ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
@@ -3214,6 +3214,7 @@ function repairActionsForTemplate(template) {
     dominantRegimeShare >= 0.5 ||
     verdict === "regime_specific";
   const needsRegimeRepair = hardRegimeWarning || (regimeIdentity && !targetRegime);
+  const needsFrozenValidation = hasAny("multiple_testing_haircut") && canFreezeValidate && !hasAny("isolated_parameter_peak");
   const actions = [];
   const add = (action) => {
     if (!actions.some((item) => item.id === action.id)) {
@@ -3273,6 +3274,16 @@ function repairActionsForTemplate(template) {
       primary: actions.length === 0,
     });
   }
+  if (needsFrozenValidation) {
+    add({
+      id: "freeze-validation",
+      preset: "frozen_validation",
+      title: "Freeze validation required",
+      detail: "Retest the exact market, regime, timeframe, and parameters with no new search. This is the direct way to clear multiple-testing bias.",
+      button: "Freeze validate",
+      primary: actions.length === 0,
+    });
+  }
   if (hasAny("profits_not_consistent_across_folds", "high_sharpe_weak_folds", "unstable_folds", "weak_oos_economics", "weak_oos_evidence", "no_walk_forward_folds", "one_fold_dependency")) {
     add({
       id: "fold-repair",
@@ -3282,16 +3293,6 @@ function repairActionsForTemplate(template) {
         ? `Extend the window inside ${regimeLabel(dominantRegime)} and keep the strategy family locked so fold evidence has more calendar variety.`
         : "Extend the window and keep the strategy family locked so fold evidence has more calendar variety.",
       button: "Longer history",
-      primary: actions.length === 0,
-    });
-  }
-  if (hasAny("multiple_testing_haircut") && canFreezeValidate) {
-    add({
-      id: "freeze-validation",
-      preset: "frozen_validation",
-      title: "Freeze validation required",
-      detail: "Retest the exact market, regime, timeframe, and parameters with no new search. This is the direct way to clear multiple-testing bias.",
-      button: "Freeze validate",
       primary: actions.length === 0,
     });
   }
@@ -3408,7 +3409,6 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     !capitalBlocked &&
     !syncCosts &&
     !costStress &&
-    !fragileFolds &&
     !monthDependent &&
     !crossMarket &&
     !regimeNeedsRepair;
@@ -3486,7 +3486,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     addStep(`Exclude ${dominantMonth} and require the edge to survive`);
     addTarget("Reduce best-month dependence");
   }
-  if (fragileFolds) {
+  if (fragileFolds && !shouldFreezeValidate) {
     budget = Math.max(budget, 120);
     start = earlierDate(start, longEvidenceStartForTemplate(template));
     addStep("Use longer-history fold and OOS evidence");
