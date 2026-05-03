@@ -188,6 +188,7 @@ function App() {
   const autoRefinementPlan = refinementTemplate
     ? autoRefinementPlanForTemplate(refinementTemplate, researchRun, enabledMarkets, activeMarketIds)
     : null;
+  const strategyTrialMinimum = researchRun.repair_mode === "frozen_validation" ? 1 : 6;
 
   const loadModule = React.useCallback(async (moduleId = activeModule) => {
     setLoadingModule(moduleId);
@@ -1204,7 +1205,14 @@ function App() {
                   <label>End</label>
                   <input value={researchRun.end} onChange={(event) => setResearchRun({ ...researchRun, end: event.target.value })} required />
                   <label>Strategy trials / market</label>
-                  <input value={researchRun.search_budget} onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })} placeholder={`${selectedPreset.budget}`} type="number" min="6" max="500" />
+                  <input
+                    value={researchRun.search_budget}
+                    onChange={(event) => setResearchRun({ ...researchRun, search_budget: event.target.value })}
+                    placeholder={`${researchRun.repair_mode === "frozen_validation" ? 1 : selectedPreset.budget}`}
+                    type="number"
+                    min={strategyTrialMinimum}
+                    max="500"
+                  />
                   <label>Repair mode</label>
                   <span className="badge muted-badge repair-mode-badge">{repairModeLabel(researchRun.repair_mode)}</span>
                   <label>Excluded months</label>

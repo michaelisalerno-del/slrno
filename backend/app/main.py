@@ -892,6 +892,8 @@ def _selected_markets(market_ids: list[str]) -> list[MarketMapping]:
 
 def _effective_search_budget(payload: ResearchRunPayload, market_count: int) -> int | None:
     if payload.search_budget is not None:
+        if _is_frozen_validation_payload(payload):
+            return 1
         return max(6, min(500, int(payload.search_budget)))
     if market_count <= 1:
         return None
@@ -900,6 +902,12 @@ def _effective_search_budget(payload: ResearchRunPayload, market_count: int) -> 
     minimum = MULTI_MARKET_MIN_TRIALS_PER_MARKET.get(payload.search_preset, MULTI_MARKET_MIN_TRIALS_PER_MARKET["balanced"])
     capped = max(minimum, total_cap // max(1, market_count))
     return min(preset_budget, capped)
+
+
+def _is_frozen_validation_payload(payload: ResearchRunPayload) -> bool:
+    source_template = payload.source_template if isinstance(payload.source_template, dict) else {}
+    parameters = source_template.get("parameters")
+    return payload.repair_mode == "frozen_validation" and isinstance(parameters, dict) and bool(parameters)
 
 
 def _preset_budget(search_preset: str) -> int:

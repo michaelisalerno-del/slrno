@@ -112,6 +112,19 @@ def test_multi_market_default_budget_is_auto_capped_but_manual_budget_is_respect
     assert main._effective_search_budget(deep_payload, 38) == 12
 
 
+def test_frozen_validation_budget_is_one_when_template_parameters_are_locked():
+    payload = main.ResearchRunPayload(
+        start="2025-01-01",
+        end="2026-04-01",
+        search_budget=1,
+        repair_mode="frozen_validation",
+        source_template={"parameters": {"lookback": 20, "threshold_bps": 12}},
+    )
+
+    assert main._effective_search_budget(payload, 1) == 1
+    assert main._research_run_config(payload, [main.markets.get("NAS100")])["effective_search_budget"] == 1
+
+
 def test_empty_intraday_index_falls_back_to_daily_bars(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     registry = MarketRegistry(tmp_path / "markets.sqlite3")
