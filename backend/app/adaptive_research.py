@@ -775,15 +775,22 @@ def _fold_backtests(
 
 def _evidence_profile(backtest: BacktestResult, folds: tuple[BacktestResult, ...]) -> dict[str, object]:
     fold_net = [float(fold.net_profit) for fold in folds]
+    active_folds = [fold for fold in folds if int(fold.trade_count) > 0]
+    inactive_fold_count = max(0, len(folds) - len(active_folds))
+    active_fold_net = [float(fold.net_profit) for fold in active_folds]
     positive_fold_net = [profit for profit in fold_net if profit > 0]
     positive_total = sum(positive_fold_net)
     return {
         "fold_count": len(folds),
+        "active_fold_count": len(active_folds),
+        "inactive_fold_count": inactive_fold_count,
         "positive_fold_rate": round(_positive_fold_rate(folds), 6),
+        "active_positive_fold_rate": round(_positive_fold_rate(folds), 6),
         "single_fold_profit_share": round(max(positive_fold_net) / positive_total, 6) if positive_total > 0 else 0.0,
         "oos_net_profit": round(sum(fold_net), 4),
         "oos_trade_count": sum(int(fold.trade_count) for fold in folds),
         "worst_fold_net_profit": round(min(fold_net), 4) if fold_net else 0.0,
+        "worst_active_fold_net_profit": round(min(active_fold_net), 4) if active_fold_net else 0.0,
         "full_period_test_profit": round(backtest.test_profit, 4),
     }
 
@@ -1543,7 +1550,10 @@ def _signals_to_probabilities(signals: list[int]) -> list[float]:
 def _positive_fold_rate(folds: tuple[BacktestResult, ...]) -> float:
     if not folds:
         return 0.0
-    return sum(1 for fold in folds if fold.net_profit > 0) / len(folds)
+    active_folds = [fold for fold in folds if int(fold.trade_count) > 0]
+    if not active_folds:
+        return 0.0
+    return sum(1 for fold in active_folds if fold.net_profit > 0) / len(active_folds)
 
 
 def _risk_adjusted_sharpe(backtest: BacktestResult) -> float:

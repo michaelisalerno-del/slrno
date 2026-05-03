@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from random import Random
 
-from app.adaptive_research import AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _generate_signals, _promotion_tier, _sample_parameters, _warnings, balanced_score, run_adaptive_search
+from app.adaptive_research import AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _evidence_profile, _generate_signals, _promotion_tier, _sample_parameters, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import IGCostProfile, public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -572,6 +572,44 @@ def test_warnings_flag_weak_oos_and_fold_concentration():
     assert "weak_oos_evidence" in warnings
     assert "low_oos_trades" in warnings
     assert "one_fold_dependency" in warnings
+
+
+def test_fold_consistency_ignores_idle_walk_forward_folds():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = public_ig_cost_profile(market)
+    backtest = BacktestResult(
+        net_profit=600,
+        sharpe=1.0,
+        max_drawdown=100,
+        win_rate=0.55,
+        trade_count=40,
+        exposure=0.3,
+        turnover=40,
+        train_profit=300,
+        test_profit=300,
+        gross_profit=900,
+        total_cost=300,
+        daily_pnl_sharpe=1.0,
+        sharpe_observations=140,
+        expectancy_per_trade=15,
+        average_cost_per_trade=7.5,
+        net_cost_ratio=2,
+        cost_to_gross_ratio=0.333,
+    )
+    positive_fold_a = BacktestResult(**{**backtest.__dict__, "net_profit": 80, "trade_count": 4})
+    idle_fold = BacktestResult(**{**backtest.__dict__, "net_profit": 0, "trade_count": 0})
+    positive_fold_b = BacktestResult(**{**backtest.__dict__, "net_profit": 70, "trade_count": 4})
+    negative_fold = BacktestResult(**{**backtest.__dict__, "net_profit": -20, "trade_count": 4})
+    folds = (positive_fold_a, idle_fold, positive_fold_b, negative_fold)
+
+    evidence = _evidence_profile(backtest, folds)
+    warnings = _warnings(backtest, folds, backtest, BacktestConfig(), "mean_reversion", profile)
+
+    assert evidence["fold_count"] == 4
+    assert evidence["active_fold_count"] == 3
+    assert evidence["inactive_fold_count"] == 1
+    assert evidence["positive_fold_rate"] == 0.666667
+    assert "profits_not_consistent_across_folds" not in warnings
 
 
 def test_warnings_accept_recent_ig_price_validation():

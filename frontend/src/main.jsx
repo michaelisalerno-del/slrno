@@ -1423,7 +1423,7 @@ function GuideView({ setActiveModule }) {
     ["Capital use", "Active days divided by the available history. Low use means the capital can be scheduled elsewhere when this template is flat."],
     ["Net/active day", "Net profit divided by active days, useful for comparing small-window specialists without pretending they trade all year."],
     ["OOS net", "Walk-forward out-of-sample net profit after costs."],
-    ["Fold win", "Share of walk-forward folds that made money."],
+    ["Fold win", "Share of trade-active walk-forward folds that made money. Idle folds are evidence about activity, not losing folds."],
     ["Fold share", "How much positive fold profit came from the best fold. High values mean fragility."],
     ["Gated net", "Profit after forcing the strategy flat outside allowed regimes. In target-regime refinements this is labelled Target net because the whole run is already gated."],
     ["Gated OOS", "Out-of-sample profit after the regime gate is applied. In target-regime refinements this can match the run OOS by design."],
@@ -2317,6 +2317,7 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, 
         <Metric label={gatedMetricLabel(pattern, "Gated OOS", "Target OOS")} value={formatMoney(gated.test_profit)} />
         <RegimeEvidenceMetrics pattern={pattern} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
+        <Metric label="Active folds" value={`${evidence.active_fold_count ?? 0}/${evidence.fold_count ?? 0}`} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
         <Metric label="OOS net" value={formatMoney(evidence.oos_net_profit)} />
         <Metric label="OOS trades" value={evidence.oos_trade_count ?? 0} />
@@ -2494,6 +2495,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
         <Metric label={gatedMetricLabel(pattern, "Gated OOS", "Target OOS")} value={formatMoney(gated.test_profit)} />
         <RegimeEvidenceMetrics pattern={pattern} />
         <Metric label="Fold win" value={percent(evidence.positive_fold_rate)} />
+        <Metric label="Active folds" value={`${evidence.active_fold_count ?? 0}/${evidence.fold_count ?? 0}`} />
         <Metric label="Fold share" value={percent(evidence.single_fold_profit_share)} />
         <Metric label="OOS net" value={formatMoney(evidence.oos_net_profit)} />
         <Metric label="OOS trades" value={evidence.oos_trade_count ?? 0} />
@@ -2998,27 +3000,38 @@ function evidenceProfileForSource(source = {}) {
   if (stored && typeof stored === "object") {
     return {
       fold_count: numberOrZero(stored.fold_count),
+      active_fold_count: numberOrZero(stored.active_fold_count),
+      inactive_fold_count: numberOrZero(stored.inactive_fold_count),
       positive_fold_rate: numberOrZero(stored.positive_fold_rate),
+      active_positive_fold_rate: numberOrZero(stored.active_positive_fold_rate),
       single_fold_profit_share: numberOrZero(stored.single_fold_profit_share),
       oos_net_profit: numberOrZero(stored.oos_net_profit),
       oos_trade_count: numberOrZero(stored.oos_trade_count),
       worst_fold_net_profit: numberOrZero(stored.worst_fold_net_profit),
+      worst_active_fold_net_profit: numberOrZero(stored.worst_active_fold_net_profit),
     };
   }
   const folds = arrayValue(source.audit?.fold_results).length ? source.audit.fold_results : arrayValue(source.folds);
   if (folds.length === 0) {
-    return { fold_count: 0, positive_fold_rate: 0, single_fold_profit_share: 0, oos_net_profit: 0, oos_trade_count: 0, worst_fold_net_profit: 0 };
+    return { fold_count: 0, active_fold_count: 0, inactive_fold_count: 0, positive_fold_rate: 0, active_positive_fold_rate: 0, single_fold_profit_share: 0, oos_net_profit: 0, oos_trade_count: 0, worst_fold_net_profit: 0, worst_active_fold_net_profit: 0 };
   }
   const foldNet = folds.map((fold) => numberOrZero(fold.net_profit));
+  const activeFolds = folds.filter((fold) => numberOrZero(fold.trade_count) > 0);
+  const activeFoldNet = activeFolds.map((fold) => numberOrZero(fold.net_profit));
   const positive = foldNet.filter((value) => value > 0);
   const positiveTotal = positive.reduce((total, value) => total + value, 0);
+  const activePositive = activeFoldNet.filter((value) => value > 0);
   return {
     fold_count: folds.length,
-    positive_fold_rate: positive.length / folds.length,
+    active_fold_count: activeFolds.length,
+    inactive_fold_count: Math.max(0, folds.length - activeFolds.length),
+    positive_fold_rate: activeFolds.length ? activePositive.length / activeFolds.length : 0,
+    active_positive_fold_rate: activeFolds.length ? activePositive.length / activeFolds.length : 0,
     single_fold_profit_share: positiveTotal > 0 ? Math.max(...positive) / positiveTotal : 0,
     oos_net_profit: foldNet.reduce((total, value) => total + value, 0),
     oos_trade_count: folds.reduce((total, fold) => total + numberOrZero(fold.trade_count), 0),
     worst_fold_net_profit: Math.min(...foldNet),
+    worst_active_fold_net_profit: activeFoldNet.length ? Math.min(...activeFoldNet) : 0,
   };
 }
 
