@@ -524,6 +524,31 @@ class ResearchStore:
             )
         return output
 
+    def list_regime_picks(self, run_id: int, per_regime: int = 3, limit: int = 750) -> list[dict[str, object]]:
+        trials = sorted(
+            self.list_trials(run_id, limit=limit),
+            key=lambda item: _trial_display_rank(item),
+            reverse=True,
+        )
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for trial in trials:
+            regime = _trial_regime_key(trial)
+            if not regime:
+                continue
+            picks = grouped.setdefault(regime, [])
+            if len(picks) < per_regime:
+                picks.append(_regime_pick_trial(trial))
+        return [
+            {
+                "regime": regime,
+                "label": regime.replace("_", " ").title(),
+                "trial_count": len(picks),
+                "trials": picks,
+            }
+            for regime, picks in sorted(grouped.items())
+            if picks
+        ]
+
     def _pareto_source_trials(self, run_id: int) -> list[dict[str, object]]:
         choices: list[dict[str, object]] = []
         for order_key in (
@@ -933,6 +958,75 @@ def _is_material_watchlist_lead(evaluation: CandidateEvaluation) -> bool:
         and backtest.trade_count >= 5
         and backtest.sharpe_observations > 0
         and (backtest.net_profit > 0 or backtest.test_profit > 0 or backtest.daily_pnl_sharpe >= 1.0)
+    )
+
+
+def _trial_regime_key(trial: dict[str, object]) -> str:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    dominant = pattern.get("dominant_profit_regime") if isinstance(pattern.get("dominant_profit_regime"), dict) else {}
+    return str(parameters.get("target_regime") or pattern.get("target_regime") or dominant.get("key") or "").strip()
+
+
+def _regime_pick_trial(trial: dict[str, object]) -> dict[str, object]:
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    regime_evidence = pattern.get("regime_trade_evidence") if isinstance(pattern.get("regime_trade_evidence"), dict) else {}
+    in_regime = regime_evidence.get("in_regime") if isinstance(regime_evidence.get("in_regime"), dict) else {}
+    return {
+        "id": trial.get("id"),
+        "run_id": trial.get("run_id"),
+        "strategy_name": trial.get("strategy_name"),
+        "market_id": trial.get("market_id"),
+        "promotion_tier": trial.get("promotion_tier"),
+        "robustness_score": trial.get("robustness_score"),
+        "strategy_family": trial.get("strategy_family"),
+        "style": trial.get("style"),
+        "target_regime": _trial_regime_key(trial),
+        "is_specialist": bool(parameters.get("regime_scan") or parameters.get("target_regime")),
+        "net_profit": backtest.get("net_profit"),
+        "test_profit": backtest.get("test_profit"),
+        "daily_pnl_sharpe": backtest.get("daily_pnl_sharpe"),
+        "trade_count": backtest.get("trade_count"),
+        "cost_to_gross_ratio": backtest.get("cost_to_gross_ratio"),
+        "net_cost_ratio": backtest.get("net_cost_ratio"),
+        "oos_net_profit": evidence.get("oos_net_profit"),
+        "oos_trade_count": evidence.get("oos_trade_count"),
+        "in_regime_net_profit": in_regime.get("net_profit"),
+        "in_regime_test_profit": in_regime.get("test_profit"),
+        "in_regime_test_trade_count": in_regime.get("test_trade_count"),
+        "regime_trading_days": regime_evidence.get("regime_trading_days"),
+        "regime_history_share": regime_evidence.get("regime_history_share"),
+        "regime_episodes": regime_evidence.get("regime_episodes"),
+        "regime_verdict": pattern.get("regime_verdict"),
+        "warnings": trial.get("warnings") or [],
+        "parameters": parameters,
+        "backtest": backtest,
+    }
+
+
+def _trial_display_rank(trial: dict[str, object]) -> tuple[float, ...]:
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    tier_rank = {
+        "validated_candidate": 5,
+        "paper_candidate": 4,
+        "research_candidate": 3,
+        "incubator": 2,
+        "watchlist": 1,
+    }.get(str(trial.get("promotion_tier") or ""), 0)
+    oos_trades = min(18.0, _safe_float(evidence.get("oos_trade_count")))
+    return (
+        float(tier_rank),
+        _safe_float(evidence.get("oos_net_profit")),
+        oos_trades,
+        _safe_float(trial.get("robustness_score")),
+        _safe_float(backtest.get("test_profit")),
+        _safe_float(backtest.get("net_profit")),
+        -_safe_float(backtest.get("cost_to_gross_ratio")),
     )
 
 

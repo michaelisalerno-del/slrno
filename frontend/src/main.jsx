@@ -167,7 +167,7 @@ function App() {
     risk_profile: "balanced",
     strategy_families: [],
     cost_stress_multiplier: 2.0,
-    include_regime_scans: false,
+    include_regime_scans: true,
     regime_scan_budget_per_regime: "",
     target_regime: "",
     excluded_months: [],
@@ -376,7 +376,7 @@ function App() {
     const effectiveBudget = effectiveSearchBudget(preset.id, budget, market_ids.length, manualBudget);
     const plannedTrials = effectiveBudget * market_ids.length;
     const testingCapital = optionalNumber(runConfig.account_size) ?? WORKING_ACCOUNT_SIZE;
-    const regimeScanNote = runConfig.include_regime_scans ? " plus capped regime-specialist scans" : "";
+    const regimeScanNote = runConfig.include_regime_scans ? " plus per-regime template discovery" : "";
     const targetRegimeNote = runConfig.target_regime ? `, ${regimeLabel(runConfig.target_regime)} only` : "";
     const speedNote = effectiveBudget < budget ? " (auto-capped for multi-market speed)" : "";
     setMessage(launchMessage);
@@ -1174,7 +1174,7 @@ function App() {
                       checked={researchRun.include_regime_scans}
                       onChange={(event) => setResearchRun({ ...researchRun, include_regime_scans: event.target.checked })}
                     />
-                    Thorough regime scan
+                    Build regime templates
                   </label>
                   {researchRun.include_regime_scans && (
                     <>
@@ -1395,7 +1395,7 @@ function GuideView({ setActiveModule }) {
   const workflow = [
     ["1", "Connect providers", "Use Settings for EODHD bars and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
-    ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
+    ["3", "Run a regime-template search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Build regime templates on."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, cost/gross, drawdown, capital fit, and warnings."],
     ["5", "Make it tradeable", "Use Best by market first, then click Make tradeable. The app chooses the next repair from the blockers, locks the market/family/regime, syncs IG costs when needed, and launches the repair run."],
     ["6", "Save and freeze", "Save promising repaired results to Templates, then use Freeze validate. This retests the exact rules with no parameter hunting, so the OOS period does not quietly become training data."],
@@ -1929,7 +1929,11 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
     .filter((trial) => trialScanMatchesFilter(trial, trialScanFilter))
     .filter((trial) => trialCostMatchesFilter(trial, trialCostFilter));
   const displayRankedTrials = sortTrialsForDisplay(filteredTrials);
-  const rankedTrials = trialMarketView === "market_best" ? bestTrialsByMarket(displayRankedTrials, 3) : displayRankedTrials;
+  const rankedTrials = trialMarketView === "market_best"
+    ? bestTrialsByMarket(displayRankedTrials, 3)
+    : trialMarketView === "regime_best"
+    ? bestTrialsByRegime(displayRankedTrials, 3)
+    : displayRankedTrials;
   const visibleRuns = showAllRuns ? researchRuns : researchRuns.slice(0, 18);
   const selectedRuns = researchRuns.filter((run) => selectedRunIds.includes(run.id));
   const visibleDeletableRuns = visibleRuns.filter((run) => !["created", "running"].includes(run.status));
@@ -2061,6 +2065,13 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
       )}
       {runDetail && <RegimeEvidence runDetail={runDetail} trials={trials} />}
       {runDetail && (
+        <RegimeTemplateShortlist
+          runDetail={runDetail}
+          onMakeTradeable={onMakeTradeable}
+          onSaveTemplate={onSaveTemplate}
+        />
+      )}
+      {runDetail && (
         <section className="lab-section span-2">
           <div className="label-row table-heading">
             <h3>Evidence Bundle</h3>
@@ -2148,6 +2159,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
             {[
               ["overall", "Best overall"],
               ["market_best", "Best by market"],
+              ["regime_best", "Best by regime"],
             ].map(([id, label]) => (
               <button
                 className={trialMarketView === id ? "segment active" : "segment"}
@@ -2207,7 +2219,7 @@ function RegimeEvidence({ runDetail, trials }) {
     <section className="lab-section span-2">
       <h3>Regime Evidence</h3>
       <div className="metrics four">
-        <Metric label="Regime scans" value={runDetail?.config?.include_regime_scans ? "On" : "Off"} />
+        <Metric label="Template scans" value={runDetail?.config?.include_regime_scans ? "On" : "Off"} />
         <Metric label="Specialist trials" value={specialistCount} />
         <Metric label="Eligible regimes" value={statuses.flatMap((item) => item.eligible_regimes ?? []).length} />
         <Metric label="Scan trials saved" value={statuses.reduce((total, item) => total + Number(item.regime_scan_trial_count ?? 0), 0)} />
@@ -2235,6 +2247,47 @@ function RegimeEvidence({ runDetail, trials }) {
             </div>
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onSaveTemplate }) {
+  const groups = runDetail?.regime_picks ?? [];
+  if (groups.length === 0) {
+    return null;
+  }
+  return (
+    <section className="lab-section span-2">
+      <h3>Regime Template Shortlist</h3>
+      <div className="pareto-grid">
+        {groups.map((group) => (
+          <div className="pareto-card" key={group.regime}>
+            <span className="eyebrow">{regimeLabel(group.regime)}</span>
+            <strong>{group.trials?.[0]?.market_id || runDetail.market_id || "Market"}</strong>
+            <div className="status-list compact-regime-list">
+              {(group.trials ?? []).map((trial) => (
+                <div className="status compact-status" key={trial.id}>
+                  <strong>{trial.strategy_name}</strong>
+                  <span>
+                    {tierLabel(trial.promotion_tier)} · net {formatMoney(trial.net_profit)} · OOS {formatMoney(trial.oos_net_profit ?? trial.test_profit)}
+                  </span>
+                  <small>
+                    In-regime {formatMoney(trial.in_regime_net_profit)} · {trial.regime_trading_days ?? 0}d · cost/gross {percent(trial.cost_to_gross_ratio)}
+                  </small>
+                  <div className="button-row compact-actions">
+                    <button type="button" className="secondary" onClick={() => onMakeTradeable(trial)}>
+                      <ShieldCheck size={16} /> Make tradeable
+                    </button>
+                    <button type="button" className="ghost" onClick={() => onSaveTemplate(trial)}>
+                      <Save size={16} /> Save
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
@@ -2963,6 +3016,34 @@ function bestTrialsByMarket(trials = [], perMarket = 3) {
   return [...grouped.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .flatMap(([, group]) => group);
+}
+
+function bestTrialsByRegime(trials = [], perRegime = 3) {
+  const grouped = new Map();
+  for (const trial of trials) {
+    const regime = trialRegimeKey(trial);
+    if (!regime) {
+      continue;
+    }
+    const group = grouped.get(regime) ?? [];
+    if (group.length < perRegime) {
+      group.push(trial);
+      grouped.set(regime, group);
+    }
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => regimeLabel(left).localeCompare(regimeLabel(right)))
+    .flatMap(([, group]) => group);
+}
+
+function trialRegimeKey(trial = {}) {
+  const pattern = trial.parameters?.bar_pattern_analysis ?? {};
+  return String(
+    trial.parameters?.target_regime
+      || pattern.target_regime
+      || pattern.dominant_profit_regime?.key
+      || ""
+  ).trim();
 }
 
 function runQualitySummary(trials = []) {

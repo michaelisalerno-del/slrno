@@ -73,6 +73,47 @@ def test_research_store_surfaces_weak_research_leads_as_incubator(tmp_path):
     assert "low_oos_trades" in trial["promotion_readiness"]["blockers"]
 
 
+def test_research_store_lists_top_picks_by_regime(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("NAS100", {"interval": "1h"}, status="running")
+    trend = _evaluation("trend_candidate", passed=False, promotion_tier="research_candidate", robustness_score=70)
+    range_candidate = _evaluation("range_candidate", passed=False, promotion_tier="research_candidate", robustness_score=80)
+    trend = replace(
+        trend,
+        candidate=replace(
+            trend.candidate,
+            parameters={
+                **trend.candidate.parameters,
+                "target_regime": "trend_up",
+                "stress_net_profit": 20,
+                "bar_pattern_analysis": {"target_regime": "trend_up", "regime_verdict": "regime_specific"},
+                "evidence_profile": {"oos_net_profit": 5, "oos_trade_count": 6},
+            },
+        ),
+    )
+    range_candidate = replace(
+        range_candidate,
+        candidate=replace(
+            range_candidate.candidate,
+            parameters={
+                **range_candidate.candidate.parameters,
+                "target_regime": "range_chop",
+                "stress_net_profit": 25,
+                "bar_pattern_analysis": {"target_regime": "range_chop", "regime_verdict": "regime_specific"},
+                "evidence_profile": {"oos_net_profit": 7, "oos_trade_count": 8},
+            },
+        ),
+    )
+
+    store.save_trial(run_id, trend)
+    store.save_trial(run_id, range_candidate)
+
+    picks = store.list_regime_picks(run_id)
+    assert [item["regime"] for item in picks] == ["range_chop", "trend_up"]
+    assert picks[0]["trials"][0]["strategy_name"] == "range_candidate"
+    assert picks[1]["trials"][0]["target_regime"] == "trend_up"
+
+
 def test_research_store_deletes_run_trials_and_candidates(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")

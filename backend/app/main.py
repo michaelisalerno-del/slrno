@@ -108,7 +108,7 @@ class ResearchRunPayload(BaseModel):
     strategy_families: list[str] = Field(default_factory=list)
     product_mode: str = "spread_bet"
     cost_stress_multiplier: float = 2.0
-    include_regime_scans: bool = False
+    include_regime_scans: bool = True
     regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
     target_regime: str | None = None
     excluded_months: list[str] = Field(default_factory=list)
@@ -758,6 +758,7 @@ def get_research_run(run_id: int) -> dict[str, object]:
         "trials": [_trial_with_capital(trial) for trial in research_store.list_trials(run_id, limit=25)],
         "candidates": [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(run_id, limit=24)],
         "pareto": research_store.list_pareto(run_id),
+        "regime_picks": research_store.list_regime_picks(run_id),
         "bar_snapshots": research_store.list_bar_snapshots(run_id, include_payload=False),
     }
 
