@@ -365,7 +365,7 @@ class ResearchStore:
                 """,
                 (run_id, market_id, interval, source, start, end, len(payload), digest, compressed, _now()),
             )
-        return {"market_id": market_id, "interval": interval, "bar_count": len(payload), "sha256": digest, "exact": True}
+        return {"market_id": market_id, "interval": interval, "source": source, "bar_count": len(payload), "sha256": digest, "exact": True}
 
     def list_bar_snapshots(self, run_id: int, include_payload: bool = True) -> list[dict[str, object]]:
         with self._connect() as conn:

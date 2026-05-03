@@ -171,6 +171,63 @@ def test_empty_intraday_index_falls_back_to_daily_bars(tmp_path, monkeypatch):
     assert status["fallback_bar_count"] == 260
 
 
+def test_ftse_daily_eodhd_empty_uses_fmp_daily_history(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    registry = MarketRegistry(tmp_path / "markets.sqlite3")
+    registry.upsert(MarketMapping("FTSE100", "FTSE 100", "index", "FTSE.INDX", "", True, "", "FTSE 100", "FTSE", "5min", 2.0, 1.0, 750))
+    eodhd_calls: list[tuple[str, str, str]] = []
+    fmp_calls: list[tuple[str, str, str]] = []
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", registry)
+    monkeypatch.setattr(main, "settings", SimpleNamespace(get_secret=lambda provider, _name: "fmp-token" if provider == "fmp" else ""))
+
+    class EmptyEODHDProvider:
+        cache = FakeCache()
+
+        async def historical_bars(self, symbol: str, interval: str, start_value: str, _end: str) -> list[OHLCBar]:
+            eodhd_calls.append((symbol, interval, start_value))
+            return []
+
+    class FMPDailyProvider:
+        def __init__(self, _api_key: str) -> None:
+            pass
+
+        async def historical_bars(self, symbol: str, interval: str, start_value: str, _end: str) -> list[OHLCBar]:
+            fmp_calls.append((symbol, interval, start_value))
+            start = datetime(2025, 1, 1, tzinfo=UTC)
+            return [
+                OHLCBar(symbol=symbol, timestamp=start + timedelta(days=index), open=100 + index, high=101 + index, low=99 + index, close=100 + index, volume=10)
+                for index in range(260)
+            ]
+
+    def fake_search(*args, **kwargs):
+        captured["interval"] = args[2]
+        captured["symbols"] = {bar.symbol for bar in args[0]}
+        captured["bar_count"] = len(args[0])
+        return SimpleNamespace(evaluations=[_evaluation("accepted")], regime_scan={})
+
+    monkeypatch.setattr(main, "EODHDProvider", lambda _token: EmptyEODHDProvider())
+    monkeypatch.setattr(main, "FMPProvider", FMPDailyProvider)
+    monkeypatch.setattr(main, "run_adaptive_search", fake_search)
+    payload = main.ResearchRunPayload(start="2025-01-01", end="2026-04-01", market_ids=["FTSE100"], interval="1day", search_budget=2)
+    run_id = store.create_run("FTSE100", main._research_run_config(payload, [registry.get("FTSE100")]), status="running")
+
+    asyncio.run(main._execute_research_run(run_id, payload, "token"))
+
+    assert eodhd_calls == [("FTSE.INDX", "1day", "2025-01-01")]
+    assert fmp_calls == [("^FTSE", "1day", "2025-01-01")]
+    assert captured == {"interval": "1day", "symbols": {"^FTSE"}, "bar_count": 260}
+    run = store.get_run(run_id)
+    assert run["status"] == "finished"
+    status = run["config"]["market_statuses"][0]
+    assert status["data_source_status"] == "fmp_historical_fallback"
+    assert status["fmp_symbol"] == "^FTSE"
+    assert status["eodhd_bar_count"] == 0
+    assert status["fmp_fallback_bar_count"] == 260
+    assert status["bar_snapshot"]["source"] == "fmp_historical_fallback"
+
+
 def test_empty_intraday_fallback_failure_reports_daily_requirement(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     registry = MarketRegistry(tmp_path / "markets.sqlite3")

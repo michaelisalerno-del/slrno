@@ -68,6 +68,9 @@ MULTI_MARKET_MIN_TRIALS_PER_MARKET = {
 }
 SETTINGS_PROVIDERS = ("eodhd", "fmp", "ig")
 EODHD_MONTHLY_COMMODITIES = set(EODHDProvider._MONTHLY_COMMODITIES)
+FMP_DAILY_BAR_SYMBOLS = {
+    "FTSE100": "^FTSE",
+}
 
 
 class EODHDSettings(BaseModel):
@@ -876,6 +879,8 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
     selected_markets = _selected_markets(payload.market_ids or [payload.market_id])
     effective_search_budget = _effective_search_budget(payload, len(selected_markets))
     provider = EODHDProvider(api_token)
+    fmp_api_key = settings.get_secret("fmp", "api_key")
+    fmp_provider = FMPProvider(fmp_api_key) if fmp_api_key else None
     market_statuses: list[dict[str, object]] = []
     market_failures: list[dict[str, object]] = []
     saved_trials = 0
@@ -889,6 +894,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
     for market in selected_markets:
         interval = _run_interval_for_market(payload, market)
         start = _run_start_for_market(payload, market, interval)
+        bar_source = "eodhd_primary_symbol"
         market_status: dict[str, object] = {
             "market_id": market.market_id,
             "name": market.name,
@@ -953,6 +959,41 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                     start = fallback_start
                     bars = fallback_bars
                     required_bars = fallback_required
+        if _should_try_fmp_daily_fallback(market, interval, len(bars), required_bars):
+            fallback_symbol = _fmp_daily_symbol_for_market(market)
+            fallback_interval = "1day"
+            fallback_start = _run_start_for_market(payload, market, fallback_interval)
+            market_status["fmp_symbol"] = fallback_symbol
+            if fmp_provider is None:
+                market_status["fmp_fallback_error"] = "FMP API key is not configured"
+            else:
+                try:
+                    fmp_bars = await fmp_provider.historical_bars(fallback_symbol, fallback_interval, fallback_start, payload.end)
+                except Exception as exc:
+                    market_status["fmp_fallback_error"] = _public_error(exc)
+                else:
+                    fmp_required = _minimum_bars_for_interval(market, fallback_interval)
+                    market_status["fmp_fallback_bar_count"] = len(fmp_bars)
+                    if len(fmp_bars) >= fmp_required:
+                        market_status.update(
+                            {
+                                "requested_interval": market_status.get("requested_interval", interval),
+                                "requested_start": market_status.get("requested_start", start),
+                                "interval": fallback_interval,
+                                "start": fallback_start,
+                                "data_source_status": "fmp_historical_fallback",
+                                "fallback_reason": (
+                                    f"EODHD returned {len(bars)} {interval} bars for {market.eodhd_symbol}; "
+                                    f"using {len(fmp_bars)} {fallback_interval} FMP bars from {fallback_symbol}"
+                                ),
+                                "eodhd_bar_count": len(bars),
+                            }
+                        )
+                        interval = fallback_interval
+                        start = fallback_start
+                        bars = fmp_bars
+                        required_bars = fmp_required
+                        bar_source = "fmp_historical_fallback"
         excluded_months = _normalized_excluded_months(payload.excluded_months)
         if excluded_months:
             original_bar_count = len(bars)
@@ -979,7 +1020,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             run_id,
             market.market_id,
             interval,
-            "eodhd_primary_symbol",
+            bar_source,
             start,
             payload.end,
             bars,
@@ -1269,6 +1310,18 @@ def _should_use_daily_fallback(original_count: int, original_required: int, fall
     return original_count == 0
 
 
+def _should_try_fmp_daily_fallback(market: MarketMapping, interval: str, bar_count: int, required_bars: int) -> bool:
+    if bar_count >= required_bars:
+        return False
+    if not _fmp_daily_symbol_for_market(market):
+        return False
+    return interval in INTRADAY_INTERVALS or interval in {"1day", "1d", "day", "daily"}
+
+
+def _fmp_daily_symbol_for_market(market: MarketMapping) -> str:
+    return FMP_DAILY_BAR_SYMBOLS.get(market.market_id, "")
+
+
 def _is_eodhd_monthly_commodity(market: MarketMapping) -> bool:
     if not market.eodhd_symbol.startswith("COMMODITY:"):
         return False
@@ -1346,7 +1399,7 @@ def _research_run_config(
         "product_mode": payload.product_mode,
         "research_only": True,
         "ig_validation_required": True,
-        "data_source_policy": "eodhd_primary_symbol_no_silent_proxy",
+        "data_source_policy": "eodhd_primary_symbol_with_explicit_fmp_daily_fallback",
         "market_statuses": market_statuses or [],
         "market_failures": market_failures or [],
     }

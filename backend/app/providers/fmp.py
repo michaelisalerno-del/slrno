@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from ..market_data_cache import MarketDataCache
+from .base import OHLCBar
 
 
 class FMPProviderError(RuntimeError):
@@ -14,6 +15,8 @@ class FMPProvider:
     BASE_URL = "https://financialmodelingprep.com/stable"
     ECONOMIC_CALENDAR_TTL_SECONDS = 6 * 60 * 60
     ECONOMIC_CALENDAR_CHUNK_DAYS = 90
+    HISTORICAL_PRICE_TTL_SECONDS = 180 * 24 * 60 * 60
+    _DAILY_INTERVALS = {"1day", "1d", "day", "daily"}
 
     def __init__(
         self,
@@ -60,6 +63,26 @@ class FMPProvider:
             events.extend(_calendar_rows(payload))
             cursor = chunk_end + timedelta(days=1)
         return sorted(events, key=_calendar_sort_key)
+
+    async def historical_bars(self, symbol: str, interval: str, start: str | date, end: str | date) -> list[OHLCBar]:
+        if interval not in self._DAILY_INTERVALS:
+            raise FMPProviderError("FMP historical fallback only supports daily bars")
+        start_date = _parse_date(start, "start")
+        end_date = _parse_date(end, "end")
+        if end_date < start_date:
+            raise FMPProviderError("FMP historical price end date must be on or after start date")
+        payload = await self._get_json(
+            "/historical-price-eod/full",
+            {"symbol": symbol, "from": start_date.isoformat(), "to": end_date.isoformat()},
+            timeout_seconds=30.0,
+            operation="historical daily bars",
+            use_cache=True,
+            cache_namespace="fmp_historical_price_eod",
+            ttl_seconds=self.HISTORICAL_PRICE_TTL_SECONDS,
+        )
+        rows = _historical_rows(payload)
+        bars = [bar for row in rows if (bar := _bar_from_row(symbol, row)) is not None]
+        return sorted(bars, key=lambda bar: bar.timestamp)
 
     async def _get_json(
         self,
@@ -150,3 +173,47 @@ def _calendar_rows(payload: Any) -> list[dict[str, Any]]:
 
 def _calendar_sort_key(row: dict[str, Any]) -> str:
     return str(row.get("date") or row.get("datetime") or "")
+
+
+def _historical_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("historical", "data", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _bar_from_row(symbol: str, row: dict[str, Any]) -> OHLCBar | None:
+    timestamp_value = row.get("date") or row.get("datetime") or row.get("timestamp")
+    try:
+        if isinstance(timestamp_value, (int, float)):
+            timestamp = datetime.fromtimestamp(float(timestamp_value), UTC)
+        else:
+            timestamp = datetime.combine(date.fromisoformat(str(timestamp_value)[:10]), time.min, tzinfo=UTC)
+    except (TypeError, ValueError):
+        return None
+    open_price = _optional_float(row.get("open"))
+    high_price = _optional_float(row.get("high"))
+    low_price = _optional_float(row.get("low"))
+    close_price = _optional_float(row.get("close") or row.get("adjClose"))
+    if open_price is None or high_price is None or low_price is None or close_price is None:
+        return None
+    return OHLCBar(
+        symbol=symbol,
+        timestamp=timestamp,
+        open=open_price,
+        high=high_price,
+        low=low_price,
+        close=close_price,
+        volume=_optional_float(row.get("volume")) or 0.0,
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
