@@ -114,6 +114,7 @@ class ResearchRunPayload(BaseModel):
     excluded_months: list[str] = Field(default_factory=list)
     repair_mode: str = "standard"
     account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    source_template: dict[str, object] = Field(default_factory=dict)
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -640,6 +641,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         target_regime=payload.target_regime,
                         repair_mode=payload.repair_mode,
                         account_size=payload.account_size,
+                        source_template=payload.source_template,
                     ),
                 )
                 market_evaluations = list(result.evaluations)
@@ -961,12 +963,53 @@ def _research_run_config(
         "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
         "repair_mode": payload.repair_mode,
         "account_size": payload.account_size,
+        "source_template": _compact_source_template(payload.source_template),
         "product_mode": payload.product_mode,
         "research_only": True,
         "ig_validation_required": True,
         "data_source_policy": "eodhd_primary_symbol_no_silent_proxy",
         "market_statuses": market_statuses or [],
         "market_failures": market_failures or [],
+    }
+
+
+def _compact_source_template(source_template: dict[str, object]) -> dict[str, object]:
+    if not isinstance(source_template, dict) or not source_template:
+        return {}
+    parameters = source_template.get("parameters") if isinstance(source_template.get("parameters"), dict) else {}
+    return {
+        "name": str(source_template.get("name") or ""),
+        "source_id": source_template.get("source_id"),
+        "market_id": str(source_template.get("market_id") or parameters.get("market_id") or ""),
+        "family": str(source_template.get("family") or parameters.get("family") or ""),
+        "style": str(source_template.get("style") or parameters.get("style") or ""),
+        "interval": str(source_template.get("interval") or parameters.get("timeframe") or ""),
+        "target_regime": str(source_template.get("target_regime") or parameters.get("target_regime") or ""),
+        "parameters": {
+            str(key): value
+            for key, value in parameters.items()
+            if key
+            in {
+                "confidence_quantile",
+                "direction",
+                "false_breakout_filter",
+                "lookback",
+                "max_hold_bars",
+                "min_hold_bars",
+                "min_trade_spacing",
+                "month_end_window",
+                "month_start_window",
+                "position_size",
+                "previous_day_filter",
+                "regime_filter",
+                "stop_loss_bps",
+                "take_profit_bps",
+                "threshold_bps",
+                "volatility_multiplier",
+                "weekday",
+                "z_threshold",
+            }
+        },
     }
 
 

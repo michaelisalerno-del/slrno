@@ -35,6 +35,26 @@ REGIME_SCAN_PRESET_BUDGETS = {
 }
 REGIME_SCAN_HARD_CAP = 96
 MAX_WALK_FORWARD_FOLDS = 36
+FROZEN_PARAMETER_KEYS = {
+    "confidence_quantile",
+    "direction",
+    "false_breakout_filter",
+    "lookback",
+    "max_hold_bars",
+    "min_hold_bars",
+    "min_trade_spacing",
+    "month_end_window",
+    "month_start_window",
+    "position_size",
+    "previous_day_filter",
+    "regime_filter",
+    "stop_loss_bps",
+    "take_profit_bps",
+    "threshold_bps",
+    "volatility_multiplier",
+    "weekday",
+    "z_threshold",
+}
 
 STYLE_FAMILIES = {
     "find_anything_robust": (
@@ -86,6 +106,7 @@ class AdaptiveSearchConfig:
     target_regime: str | None = None
     repair_mode: str = "standard"
     account_size: float = WORKING_ACCOUNT_SIZE_GBP
+    source_template: dict[str, object] = field(default_factory=dict)
     seed: int = 7
 
 
@@ -111,10 +132,17 @@ def run_adaptive_search(
     config = config or AdaptiveSearchConfig()
     if len(bars) < 40:
         raise ValueError("adaptive search needs at least 40 bars")
+    frozen_template = _source_template(config.source_template)
+    frozen_validation = _frozen_validation_mode(config.repair_mode, frozen_template)
     budget = config.search_budget or SEARCH_PRESETS.get(config.preset, SEARCH_PRESETS["balanced"])
     budget = max(6, min(500, budget))
     account_size = _account_size(config.account_size)
     families = config.strategy_families or STYLE_FAMILIES.get(config.trading_style, STYLE_FAMILIES["find_anything_robust"])
+    if frozen_validation:
+        frozen_family = str(frozen_template.get("family") or "").strip()
+        if frozen_family:
+            families = (frozen_family,)
+        budget = 1
     rng = Random(_stable_seed(market_id, timeframe, config.seed, config.trading_style))
     labels = triple_barrier_labels(bars, TripleBarrierConfig())
     backtest_base = backtest_config_from_profile(
@@ -126,12 +154,16 @@ def run_adaptive_search(
     evaluations: list[CandidateEvaluation] = []
     market_regime, regime_by_date = market_regime_context(bars)
     eligible_regimes = eligible_specialist_regimes(bars)
-    target_regime = _target_regime(config.target_regime)
+    target_regime = _target_regime(config.target_regime or frozen_template.get("target_regime"))
     reference_price = _latest_reference_price(bars)
 
     for trial_index in range(budget):
         family = families[trial_index % len(families)]
-        parameters = _sample_parameters(rng, family, config.risk_profile, trial_index, config.repair_mode, target_regime)
+        parameters = (
+            _frozen_parameters(frozen_template, family, config.risk_profile, target_regime)
+            if frozen_validation
+            else _sample_parameters(rng, family, config.risk_profile, trial_index, config.repair_mode, target_regime)
+        )
         raw_signals = _generate_signals(bars, family, parameters)
         signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}, regime_by_date=regime_by_date) if target_regime else raw_signals
         backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
@@ -186,12 +218,16 @@ def run_adaptive_search(
             "evidence_profile": evidence_profile,
             "bar_pattern_analysis": pattern_analysis,
         }
+        if frozen_template:
+            parameters["source_template"] = _source_template_audit(frozen_template)
         if target_regime:
             parameters["target_regime"] = target_regime
             parameters["regime_targeted_refine"] = True
         candidate = ProbabilityCandidate(
-            name=f"{config.trading_style}_{target_regime}_{family}_{trial_index + 1}" if target_regime else f"{config.trading_style}_{family}_{trial_index + 1}",
-            module_stack=("adaptive_ig_v1", config.trading_style, "regime_targeted", target_regime, family)
+            name=_candidate_name(config.trading_style, family, trial_index, target_regime, frozen_template if frozen_validation else {}),
+            module_stack=("adaptive_ig_v1", config.trading_style, "frozen_validation", target_regime, family)
+            if frozen_validation
+            else ("adaptive_ig_v1", config.trading_style, "regime_targeted", target_regime, family)
             if target_regime
             else ("adaptive_ig_v1", config.trading_style, family),
             parameters=parameters,
@@ -349,6 +385,88 @@ def _regime_scan_budget(config: AdaptiveSearchConfig) -> int:
     if requested is None:
         return preset_budget
     return max(1, min(preset_budget, int(requested)))
+
+
+def _source_template(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return {}
+    parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    return {
+        "name": str(payload.get("name") or ""),
+        "source_id": payload.get("source_id"),
+        "market_id": str(payload.get("market_id") or parameters.get("market_id") or ""),
+        "family": str(payload.get("family") or parameters.get("family") or ""),
+        "style": str(payload.get("style") or parameters.get("style") or ""),
+        "interval": str(payload.get("interval") or parameters.get("timeframe") or ""),
+        "target_regime": str(payload.get("target_regime") or parameters.get("target_regime") or ""),
+        "parameters": {str(key): value for key, value in parameters.items() if str(key) in FROZEN_PARAMETER_KEYS},
+    }
+
+
+def _source_template_audit(template: dict[str, object]) -> dict[str, object]:
+    return {
+        "name": template.get("name"),
+        "source_id": template.get("source_id"),
+        "market_id": template.get("market_id"),
+        "family": template.get("family"),
+        "interval": template.get("interval"),
+        "target_regime": template.get("target_regime"),
+        "frozen_parameters": dict(template.get("parameters") or {}),
+    }
+
+
+def _frozen_validation_mode(repair_mode: str, source_template: dict[str, object]) -> bool:
+    return repair_mode == "frozen_validation" and bool(source_template.get("parameters"))
+
+
+def _frozen_parameters(
+    source_template: dict[str, object],
+    family: str,
+    risk_profile: str,
+    target_regime: str | None,
+) -> dict[str, float | int | str]:
+    fallback = _sample_parameters(Random(0), family, risk_profile, 0, "standard", target_regime)
+    raw = source_template.get("parameters") if isinstance(source_template.get("parameters"), dict) else {}
+    parameters = dict(fallback)
+    for key in FROZEN_PARAMETER_KEYS:
+        if key in raw:
+            parameters[key] = _coerce_frozen_parameter(key, raw[key], fallback.get(key))
+    parameters["repair_profile"] = "frozen_template_validation"
+    parameters["frozen_template_validation"] = True
+    if source_template.get("name"):
+        parameters["frozen_template_name"] = str(source_template["name"])
+    if source_template.get("source_id") is not None:
+        parameters["frozen_template_source_id"] = str(source_template["source_id"])
+    return parameters
+
+
+def _coerce_frozen_parameter(key: str, value: object, fallback: object) -> float | int | str:
+    integer_keys = {"false_breakout_filter", "lookback", "max_hold_bars", "min_hold_bars", "min_trade_spacing", "month_end_window", "month_start_window", "weekday"}
+    float_keys = {"confidence_quantile", "position_size", "stop_loss_bps", "take_profit_bps", "threshold_bps", "volatility_multiplier", "z_threshold"}
+    if key in integer_keys:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return int(float(fallback or 0))
+    if key in float_keys:
+        try:
+            return round(float(value), 6)
+        except (TypeError, ValueError):
+            return round(float(fallback or 0.0), 6)
+    return str(value if value is not None else fallback or "")
+
+
+def _candidate_name(
+    trading_style: str,
+    family: str,
+    trial_index: int,
+    target_regime: str | None,
+    frozen_template: dict[str, object],
+) -> str:
+    if frozen_template:
+        base = str(frozen_template.get("name") or f"{trading_style}_{family}").strip()
+        return f"frozen_validate_{base}"
+    return f"{trading_style}_{target_regime}_{family}_{trial_index + 1}" if target_regime else f"{trading_style}_{family}_{trial_index + 1}"
 
 
 def _target_regime(value: str | None) -> str | None:
@@ -788,6 +906,10 @@ def _annotate_evaluations(
                 "objective": config.objective,
                 "risk_profile": config.risk_profile,
                 "repair_mode": config.repair_mode,
+                "frozen_validation": bool(evaluation.candidate.parameters.get("frozen_template_validation")),
+                "source_template_name": (evaluation.candidate.parameters.get("source_template") or {}).get("name")
+                if isinstance(evaluation.candidate.parameters.get("source_template"), dict)
+                else None,
                 "regime_scan_enabled": config.include_regime_scans,
                 "regime_scan": bool(evaluation.candidate.parameters.get("regime_scan")),
                 "target_regime": evaluation.candidate.parameters.get("target_regime"),

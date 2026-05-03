@@ -281,6 +281,61 @@ def test_capital_fit_repair_samples_smaller_risk_parameters():
     assert parameters["stop_loss_bps"] <= 27.5
 
 
+def test_frozen_validation_uses_source_template_without_parameter_search():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    source_parameters = {
+        "lookback": 12,
+        "threshold_bps": 25,
+        "z_threshold": 0.8,
+        "volatility_multiplier": 1.5,
+        "stop_loss_bps": 50,
+        "take_profit_bps": 180,
+        "max_hold_bars": 72,
+        "min_hold_bars": 2,
+        "min_trade_spacing": 8,
+        "confidence_quantile": 1.0,
+        "regime_filter": "any",
+        "false_breakout_filter": 0,
+        "position_size": 1.0,
+        "direction": "long_only",
+    }
+
+    result = run_adaptive_search(
+        _trend_bars(180),
+        "TEST",
+        "1day",
+        profile,
+        AdaptiveSearchConfig(
+            preset="deep",
+            search_budget=120,
+            trading_style="find_anything_robust",
+            strategy_families=("intraday_trend",),
+            repair_mode="frozen_validation",
+            source_template={
+                "name": "lead_template",
+                "source_id": 123,
+                "market_id": "TEST",
+                "family": "intraday_trend",
+                "interval": "1day",
+                "parameters": source_parameters,
+            },
+        ),
+    )
+
+    assert len(result.evaluations) == 1
+    parameters = result.evaluations[0].candidate.parameters
+    assert result.evaluations[0].candidate.name == "frozen_validate_lead_template"
+    assert parameters["repair_profile"] == "frozen_template_validation"
+    assert parameters["frozen_template_validation"] is True
+    assert parameters["lookback"] == 12
+    assert parameters["threshold_bps"] == 25
+    assert parameters["take_profit_bps"] == 180
+    assert parameters["direction"] == "long_only"
+    assert parameters["source_template"]["source_id"] == 123
+    assert parameters["search_audit"]["frozen_validation"] is True
+
+
 def test_negative_total_net_does_not_promote_to_research_candidate():
     market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
     profile = public_ig_cost_profile(market)
