@@ -25,11 +25,14 @@ def analyze_calendar_strategy_patterns(
         return _unavailable_calendar_analysis(str(context.get("reason") or "Calendar context unavailable"))
 
     event_dates = _event_dates(context)
+    coverage = _coverage_payload(context)
+    coverage_warnings = _coverage_warnings(context)
     if not event_dates:
         return {
             "schema": "calendar_context_analysis_v1",
             "available": True,
             "source": context.get("source") or "market_context",
+            **coverage,
             "calendar_risk": context.get("calendar_risk") or "clear",
             "major_event_count": int(float(context.get("major_event_count") or 0)),
             "high_impact_count": int(float(context.get("high_impact_count") or 0)),
@@ -40,7 +43,7 @@ def analyze_calendar_strategy_patterns(
             "normal_day_summary": _empty_bucket(),
             "policy_backtests": [_policy_payload("baseline", backtest)],
             "recommended_policy": "none",
-            "warnings": [],
+            "warnings": coverage_warnings,
         }
 
     event_window_dates = _expand_dates(event_dates, days_before=1, days_after=1)
@@ -60,10 +63,12 @@ def analyze_calendar_strategy_patterns(
         event_dates,
         strategy_family,
     )
+    warnings = sorted(set(warnings + coverage_warnings))
     return {
         "schema": "calendar_context_analysis_v1",
         "available": True,
         "source": context.get("source") or "market_context",
+        **coverage,
         "calendar_risk": context.get("calendar_risk") or "unknown",
         "major_event_count": int(float(context.get("major_event_count") or 0)),
         "high_impact_count": int(float(context.get("high_impact_count") or 0)),
@@ -137,6 +142,23 @@ def _recommended_policy(baseline: BacktestResult, avoid_event: BacktestResult, a
     if avoid_window.net_profit > 0 and avoid_window.max_drawdown < baseline.max_drawdown * 0.8:
         return "reduce_or_avoid_event_window"
     return "none"
+
+
+def _coverage_payload(context: dict[str, object]) -> dict[str, object]:
+    return {
+        "coverage_status": context.get("coverage_status") or "full",
+        "requested_start": context.get("requested_start") or context.get("start"),
+        "requested_end": context.get("requested_end") or context.get("end"),
+        "coverage_start": context.get("coverage_start") or context.get("start"),
+        "coverage_end": context.get("coverage_end") or context.get("end"),
+    }
+
+
+def _coverage_warnings(context: dict[str, object]) -> list[str]:
+    completeness = context.get("data_completeness") if isinstance(context.get("data_completeness"), dict) else {}
+    if context.get("coverage_status") == "partial_recent" or completeness.get("events_exact_for_full_range") is False:
+        return ["calendar_history_partial"]
+    return []
 
 
 def _event_dates(context: dict[str, object]) -> set[date]:

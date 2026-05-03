@@ -96,6 +96,45 @@ def test_market_context_summary_fetches_fmp_calendar_without_exposing_key(tmp_pa
     assert "starter-secret" not in str(result)
 
 
+def test_market_context_summary_falls_back_to_recent_calendar_when_fmp_blocks_old_history(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("fmp", "api_key", "starter-secret")
+    calls: list[tuple[str, str]] = []
+
+    class FakeFMPProvider:
+        def __init__(self, api_key: str) -> None:
+            assert api_key == "starter-secret"
+
+        async def economic_calendar(self, start: str, end: str) -> list[dict[str, object]]:
+            calls.append((start, end))
+            if start == "2020-01-01":
+                raise RuntimeError("FMP economic calendar failed with HTTP 402")
+            assert start == "2026-01-01"
+            assert end == "2026-04-01"
+            return [
+                {
+                    "date": "2026-03-18 18:00:00",
+                    "country": "US",
+                    "currency": "USD",
+                    "event": "FOMC Interest Rate Decision",
+                    "impact": "High",
+                }
+            ]
+
+    monkeypatch.setattr(main, "settings", store)
+    monkeypatch.setattr(main, "FMPProvider", FakeFMPProvider)
+
+    result = asyncio.run(main._market_context_summary_for_range("2020-01-01", "2026-04-01", market_id="XAUUSD"))
+
+    assert calls == [("2020-01-01", "2026-04-01"), ("2026-01-01", "2026-04-01")]
+    assert result["available"] is True
+    assert result["coverage_status"] == "partial_recent"
+    assert result["requested_start"] == "2020-01-01"
+    assert result["coverage_start"] == "2026-01-01"
+    assert result["data_completeness"]["events_exact_for_full_range"] is False
+    assert result["blackout_dates"] == ["2026-03-18"]
+
+
 def test_market_context_stack_includes_calendar_vix_and_macro_context(tmp_path, monkeypatch):
     store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
     store.set_secret("fmp", "api_key", "starter-secret")

@@ -41,6 +41,32 @@ def test_gate_signals_away_from_dates_forces_flat_during_calendar_risk():
     assert gated == [0, 1, 0]
 
 
+def test_calendar_diagnostics_marks_partial_calendar_history():
+    bars = _bars([100, 101, 102])
+    signals = [1, 1, 1]
+    config = BacktestConfig(spread_bps=0, slippage_bps=0, overnight_admin_fee_annual=0)
+    backtest = run_vector_backtest(bars, signals, config)
+    context = {
+        "available": True,
+        "source": "fmp_economic_calendar",
+        "calendar_risk": "clear",
+        "coverage_status": "partial_recent",
+        "requested_start": "2020-01-01",
+        "requested_end": "2026-04-01",
+        "coverage_start": "2026-01-01",
+        "coverage_end": "2026-04-01",
+        "blackout_dates": [],
+        "events": [],
+        "data_completeness": {"events_exact_for_full_range": False},
+    }
+
+    analysis = analyze_calendar_strategy_patterns(bars, signals, config, backtest, context, strategy_family="breakout")
+
+    assert analysis["coverage_status"] == "partial_recent"
+    assert analysis["coverage_start"] == "2026-01-01"
+    assert "calendar_history_partial" in analysis["warnings"]
+
+
 def _bars(closes: list[float]) -> list[OHLCBar]:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     return [

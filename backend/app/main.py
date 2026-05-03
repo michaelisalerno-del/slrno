@@ -203,8 +203,92 @@ async def _market_context_summary_for_range(start: str, end: str, market_id: str
         events = await provider.economic_calendar(start, end)
     except Exception as exc:
         detail = _public_error(exc)
+        fallback = await _partial_fmp_calendar_summary(provider, start, end, market_id, limit, detail)
+        if fallback is not None:
+            return fallback
         return _market_context_unavailable(detail, start, end, market_id)
-    return summarize_economic_calendar(events, start, end, market_id=market_id, limit=limit)
+    summary = summarize_economic_calendar(events, start, end, market_id=market_id, limit=limit)
+    return _calendar_coverage(summary, start, end, start, end, "full")
+
+
+async def _partial_fmp_calendar_summary(
+    provider: FMPProvider,
+    start: str,
+    end: str,
+    market_id: str,
+    limit: int,
+    reason: str,
+) -> dict[str, object] | None:
+    if not _is_fmp_calendar_plan_limit(reason):
+        return None
+    requested_start = _parse_iso_date(start)
+    requested_end = _parse_iso_date(end)
+    if requested_start is None or requested_end is None:
+        return None
+    fallback_start = max(date(requested_end.year, 1, 1), requested_start)
+    if fallback_start <= requested_start or fallback_start > requested_end:
+        return None
+    try:
+        events = await provider.economic_calendar(fallback_start.isoformat(), requested_end.isoformat())
+    except Exception:
+        return None
+    summary = summarize_economic_calendar(events, fallback_start.isoformat(), requested_end.isoformat(), market_id=market_id, limit=limit)
+    summary = _calendar_coverage(
+        summary,
+        start,
+        end,
+        fallback_start.isoformat(),
+        requested_end.isoformat(),
+        "partial_recent",
+    )
+    summary["reason"] = "FMP plan only allows recent calendar history; using supported recent calendar window."
+    completeness = summary.get("data_completeness") if isinstance(summary.get("data_completeness"), dict) else {}
+    summary["data_completeness"] = {
+        **completeness,
+        "partial_reason": reason,
+    }
+    return summary
+
+
+def _calendar_coverage(
+    summary: dict[str, object],
+    requested_start: str,
+    requested_end: str,
+    coverage_start: str,
+    coverage_end: str,
+    status: str,
+) -> dict[str, object]:
+    completeness = summary.get("data_completeness") if isinstance(summary.get("data_completeness"), dict) else {}
+    summary.update(
+        {
+            "requested_start": requested_start,
+            "requested_end": requested_end,
+            "coverage_start": coverage_start,
+            "coverage_end": coverage_end,
+            "coverage_status": status,
+        }
+    )
+    summary["data_completeness"] = {
+        **completeness,
+        "events_exact_for_full_range": status == "full",
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+        "coverage_start": coverage_start,
+        "coverage_end": coverage_end,
+    }
+    return summary
+
+
+def _is_fmp_calendar_plan_limit(detail: str) -> bool:
+    normalized = detail.lower()
+    return "http 402" in normalized or "not available under your current subscription" in normalized or "premium query parameter" in normalized
+
+
+def _parse_iso_date(value: object) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
 
 
 def _market_context_unavailable(reason: str, start: str, end: str, market_id: str = "") -> dict[str, object]:
