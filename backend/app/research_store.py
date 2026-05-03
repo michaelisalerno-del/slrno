@@ -213,6 +213,20 @@ class ResearchStore:
             conn.execute("DELETE FROM research_runs WHERE id = ?", (run_id,))
         return {"run_id": run_id, "deleted_trials": trial_count, "deleted_candidates": candidate_count}
 
+    def run_has_move_forward_candidate(self, run_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM candidates
+                WHERE run_id = ?
+                  AND promotion_tier IN ('paper_candidate', 'validated_candidate')
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return row is not None
+
     def archive_run(self, run_id: int) -> dict[str, int] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT id FROM research_runs WHERE id = ?", (run_id,)).fetchone()

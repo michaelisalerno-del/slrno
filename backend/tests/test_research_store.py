@@ -135,6 +135,16 @@ def test_research_store_deletes_run_trials_and_candidates(tmp_path):
     assert store.delete_run(999_999) is None
 
 
+def test_research_store_detects_move_forward_candidates_before_delete(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("XAUUSD", {"interval": "1day"}, status="finished")
+    paper = _evaluation("paper", passed=True)
+
+    store.save_candidate(run_id, "XAUUSD", paper)
+
+    assert store.run_has_move_forward_candidate(run_id) is True
+
+
 def test_research_store_archives_runs_without_deleting_evidence(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")

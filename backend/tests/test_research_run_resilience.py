@@ -289,6 +289,20 @@ def test_delete_research_run_endpoint_removes_finished_run_and_blocks_running(tm
     assert exc_info.value.status_code == 409
 
 
+def test_delete_research_run_endpoint_blocks_paper_candidate_evidence(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    monkeypatch.setattr(main, "research_store", store)
+    run_id = store.create_run("XAUUSD", {"interval": "1day"}, status="finished")
+    store.save_candidate(run_id, "XAUUSD", _paper_evaluation("paper"))
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        main.delete_research_run(run_id)
+
+    assert exc_info.value.status_code == 409
+    assert "Archive" in str(exc_info.value.detail)
+    assert store.get_run(run_id) is not None
+
+
 class FakeCache:
     def prune_expired(self) -> int:
         return 0
@@ -330,6 +344,35 @@ def _evaluation(name: str) -> CandidateEvaluation:
         candidate=ProbabilityCandidate(name, ("fixture",), {"family": "fixture"}, [0.1, 0.9]),
         metrics=ClassificationMetrics(1.0, 1.0, 0.01, 0.1, 1.0, 0.5, 2),
         backtest=BacktestResult(100, 1.0, 10, 0.6, 20, 0.3, 2, 60, 40),
+        fold_results=(BacktestResult(10, 0.8, 1, 0.6, 5, 0.2, 1, 6, 4),),
+        robustness_score=75.0,
+        passed=True,
+        warnings=(),
+    )
+
+
+def _paper_evaluation(name: str) -> CandidateEvaluation:
+    return CandidateEvaluation(
+        candidate=ProbabilityCandidate(name, ("fixture",), {"family": "fixture"}, [0.1, 0.9]),
+        metrics=ClassificationMetrics(1.0, 1.0, 0.01, 0.1, 1.0, 0.5, 2),
+        backtest=BacktestResult(
+            100,
+            1.0,
+            10,
+            0.6,
+            20,
+            0.3,
+            2,
+            60,
+            40,
+            gross_profit=150,
+            total_cost=50,
+            daily_pnl_sharpe=1.0,
+            sharpe_observations=140,
+            estimated_spread_bps=2.0,
+            estimated_slippage_bps=1.0,
+            cost_confidence="ig_live_epic_cost_profile",
+        ),
         fold_results=(BacktestResult(10, 0.8, 1, 0.6, 5, 0.2, 1, 6, 4),),
         robustness_score=75.0,
         passed=True,

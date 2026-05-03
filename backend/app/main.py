@@ -784,6 +784,8 @@ def delete_research_run(run_id: int) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="Research run not found")
     if run["status"] in {"created", "running"}:
         raise HTTPException(status_code=409, detail="Running research runs cannot be deleted")
+    if research_store.run_has_move_forward_candidate(run_id):
+        raise HTTPException(status_code=409, detail="Paper-ready runs cannot be deleted. Archive them to keep the evidence bundle.")
     result = research_store.delete_run(run_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Research run not found")
