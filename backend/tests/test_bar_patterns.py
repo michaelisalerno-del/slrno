@@ -58,6 +58,20 @@ def test_strategy_pattern_analysis_reports_target_regime_trade_evidence():
     assert evidence["full_history_gated"]["net_profit"] == analysis["regime_gated_backtest"]["net_profit"]
 
 
+def test_strategy_pattern_analysis_does_not_mark_negative_target_regime_tradeable():
+    bars = _selloff_rebound_bars()
+    signals = [0] * len(bars)
+    signals[8] = -1
+    config = BacktestConfig(spread_bps=0, slippage_bps=0, fx_conversion_bps=0, overnight_admin_fee_annual=0)
+    backtest = run_vector_backtest(bars, signals, config)
+
+    analysis = analyze_strategy_patterns(bars, signals, config, backtest, target_regime="rebound_after_selloff")
+
+    assert backtest.net_profit < 0
+    assert "regime_gated_backtest_negative" in analysis["warnings"]
+    assert analysis["regime_verdict"] == "headline_only"
+
+
 def test_strategy_pattern_analysis_marks_negative_gated_oos_as_headline_only():
     bars = _selloff_rebound_bars()
     signals = [0] * len(bars)

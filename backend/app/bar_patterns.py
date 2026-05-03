@@ -480,9 +480,13 @@ def _pattern_warnings(
     gated_backtest: dict[str, object],
     target_regime: str | None,
 ) -> list[str]:
-    if backtest.net_profit <= 0.0:
-        return []
     warnings: list[str] = []
+    if _number(gated_backtest.get("net_profit")) <= 0.0:
+        warnings.append("regime_gated_backtest_negative")
+    if _number(gated_backtest.get("test_profit")) <= 0.0:
+        warnings.append("regime_gated_oos_negative")
+    if backtest.net_profit <= 0.0:
+        return list(dict.fromkeys(warnings))
     dominant_month = _dominant_positive_bucket(monthly_summary)
     dominant_regime = _dominant_positive_bucket(regime_summary)
     if float(dominant_month.get("positive_profit_share") or 0.0) >= 0.55:
@@ -499,10 +503,6 @@ def _pattern_warnings(
         warnings.append("shock_regime_dependency")
     if _top_trade_share([trade for trade in trades if _number(trade.get("net_profit")) > 0.0]) >= 0.60 and len(trades) >= 5:
         warnings.append("best_trades_dominate")
-    if _number(gated_backtest.get("net_profit")) <= 0.0:
-        warnings.append("regime_gated_backtest_negative")
-    if _number(gated_backtest.get("test_profit")) <= 0.0:
-        warnings.append("regime_gated_oos_negative")
     target_row = next((row for row in regime_summary if str(row.get("key")) == str(target_regime)), None) if target_regime else None
     if target_row is not None and int(target_row.get("test_transitions") or 0) < 8:
         warnings.append("target_regime_low_oos_trades")
