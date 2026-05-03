@@ -1439,7 +1439,7 @@ function GuideView({ setActiveModule }) {
     ["Weak OOS evidence", "Use Evidence first or Longer history. Headline net is not enough if OOS is weak."],
     ["Missing IG validation", "Use Make tradeable or Sync costs. The app refreshes spread, slippage, margin, and minimum stake before rerunning."],
     ["Capital fit blocked", "Use Capital fit. It reruns the same market and family with conservative sizing, smaller stops, and ranking weighted toward the selected account size."],
-    ["Multiple-testing haircut", "Use Evidence first for this template. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
+    ["Multiple-testing haircut", "Make tradeable runs Freeze validate when exact parameters are available. If not, use Evidence first. Use Find similar elsewhere only to create independent leads, not to upgrade the original score."],
     ["Costs overwhelm edge", "Use Higher costs. If the edge disappears, reject or redesign it."],
     ["Template ready for library", "Use Freeze validate before paper/demo. It keeps the exact parameters, target regime, market, and timeframe unchanged."],
   ];
@@ -3127,6 +3127,10 @@ function templateSpecificRegime(template) {
   return String(template?.target_regime || template?.parameters?.target_regime || template?.pattern?.target_regime || "").trim();
 }
 
+function hasFrozenTemplateParameters(template) {
+  return Object.keys(frozenTemplatePayload(template).parameters ?? {}).length > 0;
+}
+
 function templateSourceIds(source = {}) {
   const numericId = Number(source.id);
   const candidateId = source.audit && numericId > 0 ? numericId : null;
@@ -3192,13 +3196,30 @@ function repairActionsForTemplate(template) {
   const dominantMonthShare = Number(pattern.dominant_profit_month?.positive_profit_share ?? 0);
   const dominantRegimeShare = Number(pattern.dominant_profit_regime?.positive_profit_share ?? 0);
   const verdict = pattern.regime_verdict;
+  const targetRegime = regimeRefineTarget(template);
+  const canFreezeValidate = hasFrozenTemplateParameters(template);
+  const hasAny = (...codes) => codes.some((code) => warnings.has(code));
+  const hardRegimeWarning =
+    hasAny(
+      "headline_sharpe_not_regime_robust",
+      "regime_gated_backtest_negative",
+      "regime_gated_oos_negative",
+      "insufficient_regime_sample",
+      "fails_normal_volatility_regime",
+      "shock_regime_dependency",
+    ) ||
+    ["headline_only", "thin_regime_sample"].includes(verdict);
+  const regimeIdentity =
+    hasAny("profit_concentrated_single_regime", "high_volatility_only_edge") ||
+    dominantRegimeShare >= 0.5 ||
+    verdict === "regime_specific";
+  const needsRegimeRepair = hardRegimeWarning || (regimeIdentity && !targetRegime);
   const actions = [];
   const add = (action) => {
     if (!actions.some((item) => item.id === action.id)) {
       actions.push(action);
     }
   };
-  const hasAny = (...codes) => codes.some((code) => warnings.has(code));
 
   if (hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage")) {
     add({
@@ -3242,20 +3263,7 @@ function repairActionsForTemplate(template) {
       primary: actions.length === 0,
     });
   }
-  if (
-    hasAny(
-      "profit_concentrated_single_regime",
-      "headline_sharpe_not_regime_robust",
-      "regime_gated_backtest_negative",
-      "regime_gated_oos_negative",
-      "insufficient_regime_sample",
-      "high_volatility_only_edge",
-      "fails_normal_volatility_regime",
-      "shock_regime_dependency",
-    ) ||
-    dominantRegimeShare >= 0.5 ||
-    ["headline_only", "regime_specific", "thin_regime_sample"].includes(verdict)
-  ) {
+  if (needsRegimeRepair) {
     add({
       id: "regime-repair",
       preset: "regime_scan",
@@ -3277,7 +3285,17 @@ function repairActionsForTemplate(template) {
       primary: actions.length === 0,
     });
   }
-  if (hasAny("multiple_testing_haircut", "isolated_parameter_peak")) {
+  if (hasAny("multiple_testing_haircut") && canFreezeValidate) {
+    add({
+      id: "freeze-validation",
+      preset: "frozen_validation",
+      title: "Freeze validation required",
+      detail: "Retest the exact market, regime, timeframe, and parameters with no new search. This is the direct way to clear multiple-testing bias.",
+      button: "Freeze validate",
+      primary: actions.length === 0,
+    });
+  }
+  if (hasAny("isolated_parameter_peak") || (hasAny("multiple_testing_haircut") && !canFreezeValidate)) {
     add({
       id: "evidence-first",
       preset: "evidence_first",
@@ -3287,7 +3305,7 @@ function repairActionsForTemplate(template) {
       primary: actions.length === 0,
     });
   }
-  if (hasAny("known_edge_needs_cross_market_validation", "multiple_testing_haircut")) {
+  if (hasAny("known_edge_needs_cross_market_validation")) {
     add({
       id: "scan-bias",
       preset: "cross_market",
@@ -3348,6 +3366,16 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   };
   const hasAny = (...codes) => codes.some((code) => warnings.has(code));
   const tooFewTrades = hasAny("too_few_trades", "high_sharpe_low_trade_count", "low_oos_trades", "target_regime_low_oos_trades", "calendar_effect_needs_longer_history");
+  const hardRegimeRepair =
+    hasAny(
+      "headline_sharpe_not_regime_robust",
+      "regime_gated_backtest_negative",
+      "regime_gated_oos_negative",
+      "insufficient_regime_sample",
+      "fails_normal_volatility_regime",
+      "shock_regime_dependency",
+    ) ||
+    ["headline_only", "thin_regime_sample"].includes(verdict);
   const regimeDependent =
     hasAny(
       "profit_concentrated_single_regime",
@@ -3364,12 +3392,37 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const monthDependent = hasAny("profit_concentrated_single_month", "best_trades_dominate") || dominantMonthShare >= 0.45;
   const fragileFolds = hasAny("profits_not_consistent_across_folds", "high_sharpe_weak_folds", "unstable_folds", "weak_oos_economics", "weak_oos_evidence", "no_walk_forward_folds", "one_fold_dependency");
   const scanBias = hasAny("multiple_testing_haircut", "isolated_parameter_peak");
-  const crossMarket = hasAny("known_edge_needs_cross_market_validation", "multiple_testing_haircut");
+  const crossMarket = hasAny("known_edge_needs_cross_market_validation");
   const crossMarketDiscovery = crossMarket && discoveryMarketCount > 0;
   const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
   const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
   const capitalBlocked = hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high");
   const sourceTemplate = frozenTemplatePayload(template);
+  const canFreezeValidate = Object.keys(sourceTemplate.parameters ?? {}).length > 0;
+  const regimeNeedsRepair = hardRegimeRepair || (regimeDependent && !targetRegime);
+  const shouldFreezeValidate =
+    canFreezeValidate &&
+    hasAny("multiple_testing_haircut") &&
+    !hasAny("isolated_parameter_peak") &&
+    !tooFewTrades &&
+    !capitalBlocked &&
+    !syncCosts &&
+    !costStress &&
+    !fragileFolds &&
+    !monthDependent &&
+    !crossMarket &&
+    !regimeNeedsRepair;
+  const shouldConfirmFrozenValidation =
+    canFreezeValidate &&
+    !scanBias &&
+    !tooFewTrades &&
+    !capitalBlocked &&
+    !syncCosts &&
+    !costStress &&
+    !fragileFolds &&
+    !monthDependent &&
+    !crossMarket &&
+    !regimeNeedsRepair;
 
   let marketIds = selectedMarket;
   let budget = 54;
@@ -3439,7 +3492,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     addStep("Use longer-history fold and OOS evidence");
     addTarget("Improve fold consistency");
   }
-  if (scanBias) {
+  if (scanBias && !shouldFreezeValidate) {
     stress = Math.max(stress, 2.5);
     addStep("Use evidence-first ranking to reduce scan bias");
     addTarget("Reduce scan bias");
@@ -3454,22 +3507,15 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     addStep("Stress costs before trusting the net edge");
     addTarget("Survive higher costs");
   }
-  if (
-    !tooFewTrades &&
-    !capitalBlocked &&
-    !syncCosts &&
-    !costStress &&
-    !fragileFolds &&
-    !monthDependent &&
-    !scanBias &&
-    Object.keys(sourceTemplate.parameters ?? {}).length > 0
-  ) {
+  if (shouldFreezeValidate || shouldConfirmFrozenValidation) {
     budget = 1;
     stress = Math.max(stress, 2.5);
     start = earlierDate(start, longEvidenceStartForTemplate(template));
     repairMode = "frozen_validation";
+    includeRegimeScans = false;
+    regimeScanBudget = "";
     addStep("Freeze exact template parameters");
-    addStep("Retest without parameter hunting");
+    addStep(shouldFreezeValidate ? "Clear multiple-testing with no parameter hunting" : "Retest without parameter hunting");
     addTarget("Pass frozen validation");
   }
   if (steps.length === 0) {
