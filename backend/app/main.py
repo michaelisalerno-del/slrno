@@ -28,6 +28,7 @@ from .market_data_cache import MarketDataCache
 from .market_plugins import get_market_plugin, list_market_plugins
 from .market_registry import MarketMapping, MarketRegistry
 from .providers.eodhd import EODHDProvider
+from .providers.fmp import FMPProvider
 from .providers.ig import IGDemoProvider
 from .research_critic import ResearchCritic
 from .research_lab import ResearchStack
@@ -62,10 +63,16 @@ MULTI_MARKET_MIN_TRIALS_PER_MARKET = {
     "balanced": 9,
     "deep": 12,
 }
+SETTINGS_PROVIDERS = ("eodhd", "fmp", "ig")
+EODHD_MONTHLY_COMMODITIES = set(EODHDProvider._MONTHLY_COMMODITIES)
 
 
 class EODHDSettings(BaseModel):
     api_token: str = Field(min_length=1)
+
+
+class FMPSettings(BaseModel):
+    api_key: str = Field(min_length=1)
 
 
 class IGSettings(BaseModel):
@@ -167,6 +174,23 @@ def health() -> dict[str, str]:
     return {"status": "ok", "mode": "paper"}
 
 
+def _settings_provider_statuses() -> list[dict[str, object]]:
+    statuses = {status.provider: status.__dict__ for status in settings.statuses()}
+    for provider in SETTINGS_PROVIDERS:
+        statuses.setdefault(
+            provider,
+            {
+                "provider": provider,
+                "configured": False,
+                "last_status": "not_configured",
+                "last_error": None,
+            },
+        )
+    return [statuses[provider] for provider in SETTINGS_PROVIDERS] + [
+        status for provider, status in sorted(statuses.items()) if provider not in SETTINGS_PROVIDERS
+    ]
+
+
 @app.get("/cockpit/summary")
 def cockpit_summary() -> dict[str, object]:
     runs = research_store.list_runs()
@@ -175,7 +199,7 @@ def cockpit_summary() -> dict[str, object]:
     return {
         "mode": "paper",
         "live_ordering_enabled": False,
-        "providers": [status.__dict__ for status in settings.statuses()],
+        "providers": _settings_provider_statuses(),
         "runs": {
             "total_visible": len(runs),
             "running": len(running),
@@ -262,7 +286,7 @@ def broker_summary() -> dict[str, object]:
     return {
         "live_ordering_enabled": False,
         "order_placement": "disabled",
-        "providers": [status.__dict__ for status in settings.statuses()],
+        "providers": _settings_provider_statuses(),
         "mode": "demo_read_only",
         "preview_policy": {
             "enabled": True,
@@ -289,7 +313,7 @@ def risk_summary() -> dict[str, object]:
 def settings_summary() -> dict[str, object]:
     cache = MarketDataCache()
     return {
-        "providers": [status.__dict__ for status in settings.statuses()],
+        "providers": _settings_provider_statuses(),
         "cache": {
             "stats": cache.stats().as_dict(),
             "namespaces": cache.namespace_stats(),
@@ -300,7 +324,7 @@ def settings_summary() -> dict[str, object]:
 
 @app.get("/settings/status")
 def settings_status() -> list[dict[str, object]]:
-    return [status.__dict__ for status in settings.statuses()]
+    return _settings_provider_statuses()
 
 
 @app.post("/settings/eodhd")
@@ -314,6 +338,20 @@ async def save_eodhd(payload: EODHDSettings) -> dict[str, str]:
         settings.set_status("eodhd", "error", detail)
         raise HTTPException(status_code=400, detail=f"EODHD validation failed: {detail}") from exc
     settings.set_status("eodhd", "connected")
+    return {"status": "connected"}
+
+
+@app.post("/settings/fmp")
+async def save_fmp(payload: FMPSettings) -> dict[str, str]:
+    settings.set_secret("fmp", "api_key", payload.api_key)
+    provider = FMPProvider(payload.api_key)
+    try:
+        await provider.validate()
+    except Exception as exc:
+        detail = _public_error(exc)
+        settings.set_status("fmp", "error", detail)
+        raise HTTPException(status_code=400, detail=f"FMP validation failed: {detail}") from exc
+    settings.set_status("fmp", "connected")
     return {"status": "connected"}
 
 
@@ -968,7 +1006,7 @@ def _is_eodhd_monthly_commodity(market: MarketMapping) -> bool:
     if not market.eodhd_symbol.startswith("COMMODITY:"):
         return False
     code = market.eodhd_symbol.removeprefix("COMMODITY:")
-    return code in EODHDProvider._MONTHLY_COMMODITIES
+    return code in EODHD_MONTHLY_COMMODITIES
 
 
 def _run_start_for_market(payload: ResearchRunPayload, market: MarketMapping, interval: str) -> str:

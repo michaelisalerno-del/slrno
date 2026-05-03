@@ -45,6 +45,7 @@ import {
   pruneMarketDataCache,
   researchRunExportUrl,
   saveEodhd,
+  saveFmp,
   saveIg,
   saveMarket,
   saveResearchSchedule,
@@ -157,6 +158,7 @@ function App() {
   const [refinementTemplate, setRefinementTemplate] = React.useState(null);
   const [message, setMessage] = React.useState("");
   const [eodhdKey, setEodhdKey] = React.useState("");
+  const [fmpKey, setFmpKey] = React.useState("");
   const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "", accountId: "" });
   const [activeModule, setActiveModule] = React.useState("cockpit");
   const [loadingModule, setLoadingModule] = React.useState("");
@@ -207,6 +209,7 @@ function App() {
   const activePollRunIdRef = React.useRef(null);
 
   const eodhdStatus = providerStatus(status, "eodhd");
+  const fmpStatus = providerStatus(status, "fmp");
   const igStatus = providerStatus(status, "ig");
   const enabledMarkets = markets.filter((item) => item.enabled);
   const selectedMarkets = enabledMarkets.filter((item) => activeMarketIds.includes(item.market_id));
@@ -298,6 +301,20 @@ function App() {
       await saveEodhd(eodhdKey);
       setEodhdKey("");
       setMessage("EODHD connected.");
+      await loadModule(activeModule);
+    } catch (error) {
+      setMessage(error.message);
+      await loadModule(activeModule).catch(() => undefined);
+    }
+  }
+
+  async function submitFmp(event) {
+    event.preventDefault();
+    setMessage("Validating FMP...");
+    try {
+      await saveFmp(fmpKey);
+      setFmpKey("");
+      setMessage("FMP connected.");
       await loadModule(activeModule);
     } catch (error) {
       setMessage(error.message);
@@ -1444,11 +1461,15 @@ function App() {
             status={status}
             eodhdKey={eodhdKey}
             setEodhdKey={setEodhdKey}
+            fmpKey={fmpKey}
+            setFmpKey={setFmpKey}
             ig={ig}
             setIg={setIg}
             submitEodhd={submitEodhd}
+            submitFmp={submitFmp}
             submitIg={submitIg}
             eodhdStatus={eodhdStatus}
+            fmpStatus={fmpStatus}
             igStatus={igStatus}
             cacheStatus={cacheStatus}
             pruneCache={pruneCache}
@@ -1507,7 +1528,7 @@ function CockpitView({ summary, setActiveModule }) {
 
 function GuideView({ setActiveModule }) {
   const workflow = [
-    ["1", "Connect providers", "Use Settings for EODHD bars and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
+    ["1", "Connect providers", "Use Settings for EODHD bars, FMP market context, and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
     ["3", "Run Candidate Factory", "Start with one market, Balanced factory, realistic dates, cost stress 2.0, and regime templates on. This creates leads without lowering paper gates."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, cost/gross, drawdown, capital fit, and warnings."],
@@ -2933,7 +2954,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
   );
 }
 
-function SettingsView({ eodhdKey, setEodhdKey, ig, setIg, submitEodhd, submitIg, eodhdStatus, igStatus, cacheStatus, pruneCache }) {
+function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, submitEodhd, submitFmp, submitIg, eodhdStatus, fmpStatus, igStatus, cacheStatus, pruneCache }) {
   return (
     <div className="grid two">
       <Panel icon={<KeyRound />} title="Provider Settings">
@@ -2945,6 +2966,16 @@ function SettingsView({ eodhdKey, setEodhdKey, ig, setIg, submitEodhd, submitIg,
           <div className="row">
             <input value={eodhdKey} onChange={(event) => setEodhdKey(event.target.value)} type="password" required />
             <button>{eodhdStatus?.configured ? "Replace" : "Validate"}</button>
+          </div>
+        </form>
+        <form onSubmit={submitFmp}>
+          <div className="label-row">
+            <label>FMP API key</label>
+            <SecretBadge status={fmpStatus} />
+          </div>
+          <div className="row">
+            <input value={fmpKey} onChange={(event) => setFmpKey(event.target.value)} type="password" required />
+            <button>{fmpStatus?.configured ? "Replace FMP" : "Validate FMP"}</button>
           </div>
         </form>
         <form onSubmit={submitIg}>
@@ -2965,7 +2996,7 @@ function SettingsView({ eodhdKey, setEodhdKey, ig, setIg, submitEodhd, submitIg,
       </Panel>
       <Panel icon={<Activity />} title="Connection Status">
         <div className="status-list">
-          {[eodhdStatus, igStatus].filter(Boolean).map((item) => (
+          {[eodhdStatus, fmpStatus, igStatus].filter(Boolean).map((item) => (
             <div className="status" key={item.provider}>
               <strong>{item.provider.toUpperCase()}</strong>
               <span>{item.configured ? "saved on server" : "not saved"} · {item.last_status}</span>

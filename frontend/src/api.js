@@ -84,6 +84,13 @@ export function saveEodhd(apiToken) {
   });
 }
 
+export function saveFmp(apiKey) {
+  return request("/settings/fmp", {
+    method: "POST",
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
 export function saveIg(values) {
   return request("/settings/ig", {
     method: "POST",
