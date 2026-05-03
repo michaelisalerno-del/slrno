@@ -608,7 +608,18 @@ class ResearchStore:
             rows = conn.execute(
                 f"""
                 SELECT id, run_id, strategy_name, market_id, robustness_score, research_only, audit_json, created_at, promotion_tier
-                FROM candidates {where} ORDER BY robustness_score DESC, id DESC
+                FROM candidates {where}
+                ORDER BY
+                  CASE promotion_tier
+                    WHEN 'validated_candidate' THEN 5
+                    WHEN 'paper_candidate' THEN 4
+                    WHEN 'research_candidate' THEN 3
+                    WHEN 'incubator' THEN 2
+                    WHEN 'watchlist' THEN 1
+                    ELSE 0
+                  END DESC,
+                  robustness_score DESC,
+                  id DESC
                 {limit_clause}
                 """,
                 tuple(params),
@@ -681,7 +692,7 @@ class ResearchStore:
         if lead_limit is not None:
             limit = min(limit, max(0, int(lead_limit)))
         if limit <= 0:
-            return sorted(candidates, key=lambda item: (float(item["robustness_score"]), int(item["id"])), reverse=True)
+            return sorted(candidates, key=_candidate_display_rank, reverse=True)
         added = 0
         for trial in self._list_candidate_lead_trials(run_id, limit * 4):
             key = (int(trial["run_id"]), str(trial["strategy_name"]))
@@ -692,7 +703,7 @@ class ResearchStore:
             added += 1
             if added >= limit:
                 break
-        return sorted(candidates, key=lambda item: (float(item["robustness_score"]), int(item["id"])), reverse=True)
+        return sorted(candidates, key=_candidate_display_rank, reverse=True)
 
     def _get_trial(self, trial_id: int) -> dict[str, object] | None:
         with self._connect() as conn:
@@ -1027,6 +1038,33 @@ def _trial_display_rank(trial: dict[str, object]) -> tuple[float, ...]:
         _safe_float(backtest.get("test_profit")),
         _safe_float(backtest.get("net_profit")),
         -_safe_float(backtest.get("cost_to_gross_ratio")),
+    )
+
+
+def _candidate_display_rank(candidate: dict[str, object]) -> tuple[float, ...]:
+    audit = candidate.get("audit") if isinstance(candidate.get("audit"), dict) else {}
+    backtest = audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
+    candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+    parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    tier = str(candidate.get("promotion_tier") or audit.get("promotion_tier") or "")
+    tier_rank = {
+        "validated_candidate": 5,
+        "paper_candidate": 4,
+        "research_candidate": 3,
+        "incubator": 2,
+        "watchlist": 1,
+    }.get(tier, 0)
+    oos_trades = min(18.0, _safe_float(evidence.get("oos_trade_count")))
+    return (
+        float(tier_rank),
+        _safe_float(evidence.get("oos_net_profit")),
+        oos_trades,
+        _safe_float(candidate.get("robustness_score")),
+        _safe_float(backtest.get("test_profit")),
+        _safe_float(backtest.get("net_profit")),
+        -_safe_float(backtest.get("cost_to_gross_ratio")),
+        float(candidate.get("id") or 0),
     )
 
 

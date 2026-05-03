@@ -217,6 +217,21 @@ def test_research_store_limits_trial_and_candidate_reads(tmp_path):
     assert store.count_candidates(run_id) == 3
 
 
+def test_research_store_lists_paper_candidates_before_higher_scoring_research_leads(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("XAUUSD", {"interval": "1day"}, status="finished")
+    watchlist = _evaluation("high_score_watchlist", passed=False, promotion_tier="watchlist", robustness_score=95)
+    paper = _evaluation("lower_score_paper", passed=True, robustness_score=55)
+
+    store.save_candidate(run_id, "XAUUSD", watchlist)
+    store.save_candidate(run_id, "XAUUSD", paper)
+
+    candidates = store.list_candidates(run_id)
+
+    assert [candidate["strategy_name"] for candidate in candidates] == ["lower_score_paper", "high_score_watchlist"]
+    assert candidates[0]["promotion_tier"] == "paper_candidate"
+
+
 def test_research_store_records_material_watchlist_leads(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("US500", {"interval": "5min"}, status="finished")
