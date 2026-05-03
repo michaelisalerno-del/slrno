@@ -1054,6 +1054,16 @@ def _promotion_tier(
     backtest = evaluation.backtest
     stress_net_profit = float(evaluation.candidate.parameters.get("stress_net_profit") or 0.0)
     fold_rate = _positive_fold_rate(evaluation.fold_results)
+    evidence = evaluation.candidate.parameters.get("evidence_profile")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    oos_net_profit = _safe_float(evidence.get("oos_net_profit")) if evidence.get("oos_net_profit") is not None else backtest.test_profit
+    oos_trades = int(_safe_float(evidence.get("oos_trade_count"))) if evidence.get("oos_trade_count") is not None else backtest.trade_count
+    active_fold_rate = (
+        _safe_float(evidence.get("active_positive_fold_rate"))
+        if evidence.get("active_positive_fold_rate") is not None
+        else fold_rate
+    )
     viable_research_lead = (
         backtest.net_profit > 0
         and backtest.test_profit > 0
@@ -1061,6 +1071,12 @@ def _promotion_tier(
         and backtest.trade_count >= 10
         and backtest.cost_to_gross_ratio <= 0.85
         and backtest.net_cost_ratio >= 0.2
+    )
+    research_ready = (
+        viable_research_lead
+        and oos_net_profit > 0
+        and oos_trades >= 10
+        and active_fold_rate >= 0.4
     )
     if backtest.trade_count < 5:
         return "reject"
@@ -1096,10 +1112,10 @@ def _promotion_tier(
         return "validated_candidate"
     if paper_ready and cost_profile.confidence in PRICE_VALIDATED_COST_CONFIDENCES:
         return "paper_candidate"
-    if (
-        viable_research_lead
-    ):
+    if research_ready:
         return "research_candidate"
+    if viable_research_lead:
+        return "incubator"
     if backtest.gross_profit > 0 or _risk_adjusted_sharpe(backtest) > 0.5:
         return "watchlist"
     return "reject"
@@ -1202,6 +1218,7 @@ def _trial_ranking_key(
         "validated_candidate": 4,
         "paper_candidate": 3,
         "research_candidate": 2,
+        "incubator": 1.5,
         "watchlist": 1,
         "reject": 0,
     }.get(evaluation.promotion_tier, 0)

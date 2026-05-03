@@ -265,7 +265,7 @@ class ResearchStore:
 
     def save_candidate(self, run_id: int, market_id: str, evaluation: CandidateEvaluation) -> None:
         promotion_tier = _evaluation_tier(evaluation)
-        if promotion_tier not in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate"}:
+        if promotion_tier not in {"watchlist", "incubator", "research_candidate", "paper_candidate", "validated_candidate"}:
             return
         if promotion_tier == "watchlist" and not _is_material_watchlist_lead(evaluation):
             return
@@ -671,7 +671,7 @@ class ResearchStore:
     def _list_candidate_lead_trials(self, run_id: int | None, limit: int) -> list[dict[str, object]]:
         where = """
             WHERE (
-              promotion_tier IN ('watchlist', 'research_candidate', 'paper_candidate', 'validated_candidate')
+              promotion_tier IN ('watchlist', 'incubator', 'research_candidate', 'paper_candidate', 'validated_candidate')
               OR robustness_score >= 25
             )
         """
@@ -898,7 +898,7 @@ def _is_material_watchlist_lead(evaluation: CandidateEvaluation) -> bool:
 def _trial_should_surface_as_research_lead(trial: dict[str, object]) -> bool:
     tier = str(trial.get("promotion_tier") or "reject")
     backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
-    if tier in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate"}:
+    if tier in {"watchlist", "incubator", "research_candidate", "paper_candidate", "validated_candidate"}:
         return int(backtest.get("sharpe_observations") or 0) > 0 or float(backtest.get("daily_pnl_sharpe") or 0.0) != 0.0
     return (
         float(trial.get("robustness_score") or 0.0) >= 25

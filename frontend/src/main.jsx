@@ -1396,7 +1396,7 @@ function GuideView({ setActiveModule }) {
     ["1", "Connect providers", "Use Settings for EODHD bars and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
     ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
     ["3", "Run a normal search", "Start with one market, Balanced preset, realistic dates, cost stress 2.0, and Thorough regime scan off."],
-    ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, drawdown, capital fit, and warnings."],
+    ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, cost/gross, drawdown, capital fit, and warnings."],
     ["5", "Make it tradeable", "Use Best by market first, then click Make tradeable. The app chooses the next repair from the blockers, locks the market/family/regime, syncs IG costs when needed, and launches the repair run."],
     ["6", "Save and freeze", "Save promising repaired results to Templates, then use Freeze validate. This retests the exact rules with no parameter hunting, so the OOS period does not quietly become training data."],
     ["7", "Export evidence", "Download the evidence ZIP when something is worth offline review. Include bars when you want Codex-assisted analysis later."],
@@ -1416,6 +1416,7 @@ function GuideView({ setActiveModule }) {
     ["Days", "Daily observations used for Sharpe. Promotion normally needs at least 120."],
     ["DSR", "Deflated Sharpe probability, adjusted for repeated scans."],
     ["Testing capital fit", "Whether the candidate is feasible for the account size selected in the run. If blocked, the tile names the first sizing/risk reason."],
+    ["Incubator", "A positive, cost-aware idea that is not paper-ready yet because OOS, fold, sample, or regime evidence is still too thin. Treat it as a research lead, not a trade."],
     ["Paper score", "A stricter score that weights capital fit, OOS trades, OOS profit, fold stability, cost stress, and Sharpe sample size before headline profit."],
     ["End balance", "Projected account balance after compounding from the selected account size."],
     ["Return", "Projected percentage return for that account scenario."],
@@ -1427,7 +1428,7 @@ function GuideView({ setActiveModule }) {
     ["Fold share", "How much positive fold profit came from the best fold. High values mean fragility."],
     ["Gated net", "Profit after forcing the strategy flat outside allowed regimes. In target-regime refinements this is labelled Target net because the whole run is already gated."],
     ["Gated OOS", "Out-of-sample profit after the regime gate is applied. In target-regime refinements this can match the run OOS by design."],
-    ["Cost/gross", "How much gross edge is consumed by trading friction."],
+    ["Cost/gross", "How much gross edge is consumed by trading friction. Under 25% is healthy, 25-40% needs care, and above 50-65% is usually fragile unless the OOS evidence is excellent."],
     ["Net/cost", "How much net profit remains for each pound of cost."],
     ["Warning colours", "Red blocks paper promotion, orange needs repair, blue is a specialist/regime identity, and grey is diagnostic."],
   ];
@@ -1919,12 +1920,14 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
   const [trialTierFilter, setTrialTierFilter] = React.useState("active");
   const [trialScanFilter, setTrialScanFilter] = React.useState("all");
   const [trialMarketView, setTrialMarketView] = React.useState("overall");
+  const [trialCostFilter, setTrialCostFilter] = React.useState("all");
   const [showAllRuns, setShowAllRuns] = React.useState(false);
   const [selectedRunIds, setSelectedRunIds] = React.useState([]);
   const qualitySummary = runQualitySummary(trials);
   const filteredTrials = trials
     .filter((trial) => tierMatchesFilter(trial.promotion_tier, trialTierFilter))
-    .filter((trial) => trialScanMatchesFilter(trial, trialScanFilter));
+    .filter((trial) => trialScanMatchesFilter(trial, trialScanFilter))
+    .filter((trial) => trialCostMatchesFilter(trial, trialCostFilter));
   const displayRankedTrials = sortTrialsForDisplay(filteredTrials);
   const rankedTrials = trialMarketView === "market_best" ? bestTrialsByMarket(displayRankedTrials, 3) : displayRankedTrials;
   const visibleRuns = showAllRuns ? researchRuns : researchRuns.slice(0, 18);
@@ -2082,7 +2085,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
           <div className="metrics four">
             <Metric label="Paper-ready" value={qualitySummary.paperReady} />
             <Metric label="Research/watch" value={qualitySummary.researchWatch} />
-            <Metric label="Rejected" value={qualitySummary.rejected} />
+            <Metric label="Incubator" value={qualitySummary.incubator} />
             <Metric label="Cost fragile" value={qualitySummary.costFragile} />
           </div>
           <div className="status-list">
@@ -2111,6 +2114,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
               ["active", "Active"],
               ["paper", "Paper"],
               ["research", "Research"],
+              ["incubator", "Incubator"],
               ["rejected", "Rejected"],
               ["all", "All"],
             ].map(([id, label]) => (
@@ -2150,6 +2154,23 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
                 key={id}
                 type="button"
                 onClick={() => setTrialMarketView(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="segmented compact-filter">
+            {[
+              ["all", "Any cost"],
+              ["healthy", "Cost <25%"],
+              ["ok", "Cost <40%"],
+              ["survivable", "Cost <65%"],
+            ].map(([id, label]) => (
+              <button
+                className={trialCostFilter === id ? "segment active" : "segment"}
+                key={id}
+                type="button"
+                onClick={() => setTrialCostFilter(id)}
               >
                 {label}
               </button>
@@ -2829,7 +2850,7 @@ function tierBadgeClass(tier) {
   if (tier === "validated_candidate" || tier === "paper_candidate") {
     return "good";
   }
-  if (tier === "research_candidate") {
+  if (tier === "research_candidate" || tier === "incubator") {
     return "base";
   }
   if (tier === "watchlist") {
@@ -2861,6 +2882,7 @@ function tierLabel(tier) {
     validated_candidate: "IG validated",
     paper_candidate: "Paper candidate",
     research_candidate: "Research",
+    incubator: "Incubator",
     watchlist: "Watchlist",
     reject: "Reject",
   }[tier] ?? "Research";
@@ -2884,7 +2906,10 @@ function tierMatchesFilter(tier, filter) {
     return tier === "validated_candidate" || tier === "paper_candidate";
   }
   if (filter === "research") {
-    return tier === "research_candidate" || tier === "watchlist";
+    return tier === "research_candidate" || tier === "incubator" || tier === "watchlist";
+  }
+  if (filter === "incubator") {
+    return tier === "incubator";
   }
   if (filter === "rejected") {
     return tier === "reject";
@@ -2900,6 +2925,15 @@ function trialScanMatchesFilter(trial, filter) {
   return filter === "specialist" ? specialist : !specialist;
 }
 
+function trialCostMatchesFilter(trial, filter) {
+  if (filter === "all") {
+    return true;
+  }
+  const costToGross = Number(trial.backtest?.cost_to_gross_ratio ?? 0);
+  const thresholds = { healthy: 0.25, ok: 0.4, survivable: 0.65 };
+  return costToGross > 0 && costToGross <= (thresholds[filter] ?? Number.POSITIVE_INFINITY);
+}
+
 function sortTrialsForDisplay(trials = []) {
   return [...trials].sort((left, right) => trialDisplayScore(right) - trialDisplayScore(left));
 }
@@ -2912,7 +2946,7 @@ function trialDisplayScore(trial = {}) {
   const evidence = evidenceProfileForSource(trial);
   const oosTrades = Math.min(18, Number(evidence.oos_trade_count ?? 0));
   const oosNet = Number(evidence.oos_net_profit ?? 0) > 0 ? 1 : 0;
-  const tierScore = { validated_candidate: 400, paper_candidate: 350, research_candidate: 250, watchlist: 150, reject: 0 }[trial.promotion_tier] ?? 0;
+  const tierScore = { validated_candidate: 400, paper_candidate: 350, research_candidate: 250, incubator: 200, watchlist: 150, reject: 0 }[trial.promotion_tier] ?? 0;
   return tierScore + capitalFeasible * 120 + paperScore * 2 + capitalScore + oosTrades * 2 + oosNet * 20 + Number(trial.robustness_score ?? 0);
 }
 
@@ -2935,12 +2969,15 @@ function runQualitySummary(trials = []) {
   const warningCounts = new Map();
   let paperReady = 0;
   let researchWatch = 0;
+  let incubator = 0;
   let rejected = 0;
   let costFragile = 0;
   for (const trial of trials) {
     const tier = trial.promotion_tier;
     if (tier === "validated_candidate" || tier === "paper_candidate") {
       paperReady += 1;
+    } else if (tier === "incubator") {
+      incubator += 1;
     } else if (tier === "research_candidate" || tier === "watchlist") {
       researchWatch += 1;
     } else {
@@ -2958,7 +2995,7 @@ function runQualitySummary(trials = []) {
     .sort((left, right) => right[1] - left[1])
     .slice(0, 4)
     .map(([warning, count]) => ({ warning, count }));
-  return { paperReady, researchWatch, rejected, costFragile, topWarnings };
+  return { paperReady, researchWatch, incubator, rejected, costFragile, topWarnings };
 }
 
 function candidateQueueSummary(candidates = []) {

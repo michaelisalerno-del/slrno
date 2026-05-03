@@ -64,7 +64,7 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert result.pareto
     assert any("needs_ig_price_validation" in evaluation.warnings for evaluation in result.evaluations)
     best = result.evaluations[0]
-    assert best.promotion_tier in {"watchlist", "research_candidate", "paper_candidate", "validated_candidate", "reject"}
+    assert best.promotion_tier in {"watchlist", "incubator", "research_candidate", "paper_candidate", "validated_candidate", "reject"}
     assert best.candidate.parameters["promotion_tier"] == best.promotion_tier
     assert best.candidate.parameters["search_audit"]["trial_count"] == 9
     assert "deflated_sharpe_probability" in best.candidate.parameters["sharpe_diagnostics"]
@@ -402,6 +402,52 @@ def test_high_drawdown_profitable_lead_remains_research_candidate():
     )
 
     assert _promotion_tier(evaluation, stability=0.2, cost_profile=profile) == "research_candidate"
+
+
+def test_profitable_lead_with_weak_oos_becomes_incubator():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=2, slippage_bps=1)
+    profile = public_ig_cost_profile(market)
+    backtest = BacktestResult(
+        net_profit=500,
+        sharpe=0.8,
+        max_drawdown=180,
+        win_rate=0.52,
+        trade_count=42,
+        exposure=0.4,
+        turnover=42,
+        train_profit=250,
+        test_profit=250,
+        gross_profit=640,
+        total_cost=140,
+        daily_pnl_sharpe=0.9,
+        expectancy_per_trade=11.9,
+        average_cost_per_trade=3.33,
+        net_cost_ratio=3.57,
+        cost_to_gross_ratio=0.21875,
+    )
+    evaluation = CandidateEvaluation(
+        candidate=ProbabilityCandidate(
+            "incubator_fixture",
+            ("adaptive_ig_v1",),
+            {
+                "stress_net_profit": 120,
+                "evidence_profile": {
+                    "oos_net_profit": -45,
+                    "oos_trade_count": 7,
+                    "active_positive_fold_rate": 0.25,
+                },
+            },
+            [0.5, 0.6],
+        ),
+        metrics=ClassificationMetrics(0.6, 0.6, 0.2, 0.6, 0.6, 0.5, 2),
+        backtest=backtest,
+        fold_results=(backtest,),
+        robustness_score=55,
+        passed=False,
+        warnings=("weak_oos_evidence", "profits_not_consistent_across_folds"),
+    )
+
+    assert _promotion_tier(evaluation, stability=0.4, cost_profile=profile) == "incubator"
 
 
 def test_promotion_tier_requires_fresh_sharpe_days_and_live_ig_costs():
