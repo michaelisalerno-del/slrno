@@ -24,6 +24,7 @@ class BacktestConfig:
     cost_stress_multiplier: float = 1.0
     instrument_currency: str = "GBP"
     account_currency: str = "GBP"
+    contract_point_size: float = 1.0
     funding_cutoff_hour: int = 22
     cost_confidence: str = "ig_public_spread_baseline"
 
@@ -76,6 +77,7 @@ class BacktestResult:
     final_equity: float = 10_000.0
     return_pct: float = 0.0
     compounded_position_sizing: bool = False
+    contract_point_size: float = 1.0
     compounded_projection_final_equity: float = 10_000.0
     compounded_projection_return_pct: float = 0.0
     compounded_projection_max_drawdown: float = 0.0
@@ -138,17 +140,18 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
             trade_count += 1
             exposure_turnover += exposure_delta
 
+        point_size = _contract_point_size(config)
         price_change = current_bar.close - previous_bar.close
-        trade_gross = position * price_change
+        trade_gross = position * (price_change / point_size)
         gross_profit += trade_gross
 
-        notional = previous_bar.close * abs(position)
+        notional = (previous_bar.close / point_size) * abs(position)
         stress = max(0.0, config.cost_stress_multiplier)
-        trade_spread = previous_bar.close * (config.spread_bps / 10_000) * stress * exposure_delta / 2
-        trade_slippage = previous_bar.close * (config.slippage_bps / 10_000) * stress * exposure_delta
-        trade_commission = previous_bar.close * (config.commission_bps / 10_000) * exposure_delta / 2
+        trade_spread = (previous_bar.close / point_size) * (config.spread_bps / 10_000) * stress * exposure_delta / 2
+        trade_slippage = (previous_bar.close / point_size) * (config.slippage_bps / 10_000) * stress * exposure_delta
+        trade_commission = (previous_bar.close / point_size) * (config.commission_bps / 10_000) * exposure_delta / 2
         trade_guaranteed = (
-            config.guaranteed_stop_premium_points * exposure_delta / 2
+            (config.guaranteed_stop_premium_points / point_size) * exposure_delta / 2
             if config.use_guaranteed_stop
             else 0.0
         )
@@ -213,6 +216,7 @@ def run_vector_backtest(bars: list[OHLCBar], signals: list[int], config: Backtes
         compounded_projection_final_equity=projection_equity,
         compounded_projection_return_pct=((projection_equity - config.starting_cash) / config.starting_cash) * 100,
         compounded_projection_max_drawdown=abs(projection_max_drawdown),
+        contract_point_size=_contract_point_size(config),
         net_profit=net_profit,
         sharpe=sharpe,
         train_sharpe=train_sharpe,
@@ -284,6 +288,14 @@ def _target_exposure(direction: int, previous_exposure: float, equity: float, co
     if config.compound_position_size:
         stake *= max(0.0, equity) / config.starting_cash
     return direction * max(0.0, stake)
+
+
+def _contract_point_size(config: BacktestConfig) -> float:
+    try:
+        value = float(config.contract_point_size)
+    except (TypeError, ValueError):
+        return 1.0
+    return value if value > 0 else 1.0
 
 
 def _crosses_funding_cutoff(previous: datetime, current: datetime, cutoff_hour: int) -> bool:

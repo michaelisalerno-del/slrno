@@ -26,6 +26,7 @@ class CapitalScenario:
     min_deal_size: float
     estimated_margin: float
     estimated_stop_loss: float
+    contract_point_size: float
     historical_max_drawdown: float
     worst_daily_loss: float
     margin_percent: float
@@ -48,6 +49,7 @@ class CapitalScenario:
             "min_deal_size": self.min_deal_size,
             "estimated_margin": self.estimated_margin,
             "estimated_stop_loss": self.estimated_stop_loss,
+            "contract_point_size": self.contract_point_size,
             "historical_max_drawdown": self.historical_max_drawdown,
             "worst_daily_loss": self.worst_daily_loss,
             "margin_percent": self.margin_percent,
@@ -72,9 +74,10 @@ def capital_scenarios(
     has_reference_price = price > 0
     stop_bps = _positive_float(parameters.get("stop_loss_bps"), parameters.get("stop_bps"), 100.0)
     margin_percent = _positive_float(cost_profile.get("margin_percent"), _fallback_margin_percent(cost_profile), 5.0)
+    contract_point_size = _positive_float(cost_profile.get("contract_point_size"), parameters.get("contract_point_size"), 1.0)
     stop_points = price * stop_bps / 10_000
-    estimated_stop_loss = abs(stop_points * effective_stake)
-    estimated_margin = abs(price * effective_stake * margin_percent / 100)
+    estimated_stop_loss = abs((stop_points / contract_point_size) * effective_stake)
+    estimated_margin = abs((price / contract_point_size) * effective_stake * margin_percent / 100)
     source_starting_cash = _positive_float(backtest.get("starting_cash"), 0.0)
     net_profit = _float(backtest.get("net_profit"), 0.0)
     actual_compounding = bool(backtest.get("compounded_position_sizing"))
@@ -131,6 +134,7 @@ def capital_scenarios(
                 min_deal_size=round(min_deal_size, 6),
                 estimated_margin=round(estimated_margin, 4),
                 estimated_stop_loss=round(estimated_stop_loss, 4),
+                contract_point_size=round(contract_point_size, 8),
                 historical_max_drawdown=round(historical_max_drawdown, 4),
                 worst_daily_loss=round(worst_daily_loss, 4),
                 margin_percent=round(margin_percent, 6),

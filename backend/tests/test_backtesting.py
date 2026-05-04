@@ -92,6 +92,31 @@ def test_compound_position_sizing_scales_new_entries_with_equity():
     assert compounded.max_effective_position_size == 1.1
 
 
+def test_vector_backtest_converts_share_price_units_to_spread_bet_points():
+    start = datetime(2026, 1, 1, 9)
+    bars = [
+        OHLCBar("AAPL", start, 100, 100, 100, 100),
+        OHLCBar("AAPL", start + timedelta(days=1), 101, 101, 101, 101),
+    ]
+
+    result = run_vector_backtest(
+        bars,
+        [1, 0],
+        BacktestConfig(
+            starting_cash=1_000,
+            position_size=1,
+            spread_bps=0,
+            slippage_bps=0,
+            overnight_admin_fee_annual=0,
+            contract_point_size=0.01,
+        ),
+    )
+
+    assert result.gross_profit == 100
+    assert result.net_profit == 100
+    assert result.contract_point_size == 0.01
+
+
 def test_vector_backtest_validates_input_lengths():
     bar = OHLCBar("TEST", datetime(2026, 1, 1), 1, 1, 1, 1)
 

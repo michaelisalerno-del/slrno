@@ -418,10 +418,17 @@ p {
 }
 
 .market-chip span,
+.market-chip small,
 .run-pill span {
   font-size: 12px;
   color: inherit;
   opacity: 0.82;
+}
+
+.market-chip small,
+.market-table td small {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 form {

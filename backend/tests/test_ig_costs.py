@@ -14,6 +14,31 @@ def test_public_cost_profile_uses_ig_public_baseline():
     assert profile.overnight_admin_fee_annual == 0.03
 
 
+def test_share_public_cost_profile_uses_share_spread_bet_rules():
+    market = MarketMapping("AAPL", "Apple", "share", "AAPL.US", "", plugin_id="ig-aapl", spread_bps=4.0, slippage_bps=2.0)
+
+    profile = public_ig_cost_profile(market)
+    config = backtest_config_from_profile(profile)
+
+    assert profile.spread_bps == 10.0
+    assert profile.slippage_bps == 5.0
+    assert profile.margin_percent == 20.0
+    assert profile.contract_point_size == 0.01
+    assert profile.share_region == "us"
+    assert config.contract_point_size == 0.01
+
+
+def test_uk_share_public_cost_profile_uses_pence_points():
+    market = MarketMapping("SHEL", "Shell", "share", "SHEL.LSE", "", plugin_id="ig-shell", spread_bps=5.0, slippage_bps=2.5)
+
+    profile = public_ig_cost_profile(market)
+
+    assert profile.spread_bps == 10.0
+    assert profile.margin_percent == 20.0
+    assert profile.contract_point_size == 1.0
+    assert profile.share_region == "uk"
+
+
 def test_ig_market_payload_sets_live_spread_and_rules():
     market = MarketMapping("GBPUSD", "GBP/USD", "forex", "GBPUSD.FOREX", "CS.D.GBPUSD.TODAY.IP", spread_bps=2.0, slippage_bps=0.8)
     payload = {

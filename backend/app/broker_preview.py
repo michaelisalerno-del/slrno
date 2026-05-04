@@ -20,8 +20,9 @@ def broker_order_preview(
     effective_stake = max(requested_stake, min_deal_size or requested_stake)
     entry = _entry_price(cost_profile, normalized_side, entry_price)
     margin_percent = _positive_float(cost_profile.get("margin_percent")) or _fallback_margin_percent(cost_profile, market)
-    estimated_margin = abs(entry * effective_stake * margin_percent / 100)
-    planned_risk = _planned_risk(entry, normalized_side, effective_stake, stop)
+    point_size = _positive_float(cost_profile.get("contract_point_size")) or 1.0
+    estimated_margin = abs((entry / point_size) * effective_stake * margin_percent / 100)
+    planned_risk = _planned_risk(entry, normalized_side, effective_stake, stop, point_size)
     risk_budget = account_size * RISK_PER_TRADE_FRACTION
     daily_loss_limit = account_size * DAILY_LOSS_FRACTION
     violations = _rule_violations(
@@ -57,6 +58,7 @@ def broker_order_preview(
         "planned_risk": round(planned_risk, 4),
         "estimated_margin": round(estimated_margin, 4),
         "margin_percent": round(margin_percent, 6),
+        "contract_point_size": round(point_size, 8),
         "min_deal_size": min_deal_size,
         "min_stop_distance": cost_profile.get("min_stop_distance"),
         "min_limit_distance": cost_profile.get("min_limit_distance"),
@@ -128,12 +130,12 @@ def _entry_price(cost_profile: dict[str, object], side: str, entry_price: float 
     return 1.0
 
 
-def _planned_risk(entry: float, side: str, stake: float, stop: float | None) -> float:
+def _planned_risk(entry: float, side: str, stake: float, stop: float | None, point_size: float = 1.0) -> float:
     if stop is None:
         return 0.0
     if side == "SELL":
-        return max(0.0, float(stop) - entry) * stake
-    return max(0.0, entry - float(stop)) * stake
+        return max(0.0, float(stop) - entry) / point_size * stake
+    return max(0.0, entry - float(stop)) / point_size * stake
 
 
 def _distance(left: float, right: float) -> float:

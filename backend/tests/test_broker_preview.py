@@ -44,3 +44,28 @@ def test_broker_order_preview_allows_clear_preview():
 
     assert preview["feasible"] is True
     assert preview["rule_violations"] == []
+
+
+def test_broker_order_preview_converts_share_points():
+    preview = broker_order_preview(
+        {"market_id": "AAPL", "name": "Apple", "asset_class": "share"},
+        {
+            "market_id": "AAPL",
+            "bid": 200,
+            "offer": 200.1,
+            "min_deal_size": 1.0,
+            "margin_percent": 20.0,
+            "contract_point_size": 0.01,
+        },
+        "BUY",
+        stake=1.0,
+        account_size=3000,
+        stop=198,
+        limit=205,
+    )
+
+    assert preview["contract_point_size"] == 0.01
+    assert preview["planned_risk"] == 210
+    assert preview["estimated_margin"] == 4002
+    assert "risk_budget_exceeded" in preview["rule_violations"]
+    assert "margin_too_large" in preview["rule_violations"]

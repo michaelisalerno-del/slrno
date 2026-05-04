@@ -58,13 +58,23 @@ DEFAULT_MARKETS = [
     MarketMapping("US10Y", "US 10Y Treasury Yield", "rates", "US10Y.GBOND", "", True, "ig-us-10y", "US 10 Year T-Note", "US 10 Year,T-Note,Treasury", "1day", 2.0, 1.0),
     MarketMapping("UK10Y", "UK 10Y Gilt Yield", "rates", "UK10Y.GBOND", "", True, "ig-uk-10y", "UK Long Gilt", "UK Long Gilt,Gilt", "1day", 2.0, 1.0),
     MarketMapping("DE10Y", "Germany 10Y Bund Yield", "rates", "DE10Y.GBOND", "", True, "ig-de-10y", "Bund", "Bund,Germany 10 Year", "1day", 2.0, 1.0),
-    MarketMapping("AAPL", "Apple", "share", "AAPL.US", "", True, "ig-aapl", "Apple", "Apple,AAPL", "5min", 4.0, 2.0),
-    MarketMapping("MSFT", "Microsoft", "share", "MSFT.US", "", True, "ig-msft", "Microsoft", "Microsoft,MSFT", "5min", 4.0, 2.0),
-    MarketMapping("NVDA", "NVIDIA", "share", "NVDA.US", "", True, "ig-nvda", "NVIDIA", "NVIDIA,NVDA", "5min", 5.0, 2.5),
-    MarketMapping("TSLA", "Tesla", "share", "TSLA.US", "", True, "ig-tsla", "Tesla", "Tesla,TSLA", "5min", 5.0, 2.5),
-    MarketMapping("SHEL", "Shell", "share", "SHEL.LSE", "", True, "ig-shell", "Shell", "Shell,SHEL", "5min", 5.0, 2.5),
-    MarketMapping("BP", "BP", "share", "BP.LSE", "", True, "ig-bp", "BP", "BP", "5min", 5.0, 2.5),
-    MarketMapping("HSBA", "HSBC", "share", "HSBA.LSE", "", True, "ig-hsbc", "HSBC", "HSBC,HSBA", "5min", 5.0, 2.5),
+    MarketMapping("AAPL", "Apple", "share", "AAPL.US", "", True, "ig-aapl", "Apple", "Apple,AAPL", "1day", 10.0, 5.0, 250),
+    MarketMapping("MSFT", "Microsoft", "share", "MSFT.US", "", True, "ig-msft", "Microsoft", "Microsoft,MSFT", "1day", 10.0, 5.0, 250),
+    MarketMapping("NVDA", "NVIDIA", "share", "NVDA.US", "", True, "ig-nvda", "NVIDIA", "NVIDIA,NVDA", "1day", 10.0, 5.0, 250),
+    MarketMapping("TSLA", "Tesla", "share", "TSLA.US", "", True, "ig-tsla", "Tesla", "TSLA,Tesla", "1day", 10.0, 5.0, 250),
+    MarketMapping("SHEL", "Shell", "share", "SHEL.LSE", "", True, "ig-shell", "Shell", "SHEL,Shell", "1day", 10.0, 5.0, 250),
+    MarketMapping("BP", "BP", "share", "BP.LSE", "", True, "ig-bp", "BP", "BP", "1day", 10.0, 5.0, 250),
+    MarketMapping("HSBA", "HSBC", "share", "HSBA.LSE", "", True, "ig-hsbc", "HSBC", "HSBC,HSBA", "1day", 10.0, 5.0, 250),
+    MarketMapping("LLOY", "Lloyds Banking Group", "share", "LLOY.LSE", "", True, "ig-lloy", "Lloyds Banking Group", "LLOY,Lloyds,Lloyds Banking Group", "1day", 10.0, 5.0, 250),
+    MarketMapping("BARC", "Barclays", "share", "BARC.LSE", "", True, "ig-barc", "Barclays", "BARC,Barclays", "1day", 10.0, 5.0, 250),
+    MarketMapping("RR", "Rolls-Royce Holdings", "share", "RR.LSE", "", True, "ig-rr", "Rolls-Royce Holdings", "RR,Rolls-Royce,Rolls Royce", "1day", 10.0, 5.0, 250),
+    MarketMapping("VOD", "Vodafone", "share", "VOD.LSE", "", True, "ig-vod", "Vodafone", "VOD,Vodafone", "1day", 10.0, 5.0, 250),
+    MarketMapping("GLEN", "Glencore", "share", "GLEN.LSE", "", True, "ig-glen", "Glencore", "GLEN,Glencore", "1day", 10.0, 5.0, 250),
+    MarketMapping("DGE", "Diageo", "share", "DGE.LSE", "", True, "ig-dge", "Diageo", "DGE,Diageo", "1day", 10.0, 5.0, 250),
+    MarketMapping("AZN", "AstraZeneca", "share", "AZN.LSE", "", True, "ig-azn", "AstraZeneca", "AZN,AstraZeneca", "1day", 10.0, 5.0, 250),
+    MarketMapping("GSK", "GSK", "share", "GSK.LSE", "", True, "ig-gsk", "GSK", "GSK,GlaxoSmithKline", "1day", 10.0, 5.0, 250),
+    MarketMapping("BAE", "BAE Systems", "share", "BA.LSE", "", True, "ig-bae", "BAE Systems", "BAE Systems,BA.", "1day", 10.0, 5.0, 250),
+    MarketMapping("TSCO", "Tesco", "share", "TSCO.LSE", "", True, "ig-tsco", "Tesco", "TSCO,Tesco", "1day", 10.0, 5.0, 250),
     MarketMapping("BTCUSD", "Bitcoin/USD", "crypto", "BTC-USD.CC", "", False, "ig-bitcoin", "Bitcoin", "Bitcoin,BTC/USD", "5min", 8.0, 4.0),
     MarketMapping("ETHUSD", "Ethereum/USD", "crypto", "ETH-USD.CC", "", False, "ig-ethereum", "Ethereum", "Ethereum,ETH/USD", "5min", 10.0, 5.0),
 ]
@@ -187,6 +197,21 @@ class MarketRegistry:
                 WHERE market_id IN ('QQQ', 'SPY')
                 """
             )
+            for market in DEFAULT_MARKETS:
+                if market.asset_class != "share":
+                    continue
+                conn.execute(
+                    """
+                    UPDATE markets
+                    SET default_timeframe = CASE WHEN default_timeframe IN ('', '5min', '5m') THEN ? ELSE default_timeframe END,
+                        spread_bps = CASE WHEN spread_bps <= 5.0 THEN ? ELSE spread_bps END,
+                        slippage_bps = CASE WHEN slippage_bps <= 2.5 THEN ? ELSE slippage_bps END,
+                        min_backtest_bars = CASE WHEN min_backtest_bars >= 750 THEN ? ELSE min_backtest_bars END
+                    WHERE market_id = ?
+                      AND asset_class = 'share'
+                    """,
+                    (market.default_timeframe, market.spread_bps, market.slippage_bps, market.min_backtest_bars, market.market_id),
+                )
 
     def upsert(self, market: MarketMapping) -> None:
         with self._connect() as conn:

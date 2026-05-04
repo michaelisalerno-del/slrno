@@ -5,6 +5,7 @@ from typing import Any
 
 from .backtesting import BacktestConfig
 from .market_registry import MarketMapping
+from .share_spread_betting import share_spread_bet_model, share_public_spread_bps
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,10 @@ class IGCostProfile:
     min_stop_distance: float | None = None
     min_limit_distance: float | None = None
     margin_percent: float | None = None
+    contract_point_size: float = 1.0
+    min_stop_distance_percent: float | None = None
+    share_spread_category: str = ""
+    share_region: str = ""
     guaranteed_stop_premium_points: float = 0.0
     overnight_admin_fee_annual: float = 0.03
     overnight_interest_annual: float = 0.0
@@ -43,10 +48,31 @@ class IGCostProfile:
 
 def public_ig_cost_profile(market: MarketMapping, account_currency: str = "GBP") -> IGCostProfile:
     admin_fee = 0.01 if market.asset_class == "forex" else 0.03
+    share_model = share_spread_bet_model(market)
+    spread_bps = max(0.0, market.spread_bps)
+    slippage_bps = max(0.0, market.slippage_bps)
+    margin_percent = None
+    contract_point_size = 1.0
+    min_stop_distance_percent = None
+    share_spread_category = ""
+    share_region = ""
     notes = [
         "Uses the market registry spread/slippage as an IG UK spread-betting cost envelope.",
         "Sync IG costs after binding an exact EPIC to upgrade this profile.",
     ]
+    if share_model is not None:
+        spread_bps = share_public_spread_bps(market)
+        slippage_bps = share_model.slippage_bps
+        margin_percent = share_model.margin_percent
+        contract_point_size = share_model.contract_point_size
+        min_stop_distance_percent = share_model.min_stop_distance_percent
+        share_spread_category = share_model.spread_category
+        share_region = share_model.asset_region
+        notes = [
+            "Uses IG share spread-bet product rules as the public cost envelope.",
+            *share_model.notes,
+            "Sync IG costs after binding an exact share EPIC to upgrade this profile.",
+        ]
     return IGCostProfile(
         market_id=market.market_id,
         epic=market.ig_epic,
@@ -54,8 +80,13 @@ def public_ig_cost_profile(market: MarketMapping, account_currency: str = "GBP")
         instrument_type=market.asset_class,
         instrument_currency=_default_currency(market),
         account_currency=account_currency or "GBP",
-        spread_bps=max(0.0, market.spread_bps),
-        slippage_bps=max(0.0, market.slippage_bps),
+        spread_bps=spread_bps,
+        slippage_bps=slippage_bps,
+        margin_percent=margin_percent,
+        contract_point_size=contract_point_size,
+        min_stop_distance_percent=min_stop_distance_percent,
+        share_spread_category=share_spread_category,
+        share_region=share_region,
         overnight_admin_fee_annual=admin_fee,
         source="market_registry",
         confidence="ig_public_spread_baseline",
@@ -86,7 +117,9 @@ def profile_from_ig_market(
     min_deal_size = _rule_value(dealing_rules.get("minDealSize"))
     min_stop_distance = _rule_value(dealing_rules.get("minNormalStopOrLimitDistance"))
     min_limit_distance = _rule_value(dealing_rules.get("minStepDistance"))
-    margin_percent = _margin_percent(instrument)
+    share_model = share_spread_bet_model(market)
+    margin_percent = _margin_percent(instrument) or (share_model.margin_percent if share_model is not None else None)
+    contract_point_size = share_model.contract_point_size if share_model is not None else 1.0
     guaranteed_stop_premium = _rule_value(instrument.get("limitedRiskPremium")) or float(snapshot.get("controlledRiskExtraSpread") or 0.0)
     currency = _instrument_currency(instrument) or _default_currency(market)
     slippage_bps = max(market.slippage_bps, float(slippage_factor or 0.0))
@@ -120,6 +153,10 @@ def profile_from_ig_market(
         min_stop_distance=min_stop_distance,
         min_limit_distance=min_limit_distance,
         margin_percent=margin_percent,
+        contract_point_size=contract_point_size,
+        min_stop_distance_percent=share_model.min_stop_distance_percent if share_model is not None else None,
+        share_spread_category=share_model.spread_category if share_model is not None else "",
+        share_region=share_model.asset_region if share_model is not None else "",
         guaranteed_stop_premium_points=max(0.0, guaranteed_stop_premium),
         overnight_admin_fee_annual=0.01 if market.asset_class == "forex" else 0.03,
         fx_conversion_bps=80.0,
@@ -148,6 +185,7 @@ def backtest_config_from_profile(
         overnight_interest_annual=profile.overnight_interest_annual,
         fx_conversion_bps=profile.fx_conversion_bps,
         guaranteed_stop_premium_points=profile.guaranteed_stop_premium_points,
+        contract_point_size=profile.contract_point_size,
         instrument_currency=profile.instrument_currency,
         account_currency=profile.account_currency,
         cost_confidence=profile.confidence,
@@ -272,4 +310,12 @@ def _default_currency(market: MarketMapping) -> str:
         return "GBP"
     if market.market_id in {"DE40", "FR40", "EU50"}:
         return "EUR"
+    if market.asset_class == "share":
+        symbol = market.eodhd_symbol.upper()
+        if symbol.endswith(".US"):
+            return "USD"
+        if symbol.endswith(".LSE"):
+            return "GBP"
+        if symbol.endswith((".PA", ".F", ".XETRA", ".MI", ".AS", ".BR", ".SW")):
+            return "EUR"
     return "GBP"

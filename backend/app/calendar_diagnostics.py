@@ -196,13 +196,14 @@ def _pnl_rows(bars: list[OHLCBar], signals: list[int], config: BacktestConfig) -
         direction = _normalize_signal(signals[index - 1])
         position = _target_exposure(direction, previous_exposure, equity, config)
         exposure_delta = abs(position - previous_exposure)
-        gross = position * (current_bar.close - previous_bar.close)
-        notional = previous_bar.close * abs(position)
+        point_size = _contract_point_size(config)
+        gross = position * ((current_bar.close - previous_bar.close) / point_size)
+        notional = (previous_bar.close / point_size) * abs(position)
         stress = max(0.0, config.cost_stress_multiplier)
-        spread = previous_bar.close * (config.spread_bps / 10_000) * stress * exposure_delta / 2
-        slippage = previous_bar.close * (config.slippage_bps / 10_000) * stress * exposure_delta
-        commission = previous_bar.close * (config.commission_bps / 10_000) * exposure_delta / 2
-        guaranteed = config.guaranteed_stop_premium_points * exposure_delta / 2 if config.use_guaranteed_stop else 0.0
+        spread = (previous_bar.close / point_size) * (config.spread_bps / 10_000) * stress * exposure_delta / 2
+        slippage = (previous_bar.close / point_size) * (config.slippage_bps / 10_000) * stress * exposure_delta
+        commission = (previous_bar.close / point_size) * (config.commission_bps / 10_000) * exposure_delta / 2
+        guaranteed = (config.guaranteed_stop_premium_points / point_size) * exposure_delta / 2 if config.use_guaranteed_stop else 0.0
         funding = 0.0
         if position != 0 and current_bar.timestamp.date() > previous_bar.timestamp.date():
             annual_rate = max(0.0, config.overnight_admin_fee_annual + config.overnight_interest_annual)
@@ -308,6 +309,14 @@ def _target_exposure(direction: int, previous_exposure: float, equity: float, co
     if config.compound_position_size:
         stake *= max(0.0, equity) / config.starting_cash
     return direction * max(0.0, stake)
+
+
+def _contract_point_size(config: BacktestConfig) -> float:
+    try:
+        value = float(config.contract_point_size)
+    except (TypeError, ValueError):
+        return 1.0
+    return value if value > 0 else 1.0
 
 
 def _parse_date(value: Any) -> date | None:

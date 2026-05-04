@@ -1274,12 +1274,14 @@ function App() {
                       <button type="button" className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"} key={item.market_id} onClick={() => toggleMarket(item.market_id)}>
                         <strong>{item.market_id}</strong>
                         <span>{item.name}</span>
+                        {marketSubline(item) && <small>{marketSubline(item)}</small>}
                       </button>
                     ))}
                     {disabledMarkets.map((item) => (
                       <button type="button" className="market-chip unavailable" key={item.market_id} disabled title={marketAvailabilityNote(item)}>
                         <strong>{item.market_id}</strong>
                         <span>{item.name}</span>
+                        {marketSubline(item) && <small>{marketSubline(item)}</small>}
                         <span>{marketAvailabilityNote(item)}</span>
                       </button>
                     ))}
@@ -2125,7 +2127,10 @@ function MarketTable({ markets }) {
               <td>{item.eodhd_symbol}</td>
               <td>{item.ig_name || "search required"}</td>
               <td>{item.ig_epic || "manual"}</td>
-              <td>{normalizeInterval(item.default_timeframe)} · est {round(item.estimated_spread_bps ?? item.spread_bps)} / {round(item.estimated_slippage_bps ?? item.slippage_bps)} bps</td>
+              <td>
+                {normalizeInterval(item.default_timeframe)} · est {round(item.estimated_spread_bps ?? item.spread_bps)} / {round(item.estimated_slippage_bps ?? item.slippage_bps)} bps
+                {marketSubline(item) && <small>{marketSubline(item)}</small>}
+              </td>
               <td>{item.enabled ? "Yes" : marketAvailabilityNote(item)}</td>
             </tr>
           ))}
@@ -2514,12 +2519,14 @@ function CandidateFactoryView({
             <button type="button" className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"} key={item.market_id} onClick={() => toggleMarket(item.market_id)}>
               <strong>{item.market_id}</strong>
               <span>{item.name} · {normalizeInterval(item.default_timeframe)}</span>
+              {marketSubline(item) && <small>{marketSubline(item)}</small>}
             </button>
           ))}
           {disabledMarkets.map((item) => (
             <button type="button" className="market-chip unavailable" key={item.market_id} disabled title={marketAvailabilityNote(item)}>
               <strong>{item.market_id}</strong>
               <span>{item.name} · {normalizeInterval(item.default_timeframe)}</span>
+              {marketSubline(item) && <small>{marketSubline(item)}</small>}
               <span>{marketAvailabilityNote(item)}</span>
             </button>
           ))}
@@ -3192,9 +3199,12 @@ function CostProfile({ market, profile, onLoad }) {
       <div className="mini-metrics">
         <Metric label="Spread" value={`${round(profile?.spread_bps ?? market.spread_bps)} bps`} />
         <Metric label="Slippage" value={`${round(profile?.slippage_bps ?? market.slippage_bps)} bps`} />
+        <Metric label="Margin" value={`${round(profile?.margin_percent ?? market.spread_bet_model?.margin_percent ?? 5)}%`} />
+        <Metric label="Point" value={`${round(profile?.contract_point_size ?? market.spread_bet_model?.contract_point_size ?? 1, 4)}`} />
         <Metric label="Funding" value={`${round((profile?.overnight_admin_fee_annual ?? 0.03) * 100)}%`} />
         <Metric label="FX" value={`${round(profile?.fx_conversion_bps ?? 80)} bps`} />
       </div>
+      {market.spread_bet_model && <small className="muted">{shareSpreadBetLabel(market.spread_bet_model)}</small>}
       <button type="button" className="ghost" onClick={onLoad}>Load profile</button>
     </div>
   );
@@ -3399,6 +3409,21 @@ function marketAvailabilityNote(market = {}) {
     return "Broker-only: enable after bar data is mapped";
   }
   return "Disabled in market registry";
+}
+
+function marketSubline(market = {}) {
+  if (market.spread_bet_model) {
+    return shareSpreadBetLabel(market.spread_bet_model);
+  }
+  return "";
+}
+
+function shareSpreadBetLabel(model = {}) {
+  const region = String(model.asset_region || "share").toUpperCase();
+  const category = model.spread_category ? ` ${model.spread_category}` : "";
+  const margin = model.margin_percent ? ` · ${round(model.margin_percent)}% margin` : "";
+  const point = model.contract_point_size && Number(model.contract_point_size) !== 1 ? ` · point ${round(model.contract_point_size, 4)}` : "";
+  return `${region}${category} share spread bet${margin}${point}`;
 }
 
 function trialMarketId(item) {

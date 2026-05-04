@@ -37,6 +37,7 @@ from .research_critic import ResearchCritic
 from .research_lab import ResearchStack
 from .research_store import ResearchStore
 from .settings_store import SettingsStore
+from .share_spread_betting import share_spread_bet_model
 
 app = FastAPI(title="slrno Trading Bot", version="0.1.0")
 app.add_middleware(
@@ -1319,7 +1320,17 @@ def _should_try_fmp_daily_fallback(market: MarketMapping, interval: str, bar_cou
 
 
 def _fmp_daily_symbol_for_market(market: MarketMapping) -> str:
-    return FMP_DAILY_BAR_SYMBOLS.get(market.market_id, "")
+    configured = FMP_DAILY_BAR_SYMBOLS.get(market.market_id, "")
+    if configured:
+        return configured
+    if market.asset_class != "share":
+        return ""
+    symbol = market.eodhd_symbol.strip()
+    if symbol.endswith(".US"):
+        return symbol.removesuffix(".US")
+    if symbol.endswith(".LSE"):
+        return f"{symbol.removesuffix('.LSE')}.L"
+    return symbol
 
 
 def _is_eodhd_monthly_commodity(market: MarketMapping) -> bool:
@@ -1481,6 +1492,11 @@ def _market_response(market: MarketMapping) -> dict[str, object]:
     payload = dict(market.__dict__)
     payload["estimated_spread_bps"] = market.spread_bps
     payload["estimated_slippage_bps"] = market.slippage_bps
+    share_model = share_spread_bet_model(market)
+    if share_model is not None:
+        payload["spread_bet_model"] = share_model.as_dict()
+        payload["estimated_spread_bps"] = max(market.spread_bps, share_model.dealing_spread_bps)
+        payload["estimated_slippage_bps"] = max(market.slippage_bps, share_model.slippage_bps)
     return payload
 
 

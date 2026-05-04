@@ -93,3 +93,19 @@ def test_capital_scenarios_require_reference_price_for_margin_and_stop_estimates
 
     assert all("missing_reference_price" in item["violations"] for item in scenarios)
     assert capital_summary(scenarios)["smallest_feasible_account"] is None
+
+
+def test_capital_scenarios_convert_share_points_for_margin_and_risk():
+    scenarios = capital_scenarios(
+        {"net_profit": 100},
+        {"position_size": 1.0, "stop_loss_bps": 100},
+        {"bid": 200, "offer": 200, "min_deal_size": 1.0, "margin_percent": 20.0, "contract_point_size": 0.01},
+        account_sizes=(3000,),
+    )
+
+    scenario = {item["account_size"]: item for item in scenarios}[3000.0]
+    assert scenario["contract_point_size"] == 0.01
+    assert scenario["estimated_stop_loss"] == 200
+    assert scenario["estimated_margin"] == 4000
+    assert "risk_budget_exceeded" in scenario["violations"]
+    assert "margin_too_large" in scenario["violations"]

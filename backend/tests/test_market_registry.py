@@ -42,3 +42,7 @@ def test_market_registry_seeds_priority_ig_markets(tmp_path):
     assert markets["KOSPI200"].enabled is True
     assert markets["SA40"].enabled is False
     assert markets["SA40"].ig_epic == "IX.D.SAF.DAILY.IP"
+    assert markets["AAPL"].default_timeframe == "1day"
+    assert markets["AAPL"].spread_bps == 10.0
+    assert markets["LLOY"].asset_class == "share"
+    assert markets["LLOY"].min_backtest_bars == 250
