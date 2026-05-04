@@ -120,6 +120,22 @@ def test_select_ig_market_candidate_prefers_named_market_match():
     assert selected["epic"] == "IX.D.NASDAQ.IFMM.IP"
 
 
+def test_select_ig_market_candidate_requires_share_catalogue_type_for_shares():
+    market = MarketMapping("MKS", "Marks and Spencer Group", "share", "MKS.LSE", "", ig_name="Marks and Spencer Group")
+
+    selected = select_ig_market_candidate(
+        market,
+        [
+            {"epic": "IX.D.UNRELATED.IP", "name": "Marks and Spencer Group Index", "type": "INDICES"},
+            {"epic": "KA.D.MKS.DAILY.IP", "name": "Marks and Spencer Group", "type": "SHARES"},
+        ],
+    )
+
+    assert selected is not None
+    assert selected["epic"] == "KA.D.MKS.DAILY.IP"
+    assert select_ig_market_candidate(market, [{"epic": "IX.D.MKS.IP", "name": "Marks and Spencer", "type": "INDICES"}]) is None
+
+
 def test_profile_from_ig_market_stores_reference_midpoint():
     market = MarketMapping("NAS100", "Nasdaq 100", "index", "NDX.INDX", "IX.D.NASDAQ.IFMM.IP")
 

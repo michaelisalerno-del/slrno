@@ -699,6 +699,7 @@ async def discover_midcap_markets(
     max_spread_bps: float = Query(default=DEFAULT_MAX_SPREAD_BPS, ge=1),
     account_size: float = Query(default=WORKING_ACCOUNT_SIZE_GBP, gt=0),
     verify_ig: bool = True,
+    require_ig_catalogue: bool = True,
 ) -> dict[str, object]:
     criteria = MidcapDiscoveryCriteria(
         country=country,
@@ -744,10 +745,21 @@ async def discover_midcap_markets(
                 fmp_error = f"{fmp_error}; FMP batch quote fallback failed: {_public_error(exc)}" if fmp_error else _public_error(exc)
     candidates = build_midcap_candidates(rows, criteria, source)[:limit]
     ig_status = "not_checked"
-    if verify_ig:
+    if require_ig_catalogue and not verify_ig:
+        ig_status = "ig_required_not_checked"
+        candidates = [
+            candidate.with_ig_blocker("not_checked", "ig_catalogue_not_checked", "ig_catalogue_required")
+            for candidate in candidates
+        ]
+    elif verify_ig:
         provider = _ig_provider_from_settings(criteria.product_mode)
         if provider is None:
             ig_status = "ig_not_configured"
+            if require_ig_catalogue:
+                candidates = [
+                    candidate.with_ig_blocker("ig_not_configured", "ig_credentials_required", "ig_catalogue_required")
+                    for candidate in candidates
+                ]
         else:
             candidates = await _verify_midcap_candidates_with_ig(provider, candidates)
             ig_status = "checked"
@@ -759,11 +771,19 @@ async def discover_midcap_markets(
         "data_source": source,
         "fmp_error": fmp_error,
         "ig_status": ig_status,
+        "ig_catalogue_required": require_ig_catalogue,
         "criteria": criteria.as_dict(),
         "eligible_count": sum(1 for candidate in candidates if candidate.eligible),
         "candidates": [candidate.as_dict() for candidate in candidates],
+        "screening_pipeline": [
+            "FMP company-screener when your plan allows it.",
+            "FMP batch-quote enrichment for the starter universe when the screener is unavailable.",
+            "IG /markets search catalogue match as the hard eligibility gate.",
+            "Installed markets still need IG cost sync and normal paper-readiness checks before promotion.",
+        ],
         "notes": [
             "Discovery only installs a market mapping; candidates still need full backtest, IG cost sync, OOS, fold, regime, and paper gates.",
+            "Eligible means the candidate passed the financial filters and was found in the selected IG account catalogue.",
             "CFD account roles can be saved now, but the current research engine still uses the spread-bet cost model unless a future CFD cost model is added.",
         ],
     }

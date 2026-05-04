@@ -180,6 +180,7 @@ function App() {
     max_spread_bps: "60",
     account_size: String(WORKING_ACCOUNT_SIZE),
     verify_ig: true,
+    require_ig_catalogue: true,
   });
   const [midcapDiscovery, setMidcapDiscovery] = React.useState(null);
   const [midcapLoading, setMidcapLoading] = React.useState(false);
@@ -3211,8 +3212,8 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, onSearch, on
         <label>Limit</label>
         <input value={search.limit} onChange={(event) => setSearch({ ...search, limit: event.target.value })} type="number" min="1" max="120" step="1" />
         <label className="check compact-check">
-          <input type="checkbox" checked={search.verify_ig} onChange={(event) => setSearch({ ...search, verify_ig: event.target.checked })} />
-          Check IG
+          <input type="checkbox" checked readOnly />
+          IG catalogue required
         </label>
         <button type="submit" disabled={loading}><Search size={16} /> {loading ? "Searching..." : "Find midcaps"}</button>
       </form>
@@ -3220,7 +3221,13 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, onSearch, on
         <div className="discovery-summary">
           <Metric label="Eligible" value={result.eligible_count ?? 0} />
           <Metric label="Source" value={result.data_source ?? "n/a"} />
-          <Metric label="IG check" value={result.ig_status ?? "n/a"} />
+          <Metric label="IG catalogue" value={result.ig_status ?? "n/a"} />
+        </div>
+      )}
+      {result?.ig_status === "ig_not_configured" && (
+        <div className="status compact-status">
+          <strong>IG catalogue check required</strong>
+          <span>Save IG credentials and account roles in Settings before installing discovered share markets.</span>
         </div>
       )}
       <div className="midcap-list">
@@ -3247,7 +3254,7 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, onSearch, on
                 <WarningChips warnings={[...(candidate.blockers ?? []), ...(candidate.warnings ?? [])]} limit={6} />
               </div>
             )}
-            <button type="button" className="ghost" onClick={() => onInstall(candidate)} disabled={candidate.ig_status === "ig_not_found"}>
+            <button type="button" className="ghost" onClick={() => onInstall(candidate)} disabled={!candidate.eligible || candidate.ig_status !== "ig_matched"}>
               <Plus size={16} /> Install market
             </button>
           </div>

@@ -82,3 +82,27 @@ def test_midcap_discovery_ig_match_controls_eligibility_after_verification():
     assert "ig_market_not_found" in missing.blockers
     assert matched.eligible is True
     assert matched.market_mapping().ig_epic == "KA.D.MKS.DAILY.IP"
+
+
+def test_midcap_discovery_blocks_when_ig_catalogue_is_required_but_unchecked():
+    candidate = build_midcap_candidates(
+        [
+            {
+                "symbol": "MKS.L",
+                "companyName": "Marks and Spencer Group",
+                "exchangeShortName": "LSE",
+                "country": "GB",
+                "marketCap": 5_000_000_000,
+                "price": 300,
+                "volume": 2_000_000,
+            }
+        ],
+        MidcapDiscoveryCriteria(country="UK", account_size=3000),
+        "fmp_company_screener",
+    )[0]
+
+    blocked = candidate.with_ig_blocker("ig_not_configured", "ig_credentials_required", "ig_catalogue_required")
+
+    assert blocked.eligible is False
+    assert "ig_credentials_required" in blocked.blockers
+    assert "ig_catalogue_required" in blocked.warnings

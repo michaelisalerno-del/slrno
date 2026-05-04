@@ -92,3 +92,28 @@ def test_save_ig_account_roles_tracks_separate_spread_bet_and_cfd_accounts(tmp_p
     assert roles["cfd"]["masked_account_id"].endswith("8765")
     assert "ABC12345" not in str(roles)
     assert store.get_secret("ig_accounts", "spread_bet_account_id") == "ABC12345"
+
+
+def test_midcap_endpoint_blocks_candidates_until_ig_catalogue_is_checked(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    monkeypatch.setattr(main, "settings", store)
+
+    result = asyncio.run(
+        main.discover_midcap_markets(
+            country="UK",
+            product_mode="spread_bet",
+            limit=3,
+            min_market_cap=250_000_000,
+            max_market_cap=10_000_000_000,
+            min_volume=100_000,
+            max_spread_bps=60,
+            account_size=3000,
+            verify_ig=False,
+            require_ig_catalogue=True,
+        )
+    )
+
+    assert result["ig_catalogue_required"] is True
+    assert result["eligible_count"] == 0
+    assert result["ig_status"] == "ig_required_not_checked"
+    assert "ig_catalogue_not_checked" in result["candidates"][0]["blockers"]

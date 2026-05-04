@@ -240,6 +240,11 @@ def select_ig_market_candidate(market: MarketMapping, candidates: list[dict[str,
     viable = [candidate for candidate in candidates if str(candidate.get("epic") or "").strip()]
     if not viable:
         return None
+    if market.asset_class.lower() == "share":
+        share_matches = [candidate for candidate in viable if _asset_class_matches("share", _normalize_search_text(candidate.get("type")))]
+        if not share_matches:
+            return None
+        viable = share_matches
     return max(viable, key=lambda candidate: _ig_candidate_score(market, candidate))
 
 

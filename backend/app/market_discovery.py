@@ -109,6 +109,13 @@ class MidcapDiscoveryCandidate:
                 blockers = (*blockers, "ig_market_not_found")
         return replace(self, ig_status=status, ig_epic=epic, ig_name=name, blockers=blockers, eligible=not blockers)
 
+    def with_ig_blocker(self, status: str, blocker: str, warning: str = "") -> "MidcapDiscoveryCandidate":
+        blockers = self.blockers if blocker in self.blockers else (*self.blockers, blocker)
+        warnings = tuple(item for item in self.warnings if item != "ig_availability_not_checked")
+        if warning and warning not in warnings:
+            warnings = (*warnings, warning)
+        return replace(self, ig_status=status, blockers=blockers, warnings=warnings, eligible=False)
+
     def as_dict(self) -> dict[str, object]:
         mapping = self.market_mapping()
         return {
