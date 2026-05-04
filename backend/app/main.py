@@ -23,7 +23,14 @@ from .capital import (
 )
 from .config import allowed_origins
 from .evidence_export import build_research_export_zip
-from .ig_costs import IGCostProfile, backtest_config_from_profile, profile_from_ig_market, public_ig_cost_profile, select_ig_market_candidate
+from .ig_costs import (
+    IGCostProfile,
+    backtest_config_from_profile,
+    normalized_cost_profile_payload,
+    profile_from_ig_market,
+    public_ig_cost_profile,
+    select_ig_market_candidate,
+)
 from .ig_spread_bet_engines import list_spread_bet_engines
 from .market_context import summarize_economic_calendar, unavailable_market_context
 from .market_data_cache import MarketDataCache
@@ -812,7 +819,7 @@ def get_ig_cost_profile(market_id: str) -> dict[str, object]:
     market = markets.get(market_id)
     if market is None:
         raise HTTPException(status_code=404, detail="Market not found")
-    stored = research_store.get_cost_profile(market_id)
+    stored = _cost_profile_payload_for_market(market)
     if stored is not None:
         return stored
     profile = public_ig_cost_profile(market)
@@ -1501,7 +1508,7 @@ def _market_response(market: MarketMapping) -> dict[str, object]:
 
 
 def _cost_profile_for_market(market: MarketMapping) -> IGCostProfile:
-    stored = research_store.get_cost_profile(market.market_id)
+    stored = _cost_profile_payload_for_market(market)
     if stored is not None:
         stored.pop("updated_at", None)
         return IGCostProfile(**{key: value for key, value in stored.items() if key in IGCostProfile.__dataclass_fields__})
@@ -1514,7 +1521,7 @@ def _trial_with_capital(trial: dict[str, object]) -> dict[str, object]:
     parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
     backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
     market_id = str(parameters.get("market_id") or "")
-    profile = research_store.get_cost_profile(market_id) if market_id else None
+    profile = _cost_profile_payload_for_market_id(market_id) if market_id else None
     scenarios = capital_scenarios(backtest, parameters, profile, account_sizes=_scenario_sizes_for_parameters(parameters))
     return {**trial, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
 
@@ -1525,7 +1532,7 @@ def _candidate_with_capital(candidate: dict[str, object]) -> dict[str, object]:
     parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
     backtest = audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
     market_id = str(candidate.get("market_id") or parameters.get("market_id") or "")
-    profile = research_store.get_cost_profile(market_id) if market_id else None
+    profile = _cost_profile_payload_for_market_id(market_id) if market_id else None
     scenarios = capital_scenarios(backtest, parameters, profile, account_sizes=_scenario_sizes_for_parameters(parameters))
     return {**candidate, "capital_scenarios": scenarios, "capital_summary": capital_summary(scenarios)}
 
@@ -1533,6 +1540,24 @@ def _candidate_with_capital(candidate: dict[str, object]) -> dict[str, object]:
 def _scenario_sizes_for_parameters(parameters: dict[str, object]) -> tuple[float, ...]:
     search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
     return scenario_account_sizes(parameters.get("testing_account_size") or search_audit.get("testing_account_size"))
+
+
+def _cost_profile_payload_for_market_id(market_id: str) -> dict[str, object] | None:
+    market = markets.get(market_id)
+    if market is None:
+        return research_store.get_cost_profile(market_id)
+    return _cost_profile_payload_for_market(market)
+
+
+def _cost_profile_payload_for_market(market: MarketMapping) -> dict[str, object] | None:
+    stored = research_store.get_cost_profile(market.market_id)
+    if stored is None:
+        return None
+    normalized = normalized_cost_profile_payload(market, stored)
+    if normalized != stored:
+        research_store.save_cost_profile(normalized)
+        normalized["updated_at"] = stored.get("updated_at", normalized.get("updated_at", ""))
+    return normalized
 
 
 def _candidate_summary_payload(candidate: dict[str, object]) -> dict[str, object]:

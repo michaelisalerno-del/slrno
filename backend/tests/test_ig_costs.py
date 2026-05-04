@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.ig_costs import backtest_config_from_profile, profile_badge, profile_from_ig_market, public_ig_cost_profile, select_ig_market_candidate
+from app.ig_costs import (
+    backtest_config_from_profile,
+    normalized_cost_profile_payload,
+    profile_badge,
+    profile_from_ig_market,
+    public_ig_cost_profile,
+    select_ig_market_candidate,
+)
 from app.market_registry import MarketMapping
 
 
@@ -37,6 +44,26 @@ def test_uk_share_public_cost_profile_uses_pence_points():
     assert profile.margin_percent == 20.0
     assert profile.contract_point_size == 1.0
     assert profile.share_region == "uk"
+
+
+def test_stale_share_public_cost_profile_is_upgraded():
+    market = MarketMapping("AAPL", "Apple", "share", "AAPL.US", "", plugin_id="ig-aapl", spread_bps=4.0, slippage_bps=2.0)
+
+    payload = normalized_cost_profile_payload(
+        market,
+        {
+            "market_id": "AAPL",
+            "spread_bps": 4.0,
+            "slippage_bps": 2.0,
+            "confidence": "ig_public_spread_baseline",
+            "source": "market_registry",
+        },
+    )
+
+    assert payload["spread_bps"] == 10.0
+    assert payload["slippage_bps"] == 5.0
+    assert payload["margin_percent"] == 20.0
+    assert payload["contract_point_size"] == 0.01
 
 
 def test_ig_market_payload_sets_live_spread_and_rules():

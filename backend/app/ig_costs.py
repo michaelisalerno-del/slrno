@@ -192,6 +192,37 @@ def backtest_config_from_profile(
     )
 
 
+def normalized_cost_profile_payload(market: MarketMapping, payload: dict[str, object], account_currency: str = "GBP") -> dict[str, object]:
+    normalized = dict(payload)
+    share_model = share_spread_bet_model(market)
+    if share_model is None:
+        return normalized
+    public = public_ig_cost_profile(market, account_currency=account_currency).as_dict()
+    confidence = str(normalized.get("confidence") or "")
+    source = str(normalized.get("source") or "")
+    public_like = confidence in {"", "ig_public_spread_baseline", "eodhd_ig_cost_envelope"} or source in {"", "market_registry"}
+    if public_like:
+        normalized["spread_bps"] = max(_optional_float(normalized.get("spread_bps")) or 0.0, float(public["spread_bps"]))
+        normalized["slippage_bps"] = max(_optional_float(normalized.get("slippage_bps")) or 0.0, float(public["slippage_bps"]))
+    for key in (
+        "margin_percent",
+        "contract_point_size",
+        "min_stop_distance_percent",
+        "share_spread_category",
+        "share_region",
+        "instrument_currency",
+        "account_currency",
+    ):
+        if normalized.get(key) in (None, ""):
+            normalized[key] = public.get(key)
+    notes = list(normalized.get("notes") or [])
+    repair_note = "Stored share cost profile was upgraded with share spread-bet point, margin, and spread defaults."
+    if repair_note not in notes:
+        notes.append(repair_note)
+    normalized["notes"] = notes
+    return normalized
+
+
 def profile_badge(profile: IGCostProfile | dict[str, object] | None) -> str:
     if profile is None:
         return "Needs IG price validation"
