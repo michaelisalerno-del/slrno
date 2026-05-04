@@ -81,6 +81,15 @@ STYLE_FAMILIES = {
 
 CALENDAR_FAMILIES = {"calendar_turnaround_tuesday", "month_end_seasonality"}
 LONG_BIAS_FAMILIES = CALENDAR_FAMILIES | {"everyday_long"}
+DAY_TRADING_FAMILIES = (
+    "intraday_trend",
+    "breakout",
+    "liquidity_sweep_reversal",
+    "mean_reversion",
+    "volatility_expansion",
+    "scalping",
+)
+INTRADAY_INTERVALS = {"1min", "1m", "5min", "5m", "15min", "15m", "30min", "30m", "1hour", "1h", "60min", "60m"}
 
 ENGINE_DEFINITIONS = [
     {
@@ -112,6 +121,10 @@ class AdaptiveSearchConfig:
     account_size: float = WORKING_ACCOUNT_SIZE_GBP
     source_template: dict[str, object] = field(default_factory=dict)
     market_context: dict[str, object] = field(default_factory=dict)
+    day_trading_mode: bool = False
+    force_flat_before_close: bool = False
+    paper_queue_limit: int = 3
+    review_queue_limit: int = 10
     seed: int = 7
 
 
@@ -148,6 +161,9 @@ def run_adaptive_search(
         if frozen_family:
             families = (frozen_family,)
         budget = 1
+    day_trading_mode = _day_trading_mode(config)
+    if day_trading_mode and not frozen_validation:
+        families = _day_trading_families(families)
     rng = Random(_stable_seed(market_id, timeframe, config.seed, config.trading_style))
     labels = triple_barrier_labels(bars, TripleBarrierConfig())
     backtest_base = backtest_config_from_profile(
@@ -169,6 +185,7 @@ def run_adaptive_search(
             if frozen_validation
             else _sample_parameters(rng, family, config.risk_profile, trial_index, config.repair_mode, target_regime)
         )
+        parameters = _apply_day_trading_contract(parameters, family, timeframe, config)
         raw_signals = _generate_signals(bars, family, parameters)
         signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}, regime_by_date=regime_by_date) if target_regime else raw_signals
         backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
@@ -208,7 +225,9 @@ def run_adaptive_search(
             sorted(
                 set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
                     str(warning) for warning in pattern_analysis.get("warnings", [])
-                ).union(str(warning) for warning in calendar_analysis.get("warnings", []))
+                ).union(str(warning) for warning in calendar_analysis.get("warnings", [])).union(
+                    _day_trading_warnings(backtest, family, timeframe, parameters)
+                )
             )
         )
         parameters = {
@@ -235,6 +254,10 @@ def run_adaptive_search(
             "evidence_profile": evidence_profile,
             "bar_pattern_analysis": pattern_analysis,
             "calendar_context_analysis": calendar_analysis,
+            "day_trading_mode": bool(parameters.get("day_trading_mode")),
+            "holding_period": parameters.get("holding_period", "intraday" if parameters.get("day_trading_mode") else "unspecified"),
+            "force_flat_before_close": bool(parameters.get("force_flat_before_close")),
+            "no_overnight": bool(parameters.get("no_overnight")),
         }
         if frozen_template:
             parameters["source_template"] = _source_template_audit(frozen_template)
@@ -277,6 +300,7 @@ def run_adaptive_search(
                 global_index = budget + regime_scan_trial_count
                 family = families[global_index % len(families)]
                 parameters = _sample_parameters(rng, family, config.risk_profile, global_index, config.repair_mode, target_regime)
+                parameters = _apply_day_trading_contract(parameters, family, timeframe, config)
                 raw_signals = _generate_signals(bars, family, parameters)
                 signals = gate_signals_to_regimes(bars, raw_signals, {target_regime}, regime_by_date=regime_by_date)
                 backtest_config = replace(backtest_base, position_size=float(parameters["position_size"]))
@@ -316,7 +340,9 @@ def run_adaptive_search(
                     sorted(
                         set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
                             str(warning) for warning in pattern_analysis.get("warnings", [])
-                        ).union(str(warning) for warning in calendar_analysis.get("warnings", []))
+                        ).union(str(warning) for warning in calendar_analysis.get("warnings", [])).union(
+                            _day_trading_warnings(backtest, family, timeframe, parameters)
+                        )
                     )
                 )
                 parameters = {
@@ -345,6 +371,10 @@ def run_adaptive_search(
                     "evidence_profile": evidence_profile,
                     "bar_pattern_analysis": pattern_analysis,
                     "calendar_context_analysis": calendar_analysis,
+                    "day_trading_mode": bool(parameters.get("day_trading_mode")),
+                    "holding_period": parameters.get("holding_period", "intraday" if parameters.get("day_trading_mode") else "unspecified"),
+                    "force_flat_before_close": bool(parameters.get("force_flat_before_close")),
+                    "no_overnight": bool(parameters.get("no_overnight")),
                 }
                 candidate = ProbabilityCandidate(
                     name=f"{config.trading_style}_{target_regime}_{family}_{scan_index + 1}",
@@ -410,6 +440,66 @@ def balanced_score(
     )
 
 
+def _day_trading_mode(config: AdaptiveSearchConfig) -> bool:
+    return bool(config.day_trading_mode or config.force_flat_before_close)
+
+
+def _day_trading_families(families: tuple[str, ...]) -> tuple[str, ...]:
+    selected = tuple(family for family in families if family in DAY_TRADING_FAMILIES)
+    return selected or DAY_TRADING_FAMILIES
+
+
+def _apply_day_trading_contract(
+    parameters: dict[str, float | int | str],
+    family: str,
+    timeframe: str,
+    config: AdaptiveSearchConfig,
+) -> dict[str, float | int | str | bool]:
+    if not _day_trading_mode(config):
+        return parameters
+    output: dict[str, float | int | str | bool] = dict(parameters)
+    output.update(
+        {
+            "day_trading_mode": True,
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+            "flat_policy": "last_bar_before_date_change",
+            "paper_order_mode": "preview_only",
+            "live_ordering_enabled": False,
+            "day_trading_interval": timeframe,
+        }
+    )
+    if family not in DAY_TRADING_FAMILIES:
+        output["overnight_template_family"] = True
+    return output
+
+
+def _day_trading_warnings(
+    backtest: BacktestResult,
+    family: str,
+    timeframe: str,
+    parameters: dict[str, object],
+) -> tuple[str, ...]:
+    if not parameters.get("day_trading_mode"):
+        return ()
+    warnings: list[str] = []
+    if family not in DAY_TRADING_FAMILIES:
+        warnings.append("day_trade_forbidden_overnight_family")
+    if _normalize_interval(timeframe) not in INTRADAY_INTERVALS:
+        warnings.append("day_trade_requires_intraday_bars")
+    if not parameters.get("force_flat_before_close") or not parameters.get("no_overnight"):
+        warnings.append("day_trade_missing_flat_policy")
+    if backtest.funding_cost > 0:
+        warnings.append("day_trade_held_overnight")
+    return tuple(warnings)
+
+
+def _normalize_interval(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return {"1h": "1hour", "60m": "60min"}.get(text, text)
+
+
 def _regime_scan_budget(config: AdaptiveSearchConfig) -> int:
     preset_budget = REGIME_SCAN_PRESET_BUDGETS.get(config.preset, REGIME_SCAN_PRESET_BUDGETS["balanced"])
     requested = config.regime_scan_budget_per_regime
@@ -431,6 +521,9 @@ def _source_template(payload: object) -> dict[str, object]:
         "interval": str(payload.get("interval") or parameters.get("timeframe") or ""),
         "target_regime": str(payload.get("target_regime") or parameters.get("target_regime") or ""),
         "repair_attempt_count": _safe_int(payload.get("repair_attempt_count")),
+        "holding_period": str(payload.get("holding_period") or parameters.get("holding_period") or ""),
+        "force_flat_before_close": bool(payload.get("force_flat_before_close") or parameters.get("force_flat_before_close")),
+        "no_overnight": bool(payload.get("no_overnight") or parameters.get("no_overnight")),
         "parameters": {str(key): value for key, value in parameters.items() if str(key) in FROZEN_PARAMETER_KEYS},
     }
 
@@ -444,6 +537,9 @@ def _source_template_audit(template: dict[str, object]) -> dict[str, object]:
         "interval": template.get("interval"),
         "target_regime": template.get("target_regime"),
         "repair_attempt_count": template.get("repair_attempt_count"),
+        "holding_period": template.get("holding_period"),
+        "force_flat_before_close": template.get("force_flat_before_close"),
+        "no_overnight": template.get("no_overnight"),
         "frozen_parameters": dict(template.get("parameters") or {}),
     }
 
@@ -776,11 +872,28 @@ def _apply_risk_controls(bars: list[OHLCBar], raw: list[int], parameters: dict[s
                 entry = bar.close
                 hold = 0
                 bars_since_trade = 0
+        if _should_force_flat_before_next_session(bars, index, parameters):
+            position = 0
+            entry = 0.0
+            hold = 0
+            bars_since_trade = 0
         signals.append(position)
         if position != 0:
             hold += 1
         bars_since_trade += 1
     return signals
+
+
+def _should_force_flat_before_next_session(
+    bars: list[OHLCBar],
+    index: int,
+    parameters: dict[str, object],
+) -> bool:
+    if not parameters.get("force_flat_before_close") and not parameters.get("no_overnight"):
+        return False
+    if index >= len(bars) - 1:
+        return False
+    return bars[index + 1].timestamp.date() > bars[index].timestamp.date()
 
 
 def _apply_confidence_gate(raw: list[int], confidences: list[float], top_quantile: float) -> list[int]:
@@ -969,6 +1082,11 @@ def _annotate_evaluations(
                 "repair_attempt_count": _safe_int((evaluation.candidate.parameters.get("source_template") or {}).get("repair_attempt_count"))
                 if isinstance(evaluation.candidate.parameters.get("source_template"), dict)
                 else 0,
+                "day_trading_mode": bool(evaluation.candidate.parameters.get("day_trading_mode")),
+                "holding_period": evaluation.candidate.parameters.get("holding_period"),
+                "force_flat_before_close": bool(evaluation.candidate.parameters.get("force_flat_before_close")),
+                "paper_queue_limit": max(1, min(5, _safe_int(config.paper_queue_limit) or 3)),
+                "review_queue_limit": max(1, min(20, _safe_int(config.review_queue_limit) or 10)),
                 "frozen_validation": bool(evaluation.candidate.parameters.get("frozen_template_validation")),
                 "source_template_name": (evaluation.candidate.parameters.get("source_template") or {}).get("name")
                 if isinstance(evaluation.candidate.parameters.get("source_template"), dict)

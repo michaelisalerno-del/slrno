@@ -154,6 +154,10 @@ class ResearchRunPayload(BaseModel):
     repair_mode: str = "standard"
     account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
     source_template: dict[str, object] = Field(default_factory=dict)
+    day_trading_mode: bool = False
+    force_flat_before_close: bool = False
+    paper_queue_limit: int = Field(default=3, ge=1, le=5)
+    review_queue_limit: int = Field(default=10, ge=1, le=20)
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -511,6 +515,54 @@ def paper_summary() -> dict[str, object]:
         "live_ordering_enabled": False,
         "protocol": "30-day paper review with regime gate before any live trading work",
         "tracked_candidates": tracked_candidates,
+    }
+
+
+@app.get("/day-trading/factory/summary")
+def day_trading_factory_summary(
+    account_size: float = Query(default=WORKING_ACCOUNT_SIZE_GBP, gt=0),
+    paper_limit: int = Query(default=3, ge=1, le=5),
+    review_limit: int = Query(default=10, ge=1, le=20),
+) -> dict[str, object]:
+    candidates = [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(limit=250)]
+    templates = research_store.list_templates(limit=250)
+    day_candidates = [_day_trading_signal_payload(candidate, account_size) for candidate in candidates if _is_day_trading_source(candidate)]
+    day_candidates = [candidate for candidate in day_candidates if candidate is not None]
+    unsuitable = [candidate for candidate in day_candidates if candidate["unsuitable"]]
+    eligible = [candidate for candidate in day_candidates if not candidate["unsuitable"] and candidate["eligible_for_review"]]
+    paper_ready = [candidate for candidate in eligible if candidate["paper_ready"]]
+    review_signals = sorted(eligible, key=_day_trading_signal_rank, reverse=True)[:review_limit]
+    paper_queue = sorted(paper_ready, key=_day_trading_signal_rank, reverse=True)[:paper_limit]
+    day_templates = [template for template in templates if _is_day_trading_template(template)]
+    overnight_templates = [template for template in templates if _is_overnight_template(template)]
+    return {
+        "schema": "day_trading_candidate_factory_v1",
+        "mode": "manual",
+        "account_size": account_size,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "policy": _day_trading_policy(paper_limit, review_limit, account_size),
+        "counts": {
+            "day_trading_candidates": len(day_candidates),
+            "eligible_review_signals": len(eligible),
+            "daily_paper_queue": len(paper_queue),
+            "unsuitable": len(unsuitable),
+            "frozen_day_templates": len(day_templates),
+            "overnight_or_swing_templates": len(overnight_templates),
+        },
+        "daily_paper_queue": paper_queue,
+        "review_signals": review_signals,
+        "unsuitable": unsuitable[:review_limit],
+        "template_library": {
+            "day_trading_templates": [_template_queue_payload(template) for template in day_templates[:review_limit]],
+            "overnight_or_swing_templates": [_template_queue_payload(template) for template in overnight_templates[:review_limit]],
+        },
+        "next_actions": [
+            "Start Day Trading Factory manually from Backtests.",
+            "Install only IG-matched share/market discoveries that fit the selected account.",
+            "Save promising intraday/no-overnight leads to Templates, then Freeze validate before paper.",
+            "Use broker previews only; live and generated order placement stay disabled.",
+        ],
     }
 
 
@@ -1205,6 +1257,10 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         account_size=payload.account_size,
                         source_template=payload.source_template,
                         market_context=market_status.get("market_context") if isinstance(market_status.get("market_context"), dict) else {},
+                        day_trading_mode=payload.day_trading_mode,
+                        force_flat_before_close=payload.force_flat_before_close or payload.day_trading_mode,
+                        paper_queue_limit=payload.paper_queue_limit,
+                        review_queue_limit=payload.review_queue_limit,
                     ),
                 )
                 market_evaluations = list(result.evaluations)
@@ -1561,6 +1617,13 @@ def _research_run_config(
         "account_size": payload.account_size,
         "source_template": _compact_source_template(payload.source_template),
         "product_mode": payload.product_mode,
+        "day_trading_mode": payload.day_trading_mode,
+        "force_flat_before_close": payload.force_flat_before_close or payload.day_trading_mode,
+        "paper_queue_limit": payload.paper_queue_limit,
+        "review_queue_limit": payload.review_queue_limit,
+        "daily_factory_policy": _day_trading_policy(payload.paper_queue_limit, payload.review_queue_limit, payload.account_size)
+        if payload.day_trading_mode
+        else {},
         "research_only": True,
         "ig_validation_required": True,
         "data_source_policy": "eodhd_primary_symbol_with_explicit_fmp_daily_fallback",
@@ -1582,6 +1645,9 @@ def _compact_source_template(source_template: dict[str, object]) -> dict[str, ob
         "interval": str(source_template.get("interval") or parameters.get("timeframe") or ""),
         "target_regime": str(source_template.get("target_regime") or parameters.get("target_regime") or ""),
         "repair_attempt_count": _safe_int(source_template.get("repair_attempt_count")),
+        "holding_period": str(source_template.get("holding_period") or parameters.get("holding_period") or ""),
+        "force_flat_before_close": bool(source_template.get("force_flat_before_close") or parameters.get("force_flat_before_close")),
+        "no_overnight": bool(source_template.get("no_overnight") or parameters.get("no_overnight")),
         "parameters": {
             str(key): value
             for key, value in parameters.items()
@@ -1761,6 +1827,31 @@ def _risk_summary() -> dict[str, object]:
     }
 
 
+def _day_trading_policy(paper_limit: int = 3, review_limit: int = 10, account_size: float = WORKING_ACCOUNT_SIZE_GBP) -> dict[str, object]:
+    return {
+        "start_mode": "manual_button",
+        "automation_status": "planned_market_open_scheduler",
+        "holding_period": "intraday_only",
+        "force_flat_before_close": True,
+        "overnight_positions_allowed": False,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "paper_queue_limit": max(1, min(5, int(paper_limit))),
+        "review_signal_limit": max(1, min(20, int(review_limit))),
+        "account_size": account_size,
+        "capital_checks": [
+            "IG tradability and EPIC match",
+            "recent IG price validation",
+            "spread and slippage",
+            "minimum deal size",
+            "margin percent and minimum margin",
+            "stop distance and planned risk",
+            "35% max margin use for the selected account",
+        ],
+        "execution_policy": "broker-safe previews and paper simulation only",
+    }
+
+
 def _paper_track_candidates(limit: int = 50) -> list[dict[str, object]]:
     tracked: list[dict[str, object]] = []
     for candidate in (_candidate_with_capital(item) for item in research_store.list_candidates(limit=limit)):
@@ -1788,6 +1879,203 @@ def _paper_track_candidates(limit: int = 50) -> list[dict[str, object]]:
             }
         )
     return tracked
+
+
+def _is_day_trading_source(candidate: dict[str, object]) -> bool:
+    parameters = _candidate_parameters(candidate)
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    return bool(
+        parameters.get("day_trading_mode")
+        or search_audit.get("day_trading_mode")
+        or parameters.get("holding_period") == "intraday"
+        or parameters.get("force_flat_before_close")
+        or parameters.get("no_overnight")
+    )
+
+
+def _is_day_trading_template(template: dict[str, object]) -> bool:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    source_template = template.get("source_template") if isinstance(template.get("source_template"), dict) else {}
+    return bool(
+        parameters.get("day_trading_mode")
+        or parameters.get("holding_period") == "intraday"
+        or parameters.get("force_flat_before_close")
+        or parameters.get("no_overnight")
+        or source_template.get("holding_period") == "intraday"
+    )
+
+
+def _is_overnight_template(template: dict[str, object]) -> bool:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    backtest = template.get("backtest") if isinstance(template.get("backtest"), dict) else payload.get("backtest") if isinstance(payload.get("backtest"), dict) else {}
+    family = str(template.get("strategy_family") or "").strip()
+    interval = str(template.get("interval") or "").strip()
+    funding_cost = _safe_number(backtest.get("funding_cost"))
+    return family in {"swing_trend", "calendar_turnaround_tuesday", "month_end_seasonality", "everyday_long"} or interval in {"1day", "1d", "daily"} or funding_cost > 0
+
+
+def _day_trading_signal_payload(candidate: dict[str, object], account_size: float) -> dict[str, object] | None:
+    parameters = _candidate_parameters(candidate)
+    backtest = _candidate_backtest(candidate)
+    readiness = _candidate_readiness(candidate)
+    warnings = _candidate_warning_codes(candidate)
+    scenario = _scenario_for_account(candidate.get("capital_scenarios"), account_size)
+    if not parameters or not backtest:
+        return None
+    terminal = _has_terminal_capital_blocker(warnings, scenario)
+    tier = str(candidate.get("promotion_tier") or _candidate_audit(candidate).get("promotion_tier") or "watchlist")
+    paper_ready = readiness.get("status") == "ready_for_paper" or tier in {"paper_candidate", "validated_candidate"}
+    eligible_for_review = tier in {"watchlist", "incubator", "research_candidate", "paper_candidate", "validated_candidate"} or _safe_number(backtest.get("net_profit")) > 0
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    return {
+        "id": candidate.get("id"),
+        "run_id": candidate.get("run_id"),
+        "strategy_name": candidate.get("strategy_name"),
+        "market_id": candidate.get("market_id") or parameters.get("market_id"),
+        "interval": parameters.get("timeframe") or parameters.get("interval") or "5min",
+        "strategy_family": parameters.get("family"),
+        "target_regime": parameters.get("target_regime") or pattern.get("target_regime"),
+        "promotion_tier": tier,
+        "readiness_status": readiness.get("status", "blocked"),
+        "robustness_score": candidate.get("robustness_score", 0),
+        "paper_readiness_score": search_audit.get("paper_readiness_score", 0),
+        "net_profit": round(_safe_number(backtest.get("net_profit")), 4),
+        "oos_net_profit": round(_safe_number(evidence.get("oos_net_profit"), backtest.get("test_profit")), 4),
+        "trade_count": int(_safe_number(backtest.get("trade_count"))),
+        "oos_trade_count": int(_safe_number(evidence.get("oos_trade_count"))),
+        "cost_to_gross_ratio": round(_safe_number(backtest.get("cost_to_gross_ratio")), 6),
+        "funding_cost": round(_safe_number(backtest.get("funding_cost")), 4),
+        "warnings": warnings,
+        "capital_scenario": scenario,
+        "paper_ready": paper_ready and not terminal,
+        "eligible_for_review": eligible_for_review and not terminal,
+        "unsuitable": terminal,
+        "unsuitable_reason": _unsuitable_reason(warnings, scenario) if terminal else "",
+        "broker_preview_only": True,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
+
+
+def _template_queue_payload(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    warnings = list(template.get("warnings") or payload.get("warnings") or [])
+    return {
+        "id": template.get("id"),
+        "name": template.get("name"),
+        "market_id": template.get("market_id"),
+        "interval": template.get("interval"),
+        "strategy_family": template.get("strategy_family"),
+        "target_regime": template.get("target_regime"),
+        "promotion_tier": template.get("promotion_tier"),
+        "readiness_status": template.get("readiness_status"),
+        "robustness_score": template.get("robustness_score", 0),
+        "warnings": warnings,
+        "holding_period": "intraday" if _is_day_trading_template(template) else "overnight_or_swing",
+        "live_ordering_enabled": False,
+    }
+
+
+def _day_trading_signal_rank(candidate: dict[str, object]) -> tuple[float, ...]:
+    tier_rank = {
+        "validated_candidate": 5,
+        "paper_candidate": 4,
+        "research_candidate": 3,
+        "incubator": 2,
+        "watchlist": 1,
+    }.get(str(candidate.get("promotion_tier") or ""), 0)
+    scenario = candidate.get("capital_scenario") if isinstance(candidate.get("capital_scenario"), dict) else {}
+    capital_rank = 1.0 if scenario.get("feasible") else 0.0
+    cost_penalty = 1.0 if _safe_number(candidate.get("cost_to_gross_ratio")) > 0.65 else 0.0
+    return (
+        tier_rank,
+        capital_rank,
+        _safe_number(candidate.get("paper_readiness_score")),
+        _safe_number(candidate.get("oos_net_profit")),
+        _safe_number(candidate.get("net_profit")),
+        _safe_number(candidate.get("oos_trade_count")),
+        _safe_number(candidate.get("robustness_score")),
+        -cost_penalty,
+    )
+
+
+def _candidate_parameters(candidate: dict[str, object]) -> dict[str, object]:
+    audit = _candidate_audit(candidate)
+    candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+    parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+    return parameters
+
+
+def _candidate_backtest(candidate: dict[str, object]) -> dict[str, object]:
+    audit = _candidate_audit(candidate)
+    return audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
+
+
+def _candidate_readiness(candidate: dict[str, object]) -> dict[str, object]:
+    audit = _candidate_audit(candidate)
+    readiness = audit.get("promotion_readiness") if isinstance(audit.get("promotion_readiness"), dict) else {}
+    return readiness
+
+
+def _candidate_audit(candidate: dict[str, object]) -> dict[str, object]:
+    return candidate.get("audit") if isinstance(candidate.get("audit"), dict) else {}
+
+
+def _candidate_warning_codes(candidate: dict[str, object]) -> list[str]:
+    audit = _candidate_audit(candidate)
+    readiness = _candidate_readiness(candidate)
+    parameters = _candidate_parameters(candidate)
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    warnings = [
+        *list(candidate.get("warnings") or []),
+        *list(audit.get("warnings") or []),
+        *list(readiness.get("blockers") or []),
+        *list(readiness.get("validation_warnings") or []),
+        *list(pattern.get("warnings") or []),
+    ]
+    return list(dict.fromkeys(str(warning) for warning in warnings if warning))
+
+
+def _scenario_for_account(scenarios: object, account_size: float) -> dict[str, object]:
+    if not isinstance(scenarios, list):
+        return {}
+    selected = next((item for item in scenarios if isinstance(item, dict) and _safe_number(item.get("account_size")) == float(account_size)), None)
+    if selected is None:
+        selected = next((item for item in scenarios if isinstance(item, dict)), None)
+    return selected or {}
+
+
+def _has_terminal_capital_blocker(warnings: list[str], scenario: dict[str, object]) -> bool:
+    violations = list(scenario.get("violations") or []) if isinstance(scenario, dict) else []
+    codes = set(warnings) | {str(item) for item in violations if item}
+    return bool(codes & {"ig_minimum_margin_too_large_for_account", "ig_minimum_risk_too_large_for_account"})
+
+
+def _unsuitable_reason(warnings: list[str], scenario: dict[str, object]) -> str:
+    violations = list(scenario.get("violations") or []) if isinstance(scenario, dict) else []
+    codes = [*warnings, *(str(item) for item in violations if item)]
+    if "ig_minimum_margin_too_large_for_account" in codes:
+        return "IG minimum margin is too large for the selected account."
+    if "ig_minimum_risk_too_large_for_account" in codes:
+        return "IG minimum risk is too large for the selected account."
+    return "Capital fit failed for the selected account."
+
+
+def _safe_number(*values: object) -> float:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if isfinite(number):
+            return number
+    return 0.0
+
 
 
 def _candidate_queue_summary(candidates: list[dict[str, object]]) -> dict[str, int]:

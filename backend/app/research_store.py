@@ -1479,7 +1479,10 @@ def _run_purpose(config_json: str | bytes | None) -> dict[str, object]:
     include_regime_scans = bool(config.get("include_regime_scans"))
     target_regime = str(config.get("target_regime") or source_template.get("target_regime") or "")
     source_template_name = str(source_template.get("name") or "")
-    if repair_mode == "frozen_validation":
+    day_trading_mode = bool(config.get("day_trading_mode"))
+    if day_trading_mode and repair_mode == "standard":
+        kind = "day_trading_factory"
+    elif repair_mode == "frozen_validation":
         kind = "frozen_validation"
     elif repair_mode in {"capital_fit"}:
         kind = "capital_fit"
@@ -1507,6 +1510,7 @@ def _run_purpose(config_json: str | bytes | None) -> dict[str, object]:
         "target_regime": target_regime,
         "source_template_name": source_template_name,
         "include_regime_scans": include_regime_scans,
+        "day_trading_mode": day_trading_mode,
         "account_size": config.get("account_size"),
     }
 

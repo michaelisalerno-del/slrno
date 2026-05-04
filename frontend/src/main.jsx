@@ -32,6 +32,7 @@ import {
   getBacktestsSummary,
   getBrokerSummary,
   getCockpitSummary,
+  getDayTradingFactorySummary,
   getIgCostProfile,
   getMarketContextStack,
   getMarketContextSummary,
@@ -95,6 +96,7 @@ const SEARCH_PRESETS = [
 ];
 const MULTI_MARKET_TOTAL_TRIAL_CAPS = { quick: 96, balanced: 216, deep: 480 };
 const MULTI_MARKET_MIN_TRIALS_PER_MARKET = { quick: 6, balanced: 9, deep: 12 };
+const DAY_TRADING_FAMILIES = ["intraday_trend", "breakout", "liquidity_sweep_reversal", "mean_reversion", "volatility_expansion", "scalping"];
 
 const STYLE_OPTIONS = [
   { id: "find_anything_robust", label: "Find anything robust" },
@@ -113,6 +115,14 @@ const OBJECTIVES = [
 ];
 
 const CANDIDATE_FACTORY_MODES = [
+  {
+    id: "day_trading",
+    label: "Day Trading Factory",
+    badge: "Manual start",
+    detail: "Intraday-only templates, 5-minute bars, IG cost sync, £3k capital fit, and forced flat before the next session. Live placement stays off.",
+    preset: "balanced",
+    budgetLabel: "54 base trials / market + capped regime specialists",
+  },
   {
     id: "balanced",
     label: "Balanced factory",
@@ -190,6 +200,7 @@ function App() {
   const [cockpit, setCockpit] = React.useState(null);
   const [marketContext, setMarketContext] = React.useState(null);
   const [paper, setPaper] = React.useState(null);
+  const [dayFactory, setDayFactory] = React.useState(null);
   const [broker, setBroker] = React.useState(null);
   const [risk, setRisk] = React.useState(null);
   const [includeArchivedRuns, setIncludeArchivedRuns] = React.useState(false);
@@ -231,6 +242,10 @@ function App() {
     repair_mode: "standard",
     account_size: String(WORKING_ACCOUNT_SIZE),
     source_template: {},
+    day_trading_mode: false,
+    force_flat_before_close: false,
+    paper_queue_limit: "3",
+    review_queue_limit: "10",
   });
   const [researchState, setResearchState] = React.useState({ status: "idle", detail: "Ready.", progress: 0 });
   const activePollRunIdRef = React.useRef(null);
@@ -273,13 +288,14 @@ function App() {
         setCritique(summary.critique ?? null);
         getResearchCritique().then(setCritique).catch(() => undefined);
       } else if (moduleId === "backtests") {
-        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary] = await Promise.all([
+        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary, daySummary] = await Promise.all([
           getStatus(),
           getMarkets(),
           getMarketPlugins(),
           getMarketDataCacheStatus().catch(() => null),
           getBacktestsSummary(includeArchivedRuns),
           getResearchSummary(80).catch(() => ({ candidates: [] })),
+          getDayTradingFactorySummary().catch(() => null),
         ]);
         setStatus(nextStatus);
         setMarkets(nextMarkets);
@@ -289,6 +305,7 @@ function App() {
         setSpreadBetEngines(summary.spread_bet_engines ?? []);
         setResearchRuns(summary.runs ?? []);
         setCandidates(researchSummary.candidates ?? []);
+        setDayFactory(daySummary);
         resumeLatestActiveRun(summary.runs ?? []);
       } else if (moduleId === "templates") {
         setTemplates(await getTemplatesSummary());
@@ -508,11 +525,12 @@ function App() {
     const testingCapital = optionalNumber(runConfig.account_size) ?? WORKING_ACCOUNT_SIZE;
     const regimeScanNote = runConfig.include_regime_scans ? " plus per-regime template discovery" : "";
     const targetRegimeNote = runConfig.target_regime ? `, ${regimeLabel(runConfig.target_regime)} only` : "";
+    const dayTradingNote = runConfig.day_trading_mode ? ", forced flat before close" : "";
     const speedNote = effectiveBudget < budget ? " (auto-capped for multi-market speed)" : "";
     setMessage(launchMessage);
     setResearchState({
       status: "running",
-      detail: `${engine.label}: ${effectiveBudget} strategy trials per market, ${plannedTrials} base total${speedNote}${regimeScanNote}${targetRegimeNote}, graded on ${accountSizeLabel(testingCapital)}.`,
+      detail: `${engine.label}: ${effectiveBudget} strategy trials per market, ${plannedTrials} base total${speedNote}${regimeScanNote}${targetRegimeNote}${dayTradingNote}, graded on ${accountSizeLabel(testingCapital)}.`,
       progress: 2,
     });
     try {
@@ -528,9 +546,13 @@ function App() {
         account_size: testingCapital,
         source_template: runConfig.source_template && Object.keys(runConfig.source_template).length ? runConfig.source_template : {},
         product_mode: runConfig.product_mode || "spread_bet",
+        day_trading_mode: Boolean(runConfig.day_trading_mode),
+        force_flat_before_close: Boolean(runConfig.force_flat_before_close || runConfig.day_trading_mode),
+        paper_queue_limit: optionalNumber(runConfig.paper_queue_limit) ?? 3,
+        review_queue_limit: optionalNumber(runConfig.review_queue_limit) ?? 10,
       });
       setActiveTab("results");
-      setMessage(`Run ${result.run_id} started: ${budget} base trials per market${regimeScanNote}.`);
+      setMessage(`Run ${result.run_id} started: ${budget} base trials per market${regimeScanNote}${dayTradingNote}.`);
       const detail = await pollResearchRun(result.run_id, plannedTrials);
       activePollRunIdRef.current = null;
       setResearchState({
@@ -720,6 +742,8 @@ function App() {
       cost_stress_multiplier: current.cost_stress_multiplier || 2.0,
       target_regime: template.target_regime,
       source_template: frozenTemplatePayload(template),
+      day_trading_mode: Boolean(template.day_trading_mode),
+      force_flat_before_close: Boolean(template.day_trading_mode),
     }));
     setActiveTab("builder");
     setMessage(`Refining ${source.strategy_name} on ${marketId || "selected market"}.`);
@@ -845,6 +869,7 @@ function App() {
       evidence: evidenceProfileForSource(source),
       backtest: source.audit?.backtest ?? source.backtest ?? {},
       parameters,
+      day_trading_mode: Boolean(parameters.day_trading_mode || searchAudit.day_trading_mode || parameters.holding_period === "intraday"),
     };
   }
 
@@ -857,6 +882,7 @@ function App() {
     if (!refinementTemplate) {
       return;
     }
+    const isDayTrading = Boolean(refinementTemplate.day_trading_mode || refinementTemplate.parameters?.day_trading_mode || researchRun.day_trading_mode);
     const family = refinementTemplate.family ? [refinementTemplate.family] : [];
     const sourceMarket = String(refinementTemplate.market_id || activeMarketIds[0] || researchRun.market_id || "").trim();
     const selectedMarket = sourceMarket ? [sourceMarket] : [];
@@ -1021,6 +1047,8 @@ function App() {
       repair_mode: presetConfig.repairMode ?? "standard",
       account_size: presetConfig.accountSize ?? current.account_size,
       source_template: presetConfig.sourceTemplate ?? frozenTemplatePayload(refinementTemplate),
+      day_trading_mode: isDayTrading,
+      force_flat_before_close: isDayTrading,
     }));
     setMessage(presetConfig.label);
   }
@@ -1410,6 +1438,26 @@ function App() {
                     />
                     Build regime templates
                   </label>
+                  <label className="checkbox-line">
+                    <input
+                      type="checkbox"
+                      checked={researchRun.day_trading_mode}
+                      onChange={(event) => setResearchRun({
+                        ...researchRun,
+                        day_trading_mode: event.target.checked,
+                        force_flat_before_close: event.target.checked,
+                        trading_style: event.target.checked ? "intraday_only" : researchRun.trading_style,
+                        interval: event.target.checked ? "5min" : researchRun.interval,
+                      })}
+                    />
+                    Day trading only
+                  </label>
+                  {researchRun.day_trading_mode && (
+                    <div className="status compact-status">
+                      <strong>No overnight exposure</strong>
+                      <span>Signals are forced flat before the next session. Broker output stays preview-only.</span>
+                    </div>
+                  )}
                   {researchRun.include_regime_scans && (
                     <>
                       <label>Regime trials / regime</label>
@@ -1449,6 +1497,28 @@ function App() {
                   />
                   <label>Repair mode</label>
                   <span className="badge muted-badge repair-mode-badge">{repairModeLabel(researchRun.repair_mode)}</span>
+                  {researchRun.day_trading_mode && (
+                    <>
+                      <label>Daily paper slots</label>
+                      <input
+                        value={researchRun.paper_queue_limit}
+                        onChange={(event) => setResearchRun({ ...researchRun, paper_queue_limit: event.target.value })}
+                        type="number"
+                        min="1"
+                        max="5"
+                        step="1"
+                      />
+                      <label>Review signals</label>
+                      <input
+                        value={researchRun.review_queue_limit}
+                        onChange={(event) => setResearchRun({ ...researchRun, review_queue_limit: event.target.value })}
+                        type="number"
+                        min="1"
+                        max="20"
+                        step="1"
+                      />
+                    </>
+                  )}
                   <label>Excluded months</label>
                   <div className="exclusion-row">
                     {uniqueMonths(researchRun.excluded_months).length > 0
@@ -1478,6 +1548,7 @@ function App() {
             {activeTab === "factory" && (
               <CandidateFactoryView
                 candidates={candidates}
+                dayFactory={dayFactory}
                 runDetail={runDetail}
                 researchRuns={researchRuns}
                 enabledMarkets={enabledMarkets}
@@ -2541,6 +2612,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
 
 function CandidateFactoryView({
   candidates,
+  dayFactory,
   runDetail,
   researchRuns,
   enabledMarkets,
@@ -2562,6 +2634,10 @@ function CandidateFactoryView({
   const coverage = factoryCoverageRows(leads);
   const gaps = factoryRegimeGaps(runDetail, leads, activeMarketIds);
   const latestRun = researchRuns[0];
+  const dailyQueue = dayFactory?.daily_paper_queue ?? [];
+  const reviewSignals = dayFactory?.review_signals ?? [];
+  const unsuitableSignals = dayFactory?.unsuitable ?? [];
+  const dayCounts = dayFactory?.counts ?? {};
   const selectedMarketText = selectedMarkets.length
     ? selectedMarkets.map((market) => market.market_id).join(" / ")
     : "Choose markets";
@@ -2572,8 +2648,8 @@ function CandidateFactoryView({
         <div>
           <h3><Sparkles size={18} /> Candidate Factory</h3>
           <p>
-            Build more raw material without lowering the paper gate: scan one market or a small group, split by regime,
-            shortlist the best leads, then repair only the ones with enough evidence to deserve it.
+            Build frozen templates, then let each day choose eligible intraday markets and setups. Day-trading runs are
+            preview and paper only, force flat before the next session, and move on when IG minimums cannot fit the account.
           </p>
         </div>
         <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh leads</button>
@@ -2583,17 +2659,17 @@ function CandidateFactoryView({
         <h3>Factory Status</h3>
         <div className="metrics four">
           <Metric label="Selected markets" value={selectedMarkets.length || 0} />
-          <Metric label="Viable leads" value={summary.researchLeads} />
-          <Metric label="Paper-ready" value={summary.paperReady} />
-          <Metric label="Market/regime cells" value={summary.coveredCells} />
+          <Metric label="Day paper queue" value={dayCounts.daily_paper_queue ?? 0} />
+          <Metric label="Review signals" value={dayCounts.eligible_review_signals ?? summary.researchLeads} />
+          <Metric label="Unsuitable" value={dayCounts.unsuitable ?? 0} />
         </div>
         <div className="factory-flow">
           {[
-            ["1", "Discover", "Run factory scans with regime templates on."],
-            ["2", "Shortlist", "Use best by market/regime, not best headline score only."],
-            ["3", "Repair", "Make tradeable chooses blocker-specific repair."],
-            ["4", "Freeze", "Retest exact rules with no parameter hunting."],
-            ["5", "Paper", "Only fresh, IG-validated, capital-fit candidates move forward."],
+            ["1", "Discover", "Find IG-matched markets that fit the selected account."],
+            ["2", "Apply", "Run frozen or intraday template scans with no overnight exposure."],
+            ["3", "Validate", "Check price, spread, slippage, min stake, margin, and stop rules."],
+            ["4", "Queue", "Keep 1-3 paper previews and 5-10 review signals."],
+            ["5", "Move on", "Skip terminal oversized markets instead of repairing forever."],
           ].map(([step, title, detail]) => (
             <div className="factory-step" key={title}>
               <span>{step}</span>
@@ -2602,7 +2678,53 @@ function CandidateFactoryView({
             </div>
           ))}
         </div>
+        <div className="status-list factory-policy">
+          <div className="status compact-status">
+            <strong>Day-trading policy</strong>
+            <span>Manual start now, market-open automation later. Live orders and generated placement remain disabled.</span>
+            <small>Intraday templates force flat before the next session; overnight/swing templates stay separate until funding and gap risk are explicitly proven.</small>
+          </div>
+        </div>
       </section>
+
+      <section className="lab-section span-2">
+        <h3>Daily Paper Queue</h3>
+        <div className="factory-lead-grid">
+          {dailyQueue.map((lead) => (
+            <DayTradingQueueCard key={`${lead.id}-${lead.market_id}`} lead={lead} />
+          ))}
+          {dailyQueue.length === 0 && <span className="muted">No day-trading candidate has cleared paper gates yet.</span>}
+        </div>
+      </section>
+
+      <section className="lab-section span-2">
+        <h3>Eligible Signals For Review</h3>
+        <div className="status-list">
+          {reviewSignals.slice(0, 10).map((lead) => (
+            <div className="status compact-status" key={`${lead.id}-${lead.market_id}-review`}>
+              <strong>{lead.market_id} · {lead.strategy_name}</strong>
+              <span>{strategyFamilyLabel(lead.strategy_family)} · OOS {formatMoney(lead.oos_net_profit)} · trades {lead.trade_count} · {tierLabel(lead.promotion_tier)}</span>
+              <small>{lead.target_regime ? `${regimeLabel(lead.target_regime)} only · ` : ""}Preview only · live placement disabled</small>
+            </div>
+          ))}
+          {reviewSignals.length === 0 && <span className="muted">Run Day Trading Factory to produce a small daily review list.</span>}
+        </div>
+      </section>
+
+      {unsuitableSignals.length > 0 && (
+        <section className="lab-section span-2">
+          <h3>Unsuitable For Selected Account</h3>
+          <div className="status-list">
+            {unsuitableSignals.slice(0, 8).map((lead) => (
+              <div className="status compact-status" key={`${lead.id}-${lead.market_id}-unsuitable`}>
+                <strong>{lead.market_id} · {lead.strategy_name}</strong>
+                <span>{lead.unsuitable_reason || "Capital fit failed for the selected account."}</span>
+                <small>Marked unsuitable so the factory can move on.</small>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="lab-section span-2">
         <div className="label-row table-heading">
@@ -2716,6 +2838,32 @@ function CandidateFactoryView({
         </div>
       </section>
     </div>
+  );
+}
+
+function DayTradingQueueCard({ lead }) {
+  return (
+    <article className="factory-lead-card day-queue-card">
+      <div className="label-row">
+        <strong>{lead.strategy_name}</strong>
+        <div className="badge-group">
+          <span className="badge market-badge">{lead.market_id}</span>
+          <span className="badge good">Paper preview</span>
+        </div>
+      </div>
+      <span>{[normalizeInterval(lead.interval), strategyFamilyLabel(lead.strategy_family), lead.target_regime ? `${regimeLabel(lead.target_regime)} only` : ""].filter(Boolean).join(" · ")}</span>
+      <div className="mini-metrics">
+        <Metric label="Paper score" value={round(lead.paper_readiness_score)} />
+        <Metric label="Net" value={formatMoney(lead.net_profit)} />
+        <Metric label="OOS" value={formatMoney(lead.oos_net_profit)} />
+        <Metric label="Trades" value={lead.trade_count} />
+        <Metric label="Funding" value={formatMoney(lead.funding_cost)} />
+        <Metric label="Order mode" value="Disabled" />
+      </div>
+      <div className="warning-row">
+        <WarningChips warnings={lead.warnings} limit={5} empty="Gate clear" />
+      </div>
+    </article>
   );
 }
 
@@ -3876,9 +4024,12 @@ function runQualitySummary(trials = []) {
 
 function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMarketIds = []) {
   const mode = CANDIDATE_FACTORY_MODES.find((item) => item.id === modeId) ?? CANDIDATE_FACTORY_MODES[0];
+  const isDayTrading = mode.id === "day_trading";
   const enabledIds = new Set(enabledMarkets.map((market) => market.market_id));
   const selected = activeMarketIds.filter((marketId) => enabledIds.has(marketId));
-  const fallbackMarket = enabledMarkets.find((market) => market.market_id === "XAUUSD")?.market_id
+  const fallbackMarket = (isDayTrading
+    ? enabledMarkets.find((market) => market.asset_class === "share")?.market_id
+    : enabledMarkets.find((market) => market.market_id === "XAUUSD")?.market_id)
     ?? enabledMarkets[0]?.market_id
     ?? researchRun.market_id;
   let marketIds = selected.length ? selected : [fallbackMarket].filter(Boolean);
@@ -3890,20 +4041,20 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
   }
   const preset = mode.id === "deep_one_market" ? "deep" : "balanced";
   const budget = mode.id === "deep_one_market" ? "120" : mode.id === "evidence_first" ? "54" : "";
-  const interval = marketIds.length > 1 ? "market_default" : (researchRun.interval || "market_default");
+  const interval = isDayTrading ? "5min" : marketIds.length > 1 ? "market_default" : (researchRun.interval || "market_default");
   const start = factoryStartForMarkets(marketIds, enabledMarkets, interval, researchRun.start);
   const runPatch = {
     market_id: marketIds[0],
     interval,
     start,
     end: researchRun.end,
-    trading_style: "find_anything_robust",
+    trading_style: isDayTrading ? "intraday_only" : "find_anything_robust",
     objective: "profit_first",
-    risk_profile: "balanced",
+    risk_profile: isDayTrading ? "conservative" : "balanced",
     search_preset: preset,
     search_budget: budget,
-    strategy_families: [],
-    cost_stress_multiplier: mode.id === "evidence_first" ? 2.5 : 2.0,
+    strategy_families: isDayTrading ? DAY_TRADING_FAMILIES : [],
+    cost_stress_multiplier: mode.id === "evidence_first" || isDayTrading ? 2.5 : 2.0,
     include_regime_scans: true,
     regime_scan_budget_per_regime: "",
     target_regime: "",
@@ -3911,6 +4062,10 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
     repair_mode: mode.id === "evidence_first" ? "evidence_first" : "standard",
     account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
     source_template: {},
+    day_trading_mode: isDayTrading,
+    force_flat_before_close: isDayTrading,
+    paper_queue_limit: isDayTrading ? "3" : researchRun.paper_queue_limit || "3",
+    review_queue_limit: isDayTrading ? "10" : researchRun.review_queue_limit || "10",
   };
   const specialistBudget = regimePresetBudget(preset);
   const trialPlan = mode.id === "deep_one_market"
@@ -3920,8 +4075,12 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
     mode,
     marketIds,
     runPatch,
-    launchMessage: `Launching Candidate Factory: ${marketIds.join(" / ")} · ${trialPlan}.`,
-    stageMessage: `Candidate Factory staged for ${marketIds.join(" / ")}: find-anything-robust, regime templates on, ${trialPlan}.`,
+    launchMessage: isDayTrading
+      ? `Launching Day Trading Factory: ${marketIds.join(" / ")} · ${trialPlan} · forced flat before close.`
+      : `Launching Candidate Factory: ${marketIds.join(" / ")} · ${trialPlan}.`,
+    stageMessage: isDayTrading
+      ? `Day Trading Factory staged for ${marketIds.join(" / ")}: intraday-only, no overnight, ${trialPlan}.`
+      : `Candidate Factory staged for ${marketIds.join(" / ")}: find-anything-robust, regime templates on, ${trialPlan}.`,
   };
 }
 
@@ -4008,7 +4167,7 @@ function factoryViableLead(lead = {}) {
 }
 
 function hasTerminalCapitalWarning(warnings = []) {
-  return arrayValue(warnings).some((warning) => warning === "ig_minimum_margin_too_large_for_account");
+  return arrayValue(warnings).some((warning) => ["ig_minimum_margin_too_large_for_account", "ig_minimum_risk_too_large_for_account"].includes(warning));
 }
 
 function factoryLeadRank(lead = {}) {
@@ -4251,6 +4410,9 @@ function frozenTemplatePayload(template = {}) {
     interval: template.interval,
     target_regime: templateSpecificRegime(template),
     repair_attempt_count: repairAttemptCountForTemplate(template),
+    holding_period: template.day_trading_mode || parameters.day_trading_mode ? "intraday" : parameters.holding_period,
+    force_flat_before_close: Boolean(template.day_trading_mode || parameters.force_flat_before_close),
+    no_overnight: Boolean(template.day_trading_mode || parameters.no_overnight),
     parameters: frozenParameters,
   };
 }
@@ -4537,6 +4699,7 @@ function repairActionsForTemplate(template) {
 function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [], activeMarketIds = [], options = {}) {
   const warnings = new Set(template.warnings ?? []);
   const mode = options.mode || "make_tradeable";
+  const isDayTrading = Boolean(template.day_trading_mode || template.parameters?.day_trading_mode || researchRun.day_trading_mode);
   const priorRepairAttempt = repairAttemptCountForTemplate(template);
   const repairAttempt = Math.min(MAX_REPAIR_ATTEMPTS, priorRepairAttempt + 1);
   const pattern = template.pattern ?? {};
@@ -4596,7 +4759,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
   const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
   const capitalBlocked = hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high", "ig_minimum_risk_too_large_for_account", "ig_minimum_margin_too_large_for_account");
-  const terminalCapitalBlocked = hasAny("ig_minimum_margin_too_large_for_account");
+  const terminalCapitalBlocked = hasAny("ig_minimum_margin_too_large_for_account", "ig_minimum_risk_too_large_for_account");
   const sourceTemplate = {
     ...frozenTemplatePayload(template),
     repair_attempt_count: repairAttempt,
@@ -4665,19 +4828,20 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   }
   if (terminalCapitalBlocked) {
     const accountLabel = accountSizeLabel(optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE);
+    const issue = hasAny("ig_minimum_margin_too_large_for_account") ? "margin" : "risk";
     return {
       marketIds,
       runPatch: {},
       steps: [],
       syncCosts: false,
-      summary: `IG minimum margin is too large for ${accountLabel}; move on to the next market/template or raise testing capital.`,
+      summary: `IG minimum ${issue} is too large for ${accountLabel}; move on to the next market/template or raise testing capital.`,
       targetRegime,
       crossMarketDiscovery: false,
       targets: [],
-      stageMessage: "Skipped: IG minimum margin too large for selected capital.",
+      stageMessage: `Skipped: IG minimum ${issue} too large for selected capital.`,
       repairAttempt: priorRepairAttempt,
       priorRepairAttempt,
-      stopReason: `Skip this one for ${accountLabel}: IG minimum margin is too large, so smaller search parameters cannot make it fit. Move on to the next lead.`,
+      stopReason: `Skip this one for ${accountLabel}: IG minimum ${issue} is too large, so smaller search parameters cannot make it fit. Move on to the next lead.`,
     };
   }
 
@@ -4789,6 +4953,10 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     repair_mode: repairMode,
     account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
     source_template: sourceTemplate,
+    day_trading_mode: isDayTrading,
+    force_flat_before_close: isDayTrading,
+    paper_queue_limit: researchRun.paper_queue_limit || "3",
+    review_queue_limit: researchRun.review_queue_limit || "10",
   };
   const summary = repairMode === "frozen_validation"
     ? "Frozen validation retests the exact template with no parameter search."
@@ -4821,6 +4989,7 @@ function frozenValidationPlanForTemplate(template, researchRun, activeMarketIds 
   const marketIds = marketId ? [marketId] : [];
   const targetRegime = templateSpecificRegime(template);
   const attempt = repairAttemptCountForTemplate(template);
+  const isDayTrading = Boolean(template.day_trading_mode || template.parameters?.day_trading_mode || researchRun.day_trading_mode);
   if (!sourceTemplate.parameters || Object.keys(sourceTemplate.parameters).length === 0) {
     return {
       marketIds,
@@ -4860,6 +5029,10 @@ function frozenValidationPlanForTemplate(template, researchRun, activeMarketIds 
       repair_mode: "frozen_validation",
       account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
       source_template: sourceTemplate,
+      day_trading_mode: isDayTrading,
+      force_flat_before_close: isDayTrading,
+      paper_queue_limit: researchRun.paper_queue_limit || "3",
+      review_queue_limit: researchRun.review_queue_limit || "10",
     },
     steps: [
       "Freeze exact template parameters",
@@ -4936,6 +5109,7 @@ function runPurpose(run = {}) {
 function runPurposeLabel(run = {}) {
   const purpose = runPurpose(run);
   return {
+    day_trading_factory: "Day Trading",
     backtest: "Backtest",
     regime_scan: "Regime scan",
     repair: "Make tradeable",
@@ -4953,6 +5127,7 @@ function runPurposeClass(run = {}) {
 function runPurposeSubLabel(run = {}) {
   const purpose = runPurpose(run);
   const bits = [
+    purpose.day_trading_mode ? "intraday only" : "",
     repairModeLabel(purpose.repair_mode),
     purpose.trading_style ? strategyFamilyLabel(purpose.trading_style) : "",
     purpose.target_regime ? `${regimeLabel(purpose.target_regime)} only` : "",
@@ -5130,6 +5305,10 @@ function humanWarnings(warnings = []) {
     shock_regime_dependency: "Shock-regime dependency",
     target_regime_low_oos_trades: "Target-regime low OOS trades",
     below_ig_min_deal_size: "Below IG min stake",
+    day_trade_forbidden_overnight_family: "Overnight family blocked",
+    day_trade_held_overnight: "Held overnight",
+    day_trade_missing_flat_policy: "Missing flat policy",
+    day_trade_requires_intraday_bars: "Needs intraday bars",
     ig_minimum_risk_too_large_for_account: "IG min risk too large",
     ig_minimum_margin_too_large_for_account: "IG min margin too large",
     historical_daily_loss_stop_breached: "Daily loss stop breached",
@@ -5185,6 +5364,10 @@ const PAPER_BLOCKER_WARNINGS = new Set([
   "calendar_filtered_oos_negative",
   "calendar_sample_too_thin",
   "costs_overwhelm_edge",
+  "day_trade_forbidden_overnight_family",
+  "day_trade_held_overnight",
+  "day_trade_missing_flat_policy",
+  "day_trade_requires_intraday_bars",
   "drawdown_too_high",
   "event_strategy_requires_label",
   "historical_daily_loss_stop_breached",
@@ -5302,6 +5485,9 @@ function scoreBasisLabel(audit = {}) {
 }
 
 function discoveryBadgeLabel(audit = {}) {
+  if (audit?.day_trading_mode) {
+    return "Day trade";
+  }
   if (audit?.repair_mode === "cross_market_discovery") {
     return "Discovery lead";
   }

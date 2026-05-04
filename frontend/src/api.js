@@ -76,6 +76,15 @@ export function getPaperSummary() {
   return request("/paper/summary");
 }
 
+export function getDayTradingFactorySummary(params = {}) {
+  const query = new URLSearchParams();
+  if (params.accountSize) query.set("account_size", params.accountSize);
+  if (params.paperLimit) query.set("paper_limit", params.paperLimit);
+  if (params.reviewLimit) query.set("review_limit", params.reviewLimit);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request(`/day-trading/factory/summary${suffix}`);
+}
+
 export function getBrokerSummary() {
   return request("/broker/summary");
 }

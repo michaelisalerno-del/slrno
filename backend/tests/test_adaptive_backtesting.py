@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from random import Random
 
-from app.adaptive_research import STYLE_FAMILIES, AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _evidence_profile, _generate_signals, _promotion_tier, _sample_parameters, _warnings, balanced_score, run_adaptive_search
+from app.adaptive_research import DAY_TRADING_FAMILIES, STYLE_FAMILIES, AdaptiveSearchConfig, _adaptive_folds, _cost_aware_score, _evidence_profile, _generate_signals, _promotion_tier, _sample_parameters, _warnings, balanced_score, run_adaptive_search
 from app.backtesting import BacktestConfig, BacktestResult, run_vector_backtest
 from app.ig_costs import IGCostProfile, public_ig_cost_profile
 from app.market_registry import MarketMapping
@@ -79,6 +79,76 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert best.backtest.compounded_position_sizing is False
     assert "compounded_projection_return_pct" in best.backtest.__dict__
     assert best.backtest.cost_to_gross_ratio >= 0
+
+
+def test_day_trading_signals_force_flat_before_next_session():
+    bars = [
+        OHLCBar("TEST", datetime(2026, 1, 5, 9), 100, 101, 99, 100),
+        OHLCBar("TEST", datetime(2026, 1, 5, 10), 101, 102, 100, 101),
+        OHLCBar("TEST", datetime(2026, 1, 5, 16), 102, 103, 101, 102),
+        OHLCBar("TEST", datetime(2026, 1, 6, 9), 103, 104, 102, 103),
+        OHLCBar("TEST", datetime(2026, 1, 6, 10), 104, 105, 103, 104),
+    ]
+    parameters = {
+        "lookback": 1,
+        "threshold_bps": 0,
+        "z_threshold": 1,
+        "volatility_multiplier": 1,
+        "stop_loss_bps": 500,
+        "take_profit_bps": 500,
+        "max_hold_bars": 20,
+        "min_hold_bars": 1,
+        "min_trade_spacing": 0,
+        "confidence_quantile": 1.0,
+        "regime_filter": "any",
+        "direction": "long_only",
+        "day_trading_mode": True,
+        "force_flat_before_close": True,
+        "no_overnight": True,
+    }
+
+    signals = _generate_signals(bars, "everyday_long", parameters)
+    result = run_vector_backtest(
+        bars,
+        signals,
+        BacktestConfig(position_size=1, overnight_admin_fee_annual=0.365),
+    )
+
+    assert signals[2] == 0
+    assert result.funding_cost == 0
+
+
+def test_day_trading_adaptive_search_marks_no_overnight_contract():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    bars = _session_bars(180)
+
+    result = run_adaptive_search(
+        bars,
+        "TEST",
+        "5min",
+        profile,
+        AdaptiveSearchConfig(
+            preset="quick",
+            trading_style="find_anything_robust",
+            search_budget=6,
+            day_trading_mode=True,
+            force_flat_before_close=True,
+            seed=11,
+        ),
+    )
+
+    assert len(result.evaluations) == 6
+    for evaluation in result.evaluations:
+        parameters = evaluation.candidate.parameters
+        assert parameters["family"] in DAY_TRADING_FAMILIES
+        assert parameters["day_trading_mode"] is True
+        assert parameters["holding_period"] == "intraday"
+        assert parameters["force_flat_before_close"] is True
+        assert parameters["no_overnight"] is True
+        assert parameters["search_audit"]["day_trading_mode"] is True
+        assert evaluation.backtest.funding_cost == 0
+        assert "day_trade_held_overnight" not in evaluation.warnings
 
 
 def test_adaptive_folds_are_capped_for_large_intraday_histories():
@@ -943,6 +1013,33 @@ def _trend_bars(count: int) -> list[OHLCBar]:
                 price,
             )
         )
+    return bars
+
+
+def _session_bars(count: int) -> list[OHLCBar]:
+    price = 100.0
+    bars: list[OHLCBar] = []
+    day = datetime(2026, 1, 5, 9)
+    while len(bars) < count:
+        for slot in range(78):
+            if len(bars) >= count:
+                break
+            price += 0.18 if slot % 28 < 18 else -0.08
+            timestamp = day + timedelta(minutes=5 * slot)
+            bars.append(
+                OHLCBar(
+                    "TEST",
+                    timestamp,
+                    price - 0.08,
+                    price + 0.24,
+                    price - 0.24,
+                    price,
+                )
+            )
+        day += timedelta(days=1)
+        while day.weekday() >= 5:
+            day += timedelta(days=1)
+        day = day.replace(hour=9, minute=0)
     return bars
 
 
