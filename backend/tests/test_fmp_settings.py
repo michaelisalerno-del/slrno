@@ -73,25 +73,99 @@ def test_save_fmp_marks_error_when_validation_fails(tmp_path, monkeypatch):
 
 def test_save_ig_account_roles_tracks_separate_spread_bet_and_cfd_accounts(tmp_path, monkeypatch):
     store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
-    monkeypatch.setattr(main, "settings", store)
+    store.set_secret("ig", "api_key", "demo-api")
+    store.set_secret("ig", "username", "demo-user")
+    store.set_secret("ig", "password", "demo-pass")
 
-    result = main.save_ig_account_roles(
-        main.IGAccountRolesPayload(
-            spread_bet_account_id="ABC12345",
-            cfd_account_id="CFD98765",
-            default_product_mode="cfd",
+    class FakeIGProvider:
+        def __init__(self, api_key: str, username: str, password: str, account_id: str = "") -> None:
+            self.api_key = api_key
+            self.username = username
+            self.password = password
+            self.account_id = account_id
+
+        async def accounts(self) -> list[dict[str, object]]:
+            return [
+                {"accountId": "ABC12345", "accountName": "Spread Bet Demo", "accountType": "SPREADBET"},
+                {"accountId": "CFD98765", "accountName": "CFD Demo", "accountType": "CFD"},
+            ]
+
+    monkeypatch.setattr(main, "settings", store)
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    result = asyncio.run(
+        main.save_ig_account_roles(
+            main.IGAccountRolesPayload(
+                spread_bet_account_id="Spread Bet Demo",
+                cfd_account_id="CFD98765",
+                default_product_mode="cfd",
+            )
         )
     )
 
     roles = result["ig_account_roles"]
     assert result["status"] == "saved"
     assert roles["default_product_mode"] == "cfd"
+    assert roles["both_active"] is True
     assert roles["spread_bet"]["configured"] is True
+    assert roles["spread_bet"]["active"] is True
+    assert roles["spread_bet"]["display_name"] == "Spread Bet Demo"
+    assert roles["spread_bet"]["validation_status"] == "validated"
     assert roles["spread_bet"]["masked_account_id"].endswith("2345")
     assert roles["cfd"]["configured"] is True
+    assert roles["cfd"]["active"] is True
+    assert roles["cfd"]["display_name"] == "CFD Demo"
     assert roles["cfd"]["masked_account_id"].endswith("8765")
     assert "ABC12345" not in str(roles)
     assert store.get_secret("ig_accounts", "spread_bet_account_id") == "ABC12345"
+    assert store.get_secret("ig_accounts", "cfd_account_id") == "CFD98765"
+
+
+def test_save_ig_account_roles_rejects_unknown_account_name(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("ig", "api_key", "demo-api")
+    store.set_secret("ig", "username", "demo-user")
+    store.set_secret("ig", "password", "demo-pass")
+
+    class FakeIGProvider:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def accounts(self) -> list[dict[str, object]]:
+            return [{"accountId": "ABC12345", "accountName": "Spread Bet Demo"}]
+
+    monkeypatch.setattr(main, "settings", store)
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        asyncio.run(
+            main.save_ig_account_roles(
+                main.IGAccountRolesPayload(
+                    spread_bet_account_id="Spread Bet Demo",
+                    cfd_account_id="Missing CFD Demo",
+                )
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "CFD demo account 'Missing CFD Demo' was not found" in str(exc_info.value.detail)
+
+
+def test_ig_provider_selection_uses_product_specific_demo_accounts_without_generic_fallback(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("ig", "api_key", "demo-api")
+    store.set_secret("ig", "username", "demo-user")
+    store.set_secret("ig", "password", "demo-pass")
+    store.set_secret("ig", "account_id", "GENERIC")
+    store.set_secret("ig_accounts", "cfd_account_id", "CFD98765")
+    monkeypatch.setattr(main, "settings", store)
+
+    cfd_provider = main._ig_provider_from_settings("cfd")
+    spread_provider = main._ig_provider_from_settings("spread_bet")
+
+    assert cfd_provider is not None
+    assert cfd_provider.account_id == "CFD98765"
+    assert spread_provider is None
 
 
 def test_midcap_endpoint_blocks_candidates_until_ig_catalogue_is_checked(tmp_path, monkeypatch):

@@ -65,20 +65,7 @@ class IGDemoProvider:
         }
 
     async def account_status(self) -> AccountStatus:
-        import httpx
-
-        headers = await self._authenticated_headers()
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-                response = await client.get(f"{self.base_url}/accounts", headers={**headers, "Version": "1"})
-                response.raise_for_status()
-                payload = response.json()
-        except httpx.TimeoutException as exc:
-            raise TimeoutError("IG accounts validation timed out after 10 seconds") from exc
-        except httpx.HTTPStatusError as exc:
-            raise ValueError(_ig_error_message(exc.response, "IG account validation failed")) from exc
-
-        accounts = payload.get("accounts") or []
+        accounts = await self.accounts()
         account = _select_account(accounts, self.account_id)
         if account is None:
             available = ", ".join(str(item.get("accountId", "")) for item in accounts if item.get("accountId"))
@@ -91,6 +78,22 @@ class IGDemoProvider:
             available=_optional_float(balance.get("available")),
             mode="demo",
         )
+
+    async def accounts(self) -> list[dict[str, object]]:
+        import httpx
+
+        headers = await self._authenticated_headers()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.get(f"{self.base_url}/accounts", headers={**headers, "Version": "1"})
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("IG accounts validation timed out after 10 seconds") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(_ig_error_message(exc.response, "IG account validation failed")) from exc
+        accounts = payload.get("accounts") if isinstance(payload, dict) else []
+        return [account for account in accounts if isinstance(account, dict)]
 
     async def find_market(self, query: str) -> list[dict[str, str]]:
         import httpx

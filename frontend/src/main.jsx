@@ -378,12 +378,12 @@ function App() {
 
   async function submitIgAccountRoles(event) {
     event.preventDefault();
-    setMessage("Saving IG account roles...");
+    setMessage("Saving IG demo account roles...");
     try {
       const result = await saveIgAccountRoles(igRoles);
       setIgRoles({ spreadBetAccountId: "", cfdAccountId: "", defaultProductMode: igRoles.defaultProductMode });
       setIgAccountRoles(result.ig_account_roles ?? null);
-      setMessage("IG account roles saved.");
+      setMessage(result.ig_account_roles?.both_active ? "Both IG demo accounts active." : "IG demo account roles saved.");
       await loadModule(activeModule);
     } catch (error) {
       setMessage(error.message);
@@ -3301,33 +3301,33 @@ function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, igR
           <input value={ig.username} onChange={(event) => setIg({ ...ig, username: event.target.value })} required />
           <label>IG password</label>
           <input value={ig.password} onChange={(event) => setIg({ ...ig, password: event.target.value })} type="password" required />
-          <label>IG account code</label>
+          <label>IG default account code</label>
           <input value={ig.accountId} onChange={(event) => setIg({ ...ig, accountId: event.target.value })} />
           <button>{igStatus?.configured ? "Replace IG demo" : "Validate IG demo"}</button>
         </form>
         <form onSubmit={submitIgAccountRoles}>
           <div className="label-row">
-            <label>IG account roles</label>
-            <span className="secret-badge saved">Optional</span>
+            <label>IG demo accounts</label>
+            <span className={`secret-badge ${igAccountRoles?.both_active ? "connected" : "saved"}`}>{igAccountRoles?.both_active ? "Both active" : "Roles"}</span>
           </div>
-          <label>Spread betting account code</label>
+          <label>Spread bet demo account name/code</label>
           <input
             value={igRoles.spreadBetAccountId}
             onChange={(event) => setIgRoles({ ...igRoles, spreadBetAccountId: event.target.value })}
-            placeholder={igAccountRoles?.spread_bet?.masked_account_id || "Spread betting account"}
+            placeholder={igAccountRolePlaceholder(igAccountRoles?.spread_bet, "Spread bet demo account")}
           />
-          <label>CFD account code</label>
+          <label>CFD demo account name/code</label>
           <input
             value={igRoles.cfdAccountId}
             onChange={(event) => setIgRoles({ ...igRoles, cfdAccountId: event.target.value })}
-            placeholder={igAccountRoles?.cfd?.masked_account_id || "CFD account"}
+            placeholder={igAccountRolePlaceholder(igAccountRoles?.cfd, "CFD demo account")}
           />
-          <label>Default account role</label>
+          <label>Default form selection</label>
           <select value={igRoles.defaultProductMode} onChange={(event) => setIgRoles({ ...igRoles, defaultProductMode: event.target.value })}>
             <option value="spread_bet">Spread bet</option>
             <option value="cfd">CFD</option>
           </select>
-          <button>Save account roles</button>
+          <button>Save demo accounts</button>
         </form>
       </Panel>
       <Panel icon={<Activity />} title="Connection Status">
@@ -3341,12 +3341,16 @@ function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, igR
           ))}
           {igAccountRoles && (
             <div className="status">
-              <strong>IG ACCOUNT ROLES</strong>
-              <span>
-                Default {String(igAccountRoles.default_product_mode || "spread_bet").replace("_", " ")} · spread bet {igAccountRoles.spread_bet?.configured ? igAccountRoles.spread_bet.masked_account_id : "not set"} · CFD {igAccountRoles.cfd?.configured ? igAccountRoles.cfd.masked_account_id : "not set"}
-              </span>
+              <strong>IG DEMO ACCOUNTS</strong>
+              <span>{igAccountRoles.both_active ? "Both demo accounts active" : "Set both demo account roles"} · default form {String(igAccountRoles.default_product_mode || "spread_bet").replace("_", " ")}</span>
               <small>Live order placement remains disabled.</small>
             </div>
+          )}
+          {igAccountRoles && (
+            <IgAccountRoleStatus title="Spread Bet Demo" role={igAccountRoles.spread_bet} />
+          )}
+          {igAccountRoles && (
+            <IgAccountRoleStatus title="CFD Demo" role={igAccountRoles.cfd} />
           )}
         </div>
       </Panel>
@@ -3419,6 +3423,23 @@ function Metric({ label, value }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function IgAccountRoleStatus({ title, role }) {
+  const active = Boolean(role?.active);
+  const label = role?.display_name || role?.masked_account_id || "not set";
+  const validation = String(role?.validation_status || (role?.configured ? "saved" : "missing")).replaceAll("_", " ");
+  return (
+    <div className="status">
+      <strong>{title}</strong>
+      <span>{active ? "active" : role?.configured ? "saved" : "not set"} · {label}</span>
+      <small>{validation}</small>
+    </div>
+  );
+}
+
+function igAccountRolePlaceholder(role, fallback) {
+  return role?.display_name || role?.masked_account_id || fallback;
 }
 
 function WarningChips({ warnings = [], limit = 8, empty = "Clear" }) {

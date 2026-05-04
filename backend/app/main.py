@@ -674,10 +674,11 @@ async def save_ig(payload: IGSettings) -> dict[str, str]:
 
 
 @app.post("/settings/ig/accounts")
-def save_ig_account_roles(payload: IGAccountRolesPayload) -> dict[str, object]:
+async def save_ig_account_roles(payload: IGAccountRolesPayload) -> dict[str, object]:
     product_mode = _normalize_product_mode(payload.default_product_mode)
-    settings.set_secret("ig_accounts", "spread_bet_account_id", payload.spread_bet_account_id.strip())
-    settings.set_secret("ig_accounts", "cfd_account_id", payload.cfd_account_id.strip())
+    resolved_roles = await _resolve_ig_account_roles(payload)
+    _store_ig_account_role("spread_bet", resolved_roles["spread_bet"])
+    _store_ig_account_role("cfd", resolved_roles["cfd"])
     settings.set_secret("ig_accounts", "default_product_mode", product_mode)
     settings.set_status("ig_accounts", "saved")
     return {"status": "saved", "ig_account_roles": _ig_account_roles_summary()}
@@ -756,8 +757,9 @@ async def discover_midcap_markets(
         if provider is None:
             ig_status = "ig_not_configured"
             if require_ig_catalogue:
+                blocker, warning = _ig_provider_blocker(criteria.product_mode)
                 candidates = [
-                    candidate.with_ig_blocker("ig_not_configured", "ig_credentials_required", "ig_catalogue_required")
+                    candidate.with_ig_blocker("ig_not_configured", blocker, warning)
                     for candidate in candidates
                 ]
         else:
@@ -1869,22 +1871,154 @@ def _ig_account_roles_summary() -> dict[str, object]:
     spread_bet_id = settings.get_secret("ig_accounts", "spread_bet_account_id") or ""
     cfd_id = settings.get_secret("ig_accounts", "cfd_account_id") or ""
     default_product_mode = _normalize_product_mode(settings.get_secret("ig_accounts", "default_product_mode") or "spread_bet")
+    spread_bet_status = settings.get_secret("ig_accounts", "spread_bet_validation_status") or ("legacy_saved" if spread_bet_id else "missing")
+    cfd_status = settings.get_secret("ig_accounts", "cfd_validation_status") or ("legacy_saved" if cfd_id else "missing")
+    spread_bet_active = bool(spread_bet_id) and spread_bet_status in {"validated", "legacy_saved"}
+    cfd_active = bool(cfd_id) and cfd_status in {"validated", "legacy_saved"}
     return {
         "default_product_mode": default_product_mode,
         "spread_bet": {
             "configured": bool(spread_bet_id),
+            "active": spread_bet_active,
             "masked_account_id": _mask_account_id(spread_bet_id),
+            "display_name": settings.get_secret("ig_accounts", "spread_bet_display_name") or "",
+            "validation_status": spread_bet_status,
         },
         "cfd": {
             "configured": bool(cfd_id),
+            "active": cfd_active,
             "masked_account_id": _mask_account_id(cfd_id),
+            "display_name": settings.get_secret("ig_accounts", "cfd_display_name") or "",
+            "validation_status": cfd_status,
         },
+        "both_active": spread_bet_active and cfd_active,
         "live_ordering_enabled": False,
         "notes": [
-            "Account roles are used for validation/search context only; order placement remains disabled.",
+            "Both demo account roles can be active under the same IG login/API key; order placement remains disabled.",
             "Backtests remain spread-bet cost model until a dedicated CFD cost model is added.",
         ],
     }
+
+
+async def _resolve_ig_account_roles(payload: IGAccountRolesPayload) -> dict[str, dict[str, str]]:
+    raw_roles = {
+        "spread_bet": payload.spread_bet_account_id.strip(),
+        "cfd": payload.cfd_account_id.strip(),
+    }
+    api_key = settings.get_secret("ig", "api_key")
+    username = settings.get_secret("ig", "username")
+    password = settings.get_secret("ig", "password")
+    if not api_key or not username or not password:
+        return {
+            role: {
+                "account_id": value,
+                "display_name": "",
+                "validation_status": "saved_unvalidated" if value else "missing",
+            }
+            for role, value in raw_roles.items()
+        }
+    provider = IGDemoProvider(api_key, username, password)
+    try:
+        accounts = await provider.accounts()
+    except Exception as exc:
+        detail = _public_error(exc)
+        settings.set_status("ig_accounts", "error", detail)
+        raise HTTPException(status_code=400, detail=f"IG account role validation failed: {detail}") from exc
+    return {
+        role: _resolve_ig_account_role(value, accounts, _product_label(role))
+        for role, value in raw_roles.items()
+    }
+
+
+def _resolve_ig_account_role(value: str, accounts: list[dict[str, object]], role_label: str) -> dict[str, str]:
+    if not value:
+        return {"account_id": "", "display_name": "", "validation_status": "missing"}
+    direct = [account for account in accounts if _account_field(account, "accountId") == value]
+    if direct:
+        return _resolved_account_payload(direct[0])
+    normalized = _normalize_account_match_text(value)
+    exact = [
+        account
+        for account in accounts
+        if normalized and normalized in _normalized_account_match_values(account)
+    ]
+    if len(exact) == 1:
+        return _resolved_account_payload(exact[0])
+    if len(exact) > 1:
+        raise HTTPException(status_code=400, detail=f"{role_label} account name '{value}' matched multiple IG demo accounts; enter the account code instead.")
+    contains = [
+        account
+        for account in accounts
+        if normalized
+        and any(normalized in part or part in normalized for part in _normalized_account_match_values(account))
+    ]
+    if len(contains) == 1:
+        return _resolved_account_payload(contains[0])
+    if len(contains) > 1:
+        raise HTTPException(status_code=400, detail=f"{role_label} account name '{value}' matched multiple IG demo accounts; enter the account code instead.")
+    available = ", ".join(
+        part
+        for account in accounts
+        if (part := _account_display_name(account))
+    )
+    raise HTTPException(
+        status_code=400,
+        detail=f"{role_label} account '{value}' was not found in IG demo accounts. Available accounts: {available or 'none returned'}",
+    )
+
+
+def _store_ig_account_role(role: str, resolved: dict[str, str]) -> None:
+    settings.set_secret("ig_accounts", f"{role}_account_id", resolved.get("account_id", ""))
+    settings.set_secret("ig_accounts", f"{role}_display_name", resolved.get("display_name", ""))
+    settings.set_secret("ig_accounts", f"{role}_validation_status", resolved.get("validation_status", "missing"))
+
+
+def _resolved_account_payload(account: dict[str, object]) -> dict[str, str]:
+    return {
+        "account_id": _account_field(account, "accountId"),
+        "display_name": _account_display_name(account),
+        "validation_status": "validated",
+    }
+
+
+def _account_match_values(account: dict[str, object]) -> list[str]:
+    return [
+        _account_field(account, "accountId"),
+        _account_field(account, "accountName"),
+        _account_field(account, "accountAlias"),
+        _account_field(account, "name"),
+        _account_field(account, "alias"),
+        _account_field(account, "title"),
+        _account_field(account, "accountType"),
+    ]
+
+
+def _normalized_account_match_values(account: dict[str, object]) -> set[str]:
+    return {
+        normalized
+        for part in _account_match_values(account)
+        if (normalized := _normalize_account_match_text(part))
+    }
+
+
+def _account_display_name(account: dict[str, object]) -> str:
+    for key in ("accountName", "accountAlias", "name", "alias", "title", "accountType", "accountId"):
+        value = _account_field(account, key)
+        if value:
+            return value
+    return ""
+
+
+def _account_field(account: dict[str, object], key: str) -> str:
+    return str(account.get(key) or "").strip()
+
+
+def _normalize_account_match_text(value: object) -> str:
+    return " ".join("".join(character.lower() if character.isalnum() else " " for character in str(value or "")).split())
+
+
+def _product_label(product_mode: str) -> str:
+    return "CFD demo" if _normalize_product_mode(product_mode) == "cfd" else "Spread bet demo"
 
 
 def _mask_account_id(account_id: str) -> str:
@@ -1911,10 +2045,26 @@ def _ig_provider_from_settings(product_mode: str | None = None) -> IGDemoProvide
     api_key = settings.get_secret("ig", "api_key")
     username = settings.get_secret("ig", "username")
     password = settings.get_secret("ig", "password")
-    account_id = _account_id_for_product_mode(product_mode) or settings.get_secret("ig", "account_id") or ""
     if not api_key or not username or not password:
         return None
+    explicit_product = product_mode is not None and _normalize_product_mode(product_mode) in PRODUCT_MODES
+    role_account_id = _account_id_for_product_mode(product_mode)
+    if explicit_product and not role_account_id:
+        return None
+    account_id = role_account_id or settings.get_secret("ig", "account_id") or ""
     return IGDemoProvider(api_key, username, password, account_id)
+
+
+def _ig_provider_blocker(product_mode: str | None = None) -> tuple[str, str]:
+    api_key = settings.get_secret("ig", "api_key")
+    username = settings.get_secret("ig", "username")
+    password = settings.get_secret("ig", "password")
+    if not api_key or not username or not password:
+        return "ig_credentials_required", "ig_catalogue_required"
+    mode = _normalize_product_mode(product_mode or settings.get_secret("ig_accounts", "default_product_mode") or "spread_bet")
+    if not _account_id_for_product_mode(mode):
+        return f"ig_{mode}_demo_account_required", "ig_demo_account_role_required"
+    return "ig_credentials_required", "ig_catalogue_required"
 
 
 def _public_error(exc: Exception) -> str:
