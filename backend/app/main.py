@@ -524,30 +524,40 @@ def day_trading_factory_summary(
     paper_limit: int = Query(default=3, ge=1, le=5),
     review_limit: int = Query(default=10, ge=1, le=20),
 ) -> dict[str, object]:
-    candidates = [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(limit=250)]
     templates = research_store.list_templates(limit=250)
-    day_candidates = [_day_trading_signal_payload(candidate, account_size) for candidate in candidates if _is_day_trading_source(candidate)]
-    day_candidates = [candidate for candidate in day_candidates if candidate is not None]
-    unsuitable = [candidate for candidate in day_candidates if candidate["unsuitable"]]
-    eligible = [candidate for candidate in day_candidates if not candidate["unsuitable"] and candidate["eligible_for_review"]]
-    paper_ready = [candidate for candidate in eligible if candidate["paper_ready"]]
+    candidates = [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(limit=250)]
+    day_templates = [template for template in templates if _is_day_trading_template(template)]
+    frozen_day_templates = [template for template in day_templates if _is_frozen_template(template)]
+    overnight_templates = [template for template in templates if _is_overnight_template(template)]
+    daily_templates = [_day_trading_template_payload(template, account_size) for template in frozen_day_templates]
+    daily_templates = [template for template in daily_templates if template is not None]
+    unsuitable = [template for template in daily_templates if template["unsuitable"]]
+    eligible = [template for template in daily_templates if not template["unsuitable"] and template["eligible_for_review"]]
+    paper_ready = [template for template in eligible if template["paper_ready"]]
     review_signals = sorted(eligible, key=_day_trading_signal_rank, reverse=True)[:review_limit]
     paper_queue = sorted(paper_ready, key=_day_trading_signal_rank, reverse=True)[:paper_limit]
-    day_templates = [template for template in templates if _is_day_trading_template(template)]
-    overnight_templates = [template for template in templates if _is_overnight_template(template)]
+    discovery_leads = [_day_trading_signal_payload(candidate, account_size) for candidate in candidates if _is_day_trading_source(candidate)]
+    discovery_leads = [candidate for candidate in discovery_leads if candidate is not None]
+    non_frozen_day_templates = [template for template in day_templates if not _is_frozen_template(template)]
     return {
-        "schema": "day_trading_candidate_factory_v1",
+        "schema": "day_trading_template_factory_v2",
         "mode": "manual",
+        "phase": "daily_template_matcher",
         "account_size": account_size,
         "live_ordering_enabled": False,
         "order_placement": "disabled",
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_template_library_only",
         "policy": _day_trading_policy(paper_limit, review_limit, account_size),
         "counts": {
-            "day_trading_candidates": len(day_candidates),
+            "day_trading_candidates": len(discovery_leads),
+            "discovery_leads_needing_freeze": len(discovery_leads),
+            "day_trading_templates": len(day_templates),
+            "frozen_day_templates": len(frozen_day_templates),
+            "non_frozen_day_templates": len(non_frozen_day_templates),
             "eligible_review_signals": len(eligible),
             "daily_paper_queue": len(paper_queue),
             "unsuitable": len(unsuitable),
-            "frozen_day_templates": len(day_templates),
             "overnight_or_swing_templates": len(overnight_templates),
         },
         "daily_paper_queue": paper_queue,
@@ -555,13 +565,15 @@ def day_trading_factory_summary(
         "unsuitable": unsuitable[:review_limit],
         "template_library": {
             "day_trading_templates": [_template_queue_payload(template) for template in day_templates[:review_limit]],
+            "needs_freeze_validation": [_template_queue_payload(template) for template in non_frozen_day_templates[:review_limit]],
             "overnight_or_swing_templates": [_template_queue_payload(template) for template in overnight_templates[:review_limit]],
         },
+        "discovery_leads_not_live": sorted(discovery_leads, key=_day_trading_signal_rank, reverse=True)[:review_limit],
         "next_actions": [
-            "Start Day Trading Factory manually from Backtests.",
-            "Install only IG-matched share/market discoveries that fit the selected account.",
-            "Save promising intraday/no-overnight leads to Templates, then Freeze validate before paper.",
-            "Use broker previews only; live and generated order placement stay disabled.",
+            "Use Discovery mode to find or repair ideas, then save and Freeze validate them.",
+            "Keep only active frozen intraday/no-overnight templates in the daily queue.",
+            "At market open, match those frozen templates to eligible stocks/indices and keep only the best few paper previews.",
+            "After close, review expected versus actual; do not change live/paper rules without another validation cycle.",
         ],
     }
 
@@ -1831,6 +1843,14 @@ def _day_trading_policy(paper_limit: int = 3, review_limit: int = 10, account_si
     return {
         "start_mode": "manual_button",
         "automation_status": "planned_market_open_scheduler",
+        "flow": {
+            "discovery_mode": "Find markets, regimes, and possible ideas; repair, freeze, and validate before reuse.",
+            "template_library": "Store frozen rules only: market type, regime, entry, stop, target, max hold, session rules, capital fit, and cost assumptions.",
+            "daily_paper_mode": "Scan today's eligible markets against active frozen templates only; no parameter search or new strategy invention.",
+            "review_mode": "Compare expected versus actual after close; evidence can trigger a new validation cycle but cannot silently change rules.",
+        },
+        "daily_mode_source": "active_frozen_template_library_only",
+        "strategy_generation_allowed_in_daily_mode": False,
         "holding_period": "intraday_only",
         "force_flat_before_close": True,
         "overnight_positions_allowed": False,
@@ -1838,6 +1858,13 @@ def _day_trading_policy(paper_limit: int = 3, review_limit: int = 10, account_si
         "order_placement": "disabled",
         "paper_queue_limit": max(1, min(5, int(paper_limit))),
         "review_signal_limit": max(1, min(20, int(review_limit))),
+        "library_shape": {
+            "daily_active_paper_trades": "1-3",
+            "daily_review_signals": "5-10",
+            "per_regime_template_target": "1 primary plus 1 backup per major regime and market type",
+            "long_term_template_range": "20-50 frozen templates, with most idle on any given day",
+            "share_template_bias": "Prefer behavior templates such as liquid UK midcap trend-up pullback over one template per stock.",
+        },
         "account_size": account_size,
         "capital_checks": [
             "IG tradability and EPIC match",
@@ -1894,25 +1921,31 @@ def _is_day_trading_source(candidate: dict[str, object]) -> bool:
 
 
 def _is_day_trading_template(template: dict[str, object]) -> bool:
-    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
-    parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
-    source_template = template.get("source_template") if isinstance(template.get("source_template"), dict) else {}
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
     return bool(
         parameters.get("day_trading_mode")
         or parameters.get("holding_period") == "intraday"
         or parameters.get("force_flat_before_close")
         or parameters.get("no_overnight")
         or source_template.get("holding_period") == "intraday"
+        or source_template.get("force_flat_before_close")
+        or source_template.get("no_overnight")
     )
 
 
 def _is_overnight_template(template: dict[str, object]) -> bool:
-    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
-    backtest = template.get("backtest") if isinstance(template.get("backtest"), dict) else payload.get("backtest") if isinstance(payload.get("backtest"), dict) else {}
+    backtest = _template_backtest(template)
     family = str(template.get("strategy_family") or "").strip()
-    interval = str(template.get("interval") or "").strip()
+    interval = _template_interval(template)
     funding_cost = _safe_number(backtest.get("funding_cost"))
     return family in {"swing_trend", "calendar_turnaround_tuesday", "month_end_seasonality", "everyday_long"} or interval in {"1day", "1d", "daily"} or funding_cost > 0
+
+
+def _is_frozen_template(template: dict[str, object]) -> bool:
+    source_template = _template_source_template(template)
+    parameters = source_template.get("parameters") if isinstance(source_template.get("parameters"), dict) else {}
+    return bool(parameters)
 
 
 def _day_trading_signal_payload(candidate: dict[str, object], account_size: float) -> dict[str, object] | None:
@@ -1960,22 +1993,99 @@ def _day_trading_signal_payload(candidate: dict[str, object], account_size: floa
     }
 
 
+def _day_trading_template_payload(template: dict[str, object], account_size: float) -> dict[str, object] | None:
+    parameters = _template_parameters(template)
+    backtest = _template_backtest(template)
+    evidence = _template_evidence(template)
+    readiness = _template_readiness(template)
+    warnings = _template_warning_codes(template)
+    scenario = _scenario_for_account(template.get("capital_scenarios"), account_size)
+    if not parameters and not _template_source_template(template):
+        return None
+    terminal = _has_terminal_capital_blocker(warnings, scenario)
+    tier = str(template.get("promotion_tier") or "research_candidate")
+    readiness_status = str(template.get("readiness_status") or readiness.get("status") or "blocked")
+    interval = _template_interval(template)
+    intraday_interval = _is_intraday_interval(interval)
+    frozen = _is_frozen_template(template)
+    active = template.get("status") == "active"
+    overnight = _is_overnight_template(template)
+    has_flat_policy = _template_has_flat_policy(template)
+    blockers: list[str] = []
+    if not active:
+        blockers.append("template_not_active")
+    if not frozen:
+        blockers.append("template_not_frozen")
+    if not intraday_interval:
+        blockers.append("day_trade_requires_intraday_bars")
+    if overnight:
+        blockers.append("overnight_or_swing_template")
+    if not has_flat_policy:
+        blockers.append("day_trade_missing_flat_policy")
+    if terminal:
+        blockers.extend([warning for warning in warnings if warning in {"ig_minimum_margin_too_large_for_account", "ig_minimum_risk_too_large_for_account"}])
+    structural_ready = active and frozen and intraday_interval and not overnight and has_flat_policy and not terminal
+    readiness_ready = readiness_status == "ready_for_paper" or tier in {"paper_candidate", "validated_candidate"}
+    paper_ready = structural_ready and readiness_ready
+    source_template = _template_source_template(template)
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    return {
+        "id": template.get("id"),
+        "template_id": template.get("id"),
+        "source_type": "frozen_template",
+        "strategy_name": template.get("name"),
+        "name": template.get("name"),
+        "market_id": template.get("market_id") or source_template.get("market_id") or parameters.get("market_id"),
+        "market_type": _market_type_for_template(template),
+        "match_scope": _template_match_scope(template),
+        "interval": interval,
+        "strategy_family": template.get("strategy_family") or source_template.get("family") or parameters.get("family"),
+        "target_regime": template.get("target_regime") or source_template.get("target_regime") or parameters.get("target_regime"),
+        "promotion_tier": tier,
+        "readiness_status": readiness_status,
+        "robustness_score": template.get("robustness_score", 0),
+        "paper_readiness_score": search_audit.get("paper_readiness_score", template.get("robustness_score", 0)),
+        "net_profit": round(_safe_number(backtest.get("net_profit")), 4),
+        "oos_net_profit": round(_safe_number(evidence.get("oos_net_profit"), backtest.get("test_profit")), 4),
+        "trade_count": int(_safe_number(backtest.get("trade_count"))),
+        "oos_trade_count": int(_safe_number(evidence.get("oos_trade_count"))),
+        "cost_to_gross_ratio": round(_safe_number(backtest.get("cost_to_gross_ratio")), 6),
+        "funding_cost": round(_safe_number(backtest.get("funding_cost")), 4),
+        "warnings": list(dict.fromkeys([*warnings, *blockers])),
+        "capital_scenario": scenario,
+        "frozen_rules": True,
+        "strategy_generation_allowed": False,
+        "paper_ready": paper_ready,
+        "eligible_for_review": paper_ready,
+        "unsuitable": terminal,
+        "unsuitable_reason": _unsuitable_reason(warnings, scenario) if terminal else "",
+        "broker_preview_only": True,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "daily_rule": "match_frozen_template_only",
+    }
+
+
 def _template_queue_payload(template: dict[str, object]) -> dict[str, object]:
     payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
-    warnings = list(template.get("warnings") or payload.get("warnings") or [])
+    warnings = _template_warning_codes(template)
     return {
         "id": template.get("id"),
         "name": template.get("name"),
         "market_id": template.get("market_id"),
-        "interval": template.get("interval"),
+        "market_type": _market_type_for_template(template),
+        "match_scope": _template_match_scope(template),
+        "interval": _template_interval(template),
         "strategy_family": template.get("strategy_family"),
         "target_regime": template.get("target_regime"),
         "promotion_tier": template.get("promotion_tier"),
         "readiness_status": template.get("readiness_status"),
         "robustness_score": template.get("robustness_score", 0),
         "warnings": warnings,
+        "frozen_rules": _is_frozen_template(template),
         "holding_period": "intraday" if _is_day_trading_template(template) else "overnight_or_swing",
         "live_ordering_enabled": False,
+        "strategy_generation_allowed": False,
     }
 
 
@@ -2037,6 +2147,102 @@ def _candidate_warning_codes(candidate: dict[str, object]) -> list[str]:
         *list(pattern.get("warnings") or []),
     ]
     return list(dict.fromkeys(str(warning) for warning in warnings if warning))
+
+
+def _template_source_template(template: dict[str, object]) -> dict[str, object]:
+    source_template = template.get("source_template") if isinstance(template.get("source_template"), dict) else {}
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    payload_source = payload.get("source_template") if isinstance(payload.get("source_template"), dict) else {}
+    return {**payload_source, **source_template}
+
+
+def _template_parameters(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    payload_parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    parameters = template.get("parameters") if isinstance(template.get("parameters"), dict) else {}
+    source_template = _template_source_template(template)
+    source_parameters = source_template.get("parameters") if isinstance(source_template.get("parameters"), dict) else {}
+    return {**source_parameters, **payload_parameters, **parameters}
+
+
+def _template_backtest(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    if isinstance(template.get("backtest"), dict):
+        return template["backtest"]
+    return payload.get("backtest") if isinstance(payload.get("backtest"), dict) else {}
+
+
+def _template_evidence(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    return payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+
+
+def _template_readiness(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    readiness = template.get("readiness") if isinstance(template.get("readiness"), dict) else {}
+    payload_readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+    return {**payload_readiness, **readiness}
+
+
+def _template_warning_codes(template: dict[str, object]) -> list[str]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    readiness = _template_readiness(template)
+    parameters = _template_parameters(template)
+    pattern = template.get("pattern") if isinstance(template.get("pattern"), dict) else payload.get("pattern") if isinstance(payload.get("pattern"), dict) else {}
+    if not isinstance(pattern, dict):
+        pattern = {}
+    warnings = [
+        *list(template.get("warnings") or []),
+        *list(payload.get("warnings") or []),
+        *list(readiness.get("blockers") or []),
+        *list(readiness.get("validation_warnings") or []),
+        *list(pattern.get("warnings") or []),
+        *list(parameters.get("warnings") or []),
+    ]
+    return list(dict.fromkeys(str(warning) for warning in warnings if warning))
+
+
+def _template_interval(template: dict[str, object]) -> str:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    return str(template.get("interval") or source_template.get("interval") or parameters.get("timeframe") or parameters.get("interval") or "5min")
+
+
+def _template_has_flat_policy(template: dict[str, object]) -> bool:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    return bool(
+        parameters.get("force_flat_before_close")
+        or parameters.get("no_overnight")
+        or source_template.get("force_flat_before_close")
+        or source_template.get("no_overnight")
+    )
+
+
+def _is_intraday_interval(interval: object) -> bool:
+    return str(interval or "").strip().lower().replace(" ", "") in INTRADAY_INTERVALS
+
+
+def _market_type_for_template(template: dict[str, object]) -> str:
+    market_id = str(template.get("market_id") or _template_source_template(template).get("market_id") or "").strip()
+    if market_id:
+        market = markets.get(market_id)
+        if market is not None:
+            return market.asset_class
+    parameters = _template_parameters(template)
+    return str(parameters.get("market_type") or parameters.get("asset_class") or "").strip()
+
+
+def _template_match_scope(template: dict[str, object]) -> str:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    scope = str(parameters.get("template_scope") or source_template.get("template_scope") or "").strip()
+    if scope:
+        return scope
+    market_type = _market_type_for_template(template)
+    if market_type == "share":
+        return "share_behavior"
+    return "single_market"
 
 
 def _scenario_for_account(scenarios: object, account_size: float) -> dict[str, object]:

@@ -117,9 +117,9 @@ const OBJECTIVES = [
 const CANDIDATE_FACTORY_MODES = [
   {
     id: "day_trading",
-    label: "Day Trading Factory",
-    badge: "Manual start",
-    detail: "Intraday-only templates, 5-minute bars, IG cost sync, £3k capital fit, and forced flat before the next session. Live placement stays off.",
+    label: "Intraday discovery",
+    badge: "Discovery only",
+    detail: "Searches for no-overnight ideas to repair, freeze, and validate. Daily paper mode uses saved frozen templates only.",
     preset: "balanced",
     budgetLabel: "54 base trials / market + capped regime specialists",
   },
@@ -620,7 +620,7 @@ function App() {
     setActiveModule("backtests");
     setActiveTab("results");
     try {
-      setMessage("Candidate Factory: syncing IG cost profiles...");
+      setMessage(plan.mode.id === "day_trading" ? "Intraday discovery: syncing IG cost profiles..." : "Candidate Factory: syncing IG cost profiles...");
       const result = await syncIgCosts({ market_ids: plan.marketIds, product_mode: runConfig.product_mode || "spread_bet" });
       setCostProfiles((current) => {
         const next = { ...current };
@@ -1450,12 +1450,12 @@ function App() {
                         interval: event.target.checked ? "5min" : researchRun.interval,
                       })}
                     />
-                    Day trading only
+                    Intraday discovery only
                   </label>
                   {researchRun.day_trading_mode && (
                     <div className="status compact-status">
-                      <strong>No overnight exposure</strong>
-                      <span>Signals are forced flat before the next session. Broker output stays preview-only.</span>
+                      <strong>Discovery output, not daily firing rules</strong>
+                      <span>Search results must still be repaired, saved, and Freeze validated before the daily paper queue can use them.</span>
                     </div>
                   )}
                   {researchRun.include_regime_scans && (
@@ -1499,7 +1499,7 @@ function App() {
                   <span className="badge muted-badge repair-mode-badge">{repairModeLabel(researchRun.repair_mode)}</span>
                   {researchRun.day_trading_mode && (
                     <>
-                      <label>Daily paper slots</label>
+                      <label>Daily paper slots after freeze</label>
                       <input
                         value={researchRun.paper_queue_limit}
                         onChange={(event) => setResearchRun({ ...researchRun, paper_queue_limit: event.target.value })}
@@ -1508,7 +1508,7 @@ function App() {
                         max="5"
                         step="1"
                       />
-                      <label>Review signals</label>
+                      <label>Review matches after freeze</label>
                       <input
                         value={researchRun.review_queue_limit}
                         onChange={(event) => setResearchRun({ ...researchRun, review_queue_limit: event.target.value })}
@@ -2637,6 +2637,8 @@ function CandidateFactoryView({
   const dailyQueue = dayFactory?.daily_paper_queue ?? [];
   const reviewSignals = dayFactory?.review_signals ?? [];
   const unsuitableSignals = dayFactory?.unsuitable ?? [];
+  const discoveryLeads = dayFactory?.discovery_leads_not_live ?? [];
+  const needsFreezeTemplates = dayFactory?.template_library?.needs_freeze_validation ?? [];
   const dayCounts = dayFactory?.counts ?? {};
   const selectedMarketText = selectedMarkets.length
     ? selectedMarkets.map((market) => market.market_id).join(" / ")
@@ -2648,28 +2650,28 @@ function CandidateFactoryView({
         <div>
           <h3><Sparkles size={18} /> Candidate Factory</h3>
           <p>
-            Build frozen templates, then let each day choose eligible intraday markets and setups. Day-trading runs are
-            preview and paper only, force flat before the next session, and move on when IG minimums cannot fit the account.
+            Discovery can search for ideas, but daily paper mode never invents a fresh strategy. It only matches active
+            frozen templates to eligible markets, produces broker-safe previews, and keeps live placement disabled.
           </p>
         </div>
-        <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh leads</button>
+        <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh template queue</button>
       </section>
 
       <section className="lab-section span-2">
         <h3>Factory Status</h3>
         <div className="metrics four">
-          <Metric label="Selected markets" value={selectedMarkets.length || 0} />
+          <Metric label="Frozen day templates" value={dayCounts.frozen_day_templates ?? 0} />
           <Metric label="Day paper queue" value={dayCounts.daily_paper_queue ?? 0} />
-          <Metric label="Review signals" value={dayCounts.eligible_review_signals ?? summary.researchLeads} />
-          <Metric label="Unsuitable" value={dayCounts.unsuitable ?? 0} />
+          <Metric label="Review matches" value={dayCounts.eligible_review_signals ?? 0} />
+          <Metric label="Discovery leads" value={dayCounts.discovery_leads_needing_freeze ?? summary.researchLeads} />
         </div>
         <div className="factory-flow">
           {[
             ["1", "Discover", "Find IG-matched markets that fit the selected account."],
-            ["2", "Apply", "Run frozen or intraday template scans with no overnight exposure."],
-            ["3", "Validate", "Check price, spread, slippage, min stake, margin, and stop rules."],
-            ["4", "Queue", "Keep 1-3 paper previews and 5-10 review signals."],
-            ["5", "Move on", "Skip terminal oversized markets instead of repairing forever."],
+            ["2", "Freeze", "Repair and Freeze validate exact rules before reuse."],
+            ["3", "Match", "Daily mode scans only active frozen templates."],
+            ["4", "Queue", "Keep 1-3 paper previews and 5-10 review matches."],
+            ["5", "Review", "Update evidence after close without silently changing rules."],
           ].map(([step, title, detail]) => (
             <div className="factory-step" key={title}>
               <span>{step}</span>
@@ -2680,36 +2682,58 @@ function CandidateFactoryView({
         </div>
         <div className="status-list factory-policy">
           <div className="status compact-status">
-            <strong>Day-trading policy</strong>
-            <span>Manual start now, market-open automation later. Live orders and generated placement remain disabled.</span>
+            <strong>Daily mode source · frozen templates only</strong>
+            <span>Research candidates are discovery leads until they are saved and Freeze validated. Market-open automation can come later.</span>
             <small>Intraday templates force flat before the next session; overnight/swing templates stay separate until funding and gap risk are explicitly proven.</small>
           </div>
         </div>
       </section>
 
       <section className="lab-section span-2">
-        <h3>Daily Paper Queue</h3>
+        <h3>Daily Paper Queue From Frozen Templates</h3>
         <div className="factory-lead-grid">
           {dailyQueue.map((lead) => (
             <DayTradingQueueCard key={`${lead.id}-${lead.market_id}`} lead={lead} />
           ))}
-          {dailyQueue.length === 0 && <span className="muted">No day-trading candidate has cleared paper gates yet.</span>}
+          {dailyQueue.length === 0 && <span className="muted">No active frozen day-trading template has cleared paper gates yet.</span>}
         </div>
       </section>
 
       <section className="lab-section span-2">
-        <h3>Eligible Signals For Review</h3>
+        <h3>Eligible Frozen Template Matches For Review</h3>
         <div className="status-list">
           {reviewSignals.slice(0, 10).map((lead) => (
             <div className="status compact-status" key={`${lead.id}-${lead.market_id}-review`}>
               <strong>{lead.market_id} · {lead.strategy_name}</strong>
-              <span>{strategyFamilyLabel(lead.strategy_family)} · OOS {formatMoney(lead.oos_net_profit)} · trades {lead.trade_count} · {tierLabel(lead.promotion_tier)}</span>
+              <span>{strategyFamilyLabel(lead.strategy_family)} · {lead.match_scope ? `${readableSnake(lead.match_scope)} · ` : ""}OOS {formatMoney(lead.oos_net_profit)} · trades {lead.trade_count} · {tierLabel(lead.promotion_tier)}</span>
               <small>{lead.target_regime ? `${regimeLabel(lead.target_regime)} only · ` : ""}Preview only · live placement disabled</small>
             </div>
           ))}
-          {reviewSignals.length === 0 && <span className="muted">Run Day Trading Factory to produce a small daily review list.</span>}
+          {reviewSignals.length === 0 && <span className="muted">Save and Freeze validate intraday templates before expecting daily matches.</span>}
         </div>
       </section>
+
+      {(discoveryLeads.length > 0 || needsFreezeTemplates.length > 0) && (
+        <section className="lab-section span-2">
+          <h3>Discovery Leads Not Allowed To Fire Yet</h3>
+          <div className="status-list">
+            {needsFreezeTemplates.slice(0, 5).map((template) => (
+              <div className="status compact-status" key={`${template.id}-${template.market_id}-needs-freeze`}>
+                <strong>{template.market_id} · {template.name}</strong>
+                <span>{strategyFamilyLabel(template.strategy_family)} · saved but not frozen</span>
+                <small>Use Freeze validate before this can enter the daily paper queue.</small>
+              </div>
+            ))}
+            {discoveryLeads.slice(0, 5).map((lead) => (
+              <div className="status compact-status" key={`${lead.id}-${lead.market_id}-discovery`}>
+                <strong>{lead.market_id} · {lead.strategy_name}</strong>
+                <span>{strategyFamilyLabel(lead.strategy_family)} · {tierLabel(lead.promotion_tier)} · research/discovery only</span>
+                <small>Repair, save to Templates, then Freeze validate. Daily mode will not alter or fire this lead directly.</small>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {unsuitableSignals.length > 0 && (
         <section className="lab-section span-2">
@@ -2728,7 +2752,7 @@ function CandidateFactoryView({
 
       <section className="lab-section span-2">
         <div className="label-row table-heading">
-          <h3>Markets To Feed</h3>
+          <h3>Markets For Discovery</h3>
           <span className="badge market-badge">{selectedMarketText}</span>
         </div>
         <div className="market-picker">
@@ -2754,7 +2778,7 @@ function CandidateFactoryView({
       </section>
 
       <section className="lab-section span-2">
-        <h3>Run A Factory Scan</h3>
+        <h3>Run Discovery Scans</h3>
         <div className="factory-mode-grid">
           {CANDIDATE_FACTORY_MODES.map((mode) => {
             const plan = candidateFactoryPlan(mode.id, researchRun, enabledMarkets, activeMarketIds);
@@ -2796,7 +2820,7 @@ function CandidateFactoryView({
               <small>OOS {formatMoney(row.bestOos)} · trades {row.bestTrades} · cost/gross {percent(row.bestCostToGross)}</small>
             </div>
           ))}
-          {coverage.length === 0 && <span className="muted">No market/regime leads yet. Run a factory scan first.</span>}
+          {coverage.length === 0 && <span className="muted">No market/regime leads yet. Run a discovery scan first.</span>}
         </div>
       </section>
 
@@ -2807,12 +2831,12 @@ function CandidateFactoryView({
             <div className="status compact-status" key={`${gap.marketId}-${gap.regime}`}>
               <strong>{gap.marketId} · {regimeLabel(gap.regime)}</strong>
               <span>{gap.tradingDays} regime days · no saved lead yet</span>
-              <small>Run a factory scan or deep one-market scan to search this specialist slot.</small>
+              <small>Run a discovery scan or deep one-market scan to search this specialist slot.</small>
             </div>
           ))}
           {gaps.length === 0 && (
             <span className="muted">
-              {runDetail ? "No obvious regime gaps in the loaded run." : "Load a run in Runs to see eligible regime gaps."}
+              {runDetail ? "No obvious regime gaps in the loaded run." : "Load a run in Results to see eligible regime gaps."}
             </span>
           )}
         </div>
@@ -2820,7 +2844,7 @@ function CandidateFactoryView({
 
       <section className="lab-section span-2">
         <div className="label-row table-heading">
-          <h3>Best Leads To Feed Into Repair</h3>
+          <h3>Best Discovery Leads To Repair Or Freeze</h3>
           {latestRun && <span className="badge muted-badge">Latest run {latestRun.id} · {latestRun.status}</span>}
         </div>
         <div className="factory-lead-grid">
@@ -2834,7 +2858,7 @@ function CandidateFactoryView({
               onSaveTemplate={onSaveTemplate}
             />
           ))}
-          {topLeads.length === 0 && <span className="muted">No leads yet. Start with Balanced factory on one market, then inspect Best Leads.</span>}
+          {topLeads.length === 0 && <span className="muted">No leads yet. Start with a discovery scan on one market, then inspect the repair list.</span>}
         </div>
       </section>
     </div>
@@ -4076,10 +4100,10 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
     marketIds,
     runPatch,
     launchMessage: isDayTrading
-      ? `Launching Day Trading Factory: ${marketIds.join(" / ")} · ${trialPlan} · forced flat before close.`
+      ? `Launching intraday discovery: ${marketIds.join(" / ")} · ${trialPlan} · leads must be frozen before daily paper.`
       : `Launching Candidate Factory: ${marketIds.join(" / ")} · ${trialPlan}.`,
     stageMessage: isDayTrading
-      ? `Day Trading Factory staged for ${marketIds.join(" / ")}: intraday-only, no overnight, ${trialPlan}.`
+      ? `Intraday discovery staged for ${marketIds.join(" / ")}: no overnight, ${trialPlan}, then save and Freeze validate.`
       : `Candidate Factory staged for ${marketIds.join(" / ")}: find-anything-robust, regime templates on, ${trialPlan}.`,
   };
 }
@@ -5109,7 +5133,7 @@ function runPurpose(run = {}) {
 function runPurposeLabel(run = {}) {
   const purpose = runPurpose(run);
   return {
-    day_trading_factory: "Day Trading",
+    day_trading_factory: "Intraday discovery",
     backtest: "Backtest",
     regime_scan: "Regime scan",
     repair: "Make tradeable",
@@ -5513,6 +5537,10 @@ function strategyFamilyLabel(value) {
     research_ideas: "Known research ideas",
     find_anything_robust: "Find anything robust",
   }[value] ?? value;
+}
+
+function readableSnake(value) {
+  return String(value || "").replace(/_/g, " ");
 }
 
 function researchRecipeLabel(value) {
