@@ -11,7 +11,7 @@ from app.research_strategies import ProbabilityCandidate
 
 def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
-    run_id = store.create_run("NAS100", {"interval": "1h"}, status="running")
+    run_id = store.create_run("NAS100", {"interval": "1h", "repair_mode": "frozen_validation", "target_regime": "trend_up"}, status="running")
     rejected = _evaluation("rejected", passed=False)
     accepted = _evaluation("accepted", passed=True)
 
@@ -30,6 +30,8 @@ def test_research_store_records_rejected_trials_and_promoted_candidates(tmp_path
     assert run["passed_count"] == 1
     assert run["status"] == "finished"
     assert run["error"] == ""
+    assert run["run_purpose"]["kind"] == "frozen_validation"
+    assert run["run_purpose"]["target_regime"] == "trend_up"
     assert run_detail is not None
     assert run_detail["error"] == ""
     assert [trial["strategy_name"] for trial in trials] == ["rejected", "accepted"]

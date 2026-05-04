@@ -414,6 +414,7 @@ class ResearchStore:
             rows = conn.execute(
                 f"""
                 SELECT run.id, run.created_at, run.status, run.market_id, run.data_source, run.error,
+                       run.config_json,
                        run.archived,
                        COUNT(trial.id) AS trial_count,
                        COALESCE(SUM(trial.passed), 0) AS passed_count,
@@ -433,10 +434,11 @@ class ResearchStore:
                 "market_id": row[3],
                 "data_source": row[4],
                 "error": row[5],
-                "archived": bool(row[6]),
-                "trial_count": row[7],
-                "passed_count": row[8],
-                "best_score": row[9] or 0,
+                "run_purpose": _run_purpose(row[6]),
+                "archived": bool(row[7]),
+                "trial_count": row[8],
+                "passed_count": row[9],
+                "best_score": row[10] or 0,
             }
             for row in rows
         ]
@@ -1465,6 +1467,48 @@ def _sample_values(values: list[object], limit: int) -> list[object]:
         return values
     step = max(1, len(values) // limit)
     return values[::step][:limit]
+
+
+def _run_purpose(config_json: str | bytes | None) -> dict[str, object]:
+    try:
+        config = json.loads(config_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        config = {}
+    source_template = config.get("source_template") if isinstance(config.get("source_template"), dict) else {}
+    repair_mode = str(config.get("repair_mode") or "standard")
+    include_regime_scans = bool(config.get("include_regime_scans"))
+    target_regime = str(config.get("target_regime") or source_template.get("target_regime") or "")
+    source_template_name = str(source_template.get("name") or "")
+    if repair_mode == "frozen_validation":
+        kind = "frozen_validation"
+    elif repair_mode in {"capital_fit"}:
+        kind = "capital_fit"
+    elif repair_mode in {
+        "auto_refine",
+        "more_trades",
+        "longer_history",
+        "cost_stress",
+        "regime_repair",
+        "evidence_first",
+        "focused_retest",
+        "month_exclusion",
+    }:
+        kind = "repair"
+    elif repair_mode == "cross_market_discovery":
+        kind = "cross_market"
+    elif include_regime_scans:
+        kind = "regime_scan"
+    else:
+        kind = "backtest"
+    return {
+        "kind": kind,
+        "repair_mode": repair_mode,
+        "trading_style": config.get("trading_style"),
+        "target_regime": target_regime,
+        "source_template_name": source_template_name,
+        "include_regime_scans": include_regime_scans,
+        "account_size": config.get("account_size"),
+    }
 
 
 def _now() -> str:

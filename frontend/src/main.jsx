@@ -564,6 +564,20 @@ function App() {
     await launchAutoRefinementPlan(plan, `Launching repair attempt ${plan.repairAttempt}/${MAX_REPAIR_ATTEMPTS}...`);
   }
 
+  async function freezeValidate(source) {
+    const sourceForTemplate = source.strategy_name ? source : savedTemplateAsSource(source);
+    const template = refinementTemplateFromSource(sourceForTemplate, researchRun);
+    const plan = frozenValidationPlanForTemplate(template, researchRun, template.market_id ? [template.market_id] : activeMarketIds);
+    setRefinementTemplate(template);
+    if (plan.stopReason) {
+      setActiveModule("backtests");
+      setActiveTab("builder");
+      setMessage(plan.stopReason);
+      return;
+    }
+    await launchAutoRefinementPlan(plan, "Launching frozen validation run...");
+  }
+
   async function launchAutoRefinementPlan(plan, launchMessage = "Launching auto-refine run...") {
     const runConfig = applyAutoRefinementPlan(plan);
     setActiveModule("backtests");
@@ -1064,6 +1078,7 @@ function App() {
           onUseTemplate={useSavedTemplate}
           onMakeTradeable={makeSavedTemplateTradeable}
           onRepairRemaining={repairRemaining}
+          onFreezeValidate={freezeValidate}
           onArchive={archiveSavedTemplate}
           onRefresh={() => loadModule("templates")}
         />
@@ -1078,7 +1093,7 @@ function App() {
             </div>
             <button type="button" className="secondary" onClick={() => loadModule("research")}><RefreshCw size={16} /> Refresh</button>
           </div>
-          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} onMakeTradeable={makeTradeable} onRepairRemaining={repairRemaining} onSaveTemplate={saveTemplateFromSource} />
+          <CandidateView candidates={candidates} critique={critique} onRefineTemplate={refineTemplate} onRefineFurther={refineFurther} onMakeTradeable={makeTradeable} onRepairRemaining={repairRemaining} onFreezeValidate={freezeValidate} onSaveTemplate={saveTemplateFromSource} />
         </section>
       )}
 
@@ -1391,6 +1406,7 @@ function App() {
                 onStageFactory={stageCandidateFactory}
                 onMakeTradeable={makeTradeable}
                 onRepairRemaining={repairRemaining}
+                onFreezeValidate={freezeValidate}
                 onSaveTemplate={saveTemplateFromSource}
                 onRefresh={() => loadModule("backtests")}
               />
@@ -1409,6 +1425,7 @@ function App() {
                 onRefineFurther={refineFurther}
                 onMakeTradeable={makeTradeable}
                 onRepairRemaining={repairRemaining}
+                onFreezeValidate={freezeValidate}
                 onSaveTemplate={saveTemplateFromSource}
                 exportIncludeBars={exportIncludeBars}
               />
@@ -1777,7 +1794,7 @@ function GuideView({ setActiveModule }) {
   );
 }
 
-function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onRepairRemaining, onArchive, onRefresh }) {
+function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onRepairRemaining, onFreezeValidate, onArchive, onRefresh }) {
   const templates = summary?.templates ?? [];
   const counts = summary?.counts ?? {};
   const [marketFilter, setMarketFilter] = React.useState("all");
@@ -1851,6 +1868,7 @@ function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onRepair
             onUseTemplate={onUseTemplate}
             onMakeTradeable={onMakeTradeable}
             onRepairRemaining={onRepairRemaining}
+            onFreezeValidate={onFreezeValidate}
             onArchive={onArchive}
           />
         ))}
@@ -1861,7 +1879,7 @@ function TemplateLibraryView({ summary, onUseTemplate, onMakeTradeable, onRepair
   );
 }
 
-function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemaining, onArchive }) {
+function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemaining, onFreezeValidate, onArchive }) {
   const payload = template.payload ?? {};
   const backtest = template.backtest ?? payload.backtest ?? {};
   const pattern = template.pattern ?? payload.pattern ?? {};
@@ -1871,6 +1889,7 @@ function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemain
   const frozenParameterCount = Object.keys(template.source_template?.parameters ?? payload.source_template?.parameters ?? {}).length;
   const capital = accountFeasibility(template.capital_scenarios ?? payload.capital_scenarios, accountSize);
   const showRepairRemaining = shouldShowRepairRemaining(template);
+  const showFreezeValidate = shouldShowFreezeValidate(template);
   return (
     <article className="template-card">
       <div className="template-card-header">
@@ -1909,6 +1928,9 @@ function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemain
           <button type="button" className="secondary" onClick={() => onRepairRemaining(template)}><ShieldCheck size={16} /> Repair remaining</button>
         ) : (
           <button type="button" className="secondary" onClick={() => onMakeTradeable(template)}><ShieldCheck size={16} /> Make tradeable</button>
+        )}
+        {showFreezeValidate && (
+          <button type="button" className="ghost" onClick={() => onFreezeValidate(template)}><LockKeyhole size={16} /> Freeze validate</button>
         )}
         <button type="button" className="ghost" onClick={() => onUseTemplate(template)}><RefreshCw size={16} /> Use</button>
         <button type="button" className="ghost" onClick={() => onArchive(template)}><Archive size={16} /> Archive</button>
@@ -2117,7 +2139,7 @@ function moduleLabel(id) {
   return MODULES.find((item) => item[0] === id)?.[1] ?? id;
 }
 
-function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate, exportIncludeBars }) {
+function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, archiveRuns, deleteRuns, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onFreezeValidate, onSaveTemplate, exportIncludeBars }) {
   const pareto = runDetail?.pareto ?? [];
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
@@ -2208,9 +2230,10 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
                   disabled={["created", "running"].includes(run.status)}
                 />
               </label>
-              <button className="run-pill" type="button" onClick={() => loadRun(run.id)}>
+              <button className={`run-pill ${runPurposeClass(run)}`} type="button" onClick={() => loadRun(run.id)} title={runPurposeDetail(run)}>
                 <strong>Run {run.id}</strong>
-                <span>{run.market_id} · {run.status} · {run.trial_count} trials · best {round(run.best_score)}</span>
+                <span><span className="run-kind-label">{runPurposeLabel(run)}</span> · {run.market_id} · {run.status} · {run.trial_count} trials · best {round(run.best_score)}</span>
+                {runPurposeSubLabel(run) && <small>{runPurposeSubLabel(run)}</small>}
               </button>
               <button
                 className="icon-button danger"
@@ -2274,6 +2297,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
           runDetail={runDetail}
           onMakeTradeable={onMakeTradeable}
           onRepairRemaining={onRepairRemaining}
+          onFreezeValidate={onFreezeValidate}
           onSaveTemplate={onSaveTemplate}
         />
       )}
@@ -2402,7 +2426,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
           <span className="warning-chip info">Diagnostic</span>
         </div>
         <div className="trial-list">
-          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onRepairRemaining={onRepairRemaining} onSaveTemplate={onSaveTemplate} />)}
+          {visibleTrials.map((trial) => <TrialCard key={trial.id} trial={trial} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onRepairRemaining={onRepairRemaining} onFreezeValidate={onFreezeValidate} onSaveTemplate={onSaveTemplate} />)}
         </div>
         {filteredTrials.length === 0 && trials.length > 0 && (
           <span className="muted">No trials in this filter. Rejected and fragile trials are still available under Rejected or All.</span>
@@ -2429,6 +2453,7 @@ function CandidateFactoryView({
   onStageFactory,
   onMakeTradeable,
   onRepairRemaining,
+  onFreezeValidate,
   onSaveTemplate,
   onRefresh,
 }) {
@@ -2581,6 +2606,7 @@ function CandidateFactoryView({
               lead={lead}
               onMakeTradeable={onMakeTradeable}
               onRepairRemaining={onRepairRemaining}
+              onFreezeValidate={onFreezeValidate}
               onSaveTemplate={onSaveTemplate}
             />
           ))}
@@ -2591,8 +2617,9 @@ function CandidateFactoryView({
   );
 }
 
-function FactoryLeadCard({ lead, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
+function FactoryLeadCard({ lead, onMakeTradeable, onRepairRemaining, onFreezeValidate, onSaveTemplate }) {
   const showRepairRemaining = shouldShowRepairRemaining(lead.source);
+  const showFreezeValidate = shouldShowFreezeValidate(lead.source);
   return (
     <article className="factory-lead-card">
       <div className="label-row">
@@ -2621,6 +2648,11 @@ function FactoryLeadCard({ lead, onMakeTradeable, onRepairRemaining, onSaveTempl
         ) : (
           <button type="button" className="secondary" onClick={() => onMakeTradeable(lead.source)}>
             <ShieldCheck size={16} /> Make tradeable
+          </button>
+        )}
+        {showFreezeValidate && (
+          <button type="button" className="ghost" onClick={() => onFreezeValidate(lead.source)}>
+            <LockKeyhole size={16} /> Freeze
           </button>
         )}
         <button type="button" className="ghost" onClick={() => onSaveTemplate(lead.source)}>
@@ -2674,7 +2706,7 @@ function RegimeEvidence({ runDetail, trials }) {
   );
 }
 
-function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
+function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onRepairRemaining, onFreezeValidate, onSaveTemplate }) {
   const groups = runDetail?.regime_picks ?? [];
   if (groups.length === 0) {
     return null;
@@ -2698,6 +2730,11 @@ function RegimeTemplateShortlist({ runDetail, onMakeTradeable, onRepairRemaining
                     In-regime {formatMoney(trial.in_regime_net_profit)} · {trial.regime_trading_days ?? 0}d · cost/gross {percent(trial.cost_to_gross_ratio)}
                   </small>
                   <div className="button-row compact-actions">
+                    {shouldShowFreezeValidate(trial) && (
+                      <button type="button" className="ghost" onClick={() => onFreezeValidate(trial)}>
+                        <LockKeyhole size={16} /> Freeze
+                      </button>
+                    )}
                     {shouldShowRepairRemaining(trial) ? (
                       <button type="button" className="secondary" onClick={() => onRepairRemaining(trial)}>
                         <ShieldCheck size={16} /> Repair remaining
@@ -2777,7 +2814,7 @@ function TemplateUtilizationMetrics({ backtest, pattern }) {
   );
 }
 
-function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
+function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onFreezeValidate, onSaveTemplate }) {
   const backtest = trial.backtest ?? {};
   const accountSize = testingAccountSizeForSource(trial);
   const accountLabel = accountSizeLabel(accountSize);
@@ -2793,6 +2830,7 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, 
   const scoreBasis = scoreBasisLabel(searchAudit);
   const discoveryLabel = discoveryBadgeLabel(trial.parameters?.search_audit);
   const showRepairRemaining = shouldShowRepairRemaining(trial);
+  const showFreezeValidate = shouldShowFreezeValidate(trial);
   return (
     <article className="trial-card">
       <div className="trial-summary">
@@ -2820,6 +2858,11 @@ function TrialCard({ trial, onRefineTemplate, onRefineFurther, onMakeTradeable, 
           <button type="button" className="ghost" onClick={() => onRefineTemplate(trial)}>
             <RefreshCw size={16} /> Refine
           </button>
+          {showFreezeValidate && (
+            <button type="button" className="ghost" onClick={() => onFreezeValidate(trial)}>
+              <LockKeyhole size={16} /> Freeze validate
+            </button>
+          )}
           <button type="button" className="ghost" onClick={() => onSaveTemplate(trial)}>
             <Save size={16} /> Save
           </button>
@@ -2894,7 +2937,7 @@ function ParetoCard({ item, onRefineTemplate }) {
   );
 }
 
-function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
+function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onFreezeValidate, onSaveTemplate }) {
   const visibleCandidates = candidates.slice(0, 24);
   const queue = candidateQueueSummary(candidates);
   return (
@@ -2929,7 +2972,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
       <section className="lab-section span-2">
         <h3>Research Candidates</h3>
         <div className="candidate-grid">
-          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onRepairRemaining={onRepairRemaining} onSaveTemplate={onSaveTemplate} />)}
+          {visibleCandidates.map((candidate) => <CandidateCard candidate={candidate} key={candidate.id} onRefineTemplate={onRefineTemplate} onRefineFurther={onRefineFurther} onMakeTradeable={onMakeTradeable} onRepairRemaining={onRepairRemaining} onFreezeValidate={onFreezeValidate} onSaveTemplate={onSaveTemplate} />)}
           {candidates.length === 0 && <span className="muted">No saved research leads yet. Strong but flawed trials appear here with warnings.</span>}
           {candidates.length > visibleCandidates.length && (
             <span className="muted">Showing {visibleCandidates.length} of {candidates.length} candidates.</span>
@@ -2961,7 +3004,7 @@ function CandidateView({ candidates, critique, onRefineTemplate, onRefineFurther
   );
 }
 
-function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onSaveTemplate }) {
+function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTradeable, onRepairRemaining, onFreezeValidate, onSaveTemplate }) {
   const readiness = candidateReadiness(candidate);
   const issues = readinessIssueCodes(readiness);
   const accountSize = testingAccountSizeForSource(candidate);
@@ -2976,6 +3019,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
   const scoreBasis = scoreBasisLabel(searchAudit);
   const discoveryLabel = discoveryBadgeLabel(candidate.audit?.candidate?.parameters?.search_audit);
   const showRepairRemaining = shouldShowRepairRemaining(candidate);
+  const showFreezeValidate = shouldShowFreezeValidate(candidate);
   return (
     <div className="candidate-card">
       <div className="label-row">
@@ -3010,6 +3054,11 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
         <button type="button" className="ghost" onClick={() => onRefineTemplate(candidate)}>
           <RefreshCw size={16} /> Refine
         </button>
+        {showFreezeValidate && (
+          <button type="button" className="ghost" onClick={() => onFreezeValidate(candidate)}>
+            <LockKeyhole size={16} /> Freeze validate
+          </button>
+        )}
         <button type="button" className="ghost" onClick={() => onSaveTemplate(candidate)}>
           <Save size={16} /> Save
         </button>
@@ -3978,6 +4027,34 @@ function shouldShowRepairRemaining(source = {}) {
   return attempts > 0 && readinessStatus !== "ready_for_paper" && !["paper_candidate", "validated_candidate"].includes(tier);
 }
 
+function shouldShowFreezeValidate(source = {}) {
+  const template = source.strategy_name ? source : savedTemplateAsSource(source);
+  const parameters = template.audit?.candidate?.parameters ?? template.parameters ?? template.settings ?? {};
+  const searchAudit = parameters.search_audit ?? source.payload?.search_audit ?? {};
+  if (searchAudit.frozen_validation || parameters.frozen_template_validation || source.repair_mode === "frozen_validation") {
+    return false;
+  }
+  return hasFrozenTemplateParameters(refinementTemplateLike(template));
+}
+
+function refinementTemplateLike(source = {}) {
+  const parameters = source.audit?.candidate?.parameters ?? source.parameters ?? source.settings ?? {};
+  const searchAudit = parameters.search_audit ?? source.search_audit ?? source.payload?.search_audit ?? {};
+  const pattern = parameters.bar_pattern_analysis ?? source.pattern ?? source.payload?.pattern ?? {};
+  return {
+    id: source.id ?? source.trial_id ?? source.source_trial_id ?? source.strategy_name ?? source.name,
+    name: source.strategy_name ?? source.name,
+    market_id: source.market_id ?? parameters.market_id,
+    family: parameters.family ?? source.strategy_family ?? source.family,
+    style: parameters.style ?? searchAudit.trading_style ?? source.style,
+    interval: parameters.timeframe ?? source.interval,
+    target_regime: parameters.target_regime ?? pattern.target_regime ?? source.target_regime,
+    repair_attempt_count: repairAttemptCountForSource(source),
+    parameters,
+    pattern,
+  };
+}
+
 function templateSourceIds(source = {}) {
   const numericId = Number(source.id);
   const candidateId = source.audit && numericId > 0 ? numericId : null;
@@ -4450,6 +4527,68 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   };
 }
 
+function frozenValidationPlanForTemplate(template, researchRun, activeMarketIds = []) {
+  const sourceTemplate = frozenTemplatePayload(template);
+  const marketId = String(template.market_id || activeMarketIds[0] || researchRun.market_id || "").trim();
+  const marketIds = marketId ? [marketId] : [];
+  const targetRegime = templateSpecificRegime(template);
+  const attempt = repairAttemptCountForTemplate(template);
+  if (!sourceTemplate.parameters || Object.keys(sourceTemplate.parameters).length === 0) {
+    return {
+      marketIds,
+      runPatch: {},
+      steps: [],
+      syncCosts: false,
+      summary: "Frozen validation needs exact saved parameters first.",
+      targetRegime,
+      crossMarketDiscovery: false,
+      targets: [],
+      stageMessage: "Frozen validation unavailable.",
+      repairAttempt: attempt,
+      priorRepairAttempt: attempt,
+      stopReason: "Frozen validation needs exact saved parameters. Use a trial/candidate with parameters or save the template first.",
+    };
+  }
+  const family = template.family ? [template.family] : [];
+  const stress = Math.max(2.5, Number(researchRun.cost_stress_multiplier || 2.0));
+  return {
+    marketIds,
+    runPatch: {
+      market_id: marketId || researchRun.market_id,
+      interval: template.interval || researchRun.interval,
+      start: longEvidenceStartForTemplate(template),
+      end: researchRun.end,
+      trading_style: template.style || researchRun.trading_style,
+      objective: "profit_first",
+      risk_profile: template.risk_profile || researchRun.risk_profile,
+      search_preset: "balanced",
+      search_budget: "1",
+      strategy_families: family,
+      cost_stress_multiplier: stress,
+      include_regime_scans: false,
+      regime_scan_budget_per_regime: "",
+      target_regime: targetRegime,
+      excluded_months: [],
+      repair_mode: "frozen_validation",
+      account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
+      source_template: sourceTemplate,
+    },
+    steps: [
+      "Freeze exact template parameters",
+      targetRegime ? `Score only ${regimeLabel(targetRegime)}` : "Retest full-period evidence",
+      "Run one no-search validation trial",
+    ],
+    syncCosts: false,
+    summary: "Frozen validation retests the exact template with no parameter search.",
+    targetRegime,
+    crossMarketDiscovery: false,
+    targets: ["Pass frozen validation"],
+    stageMessage: "Frozen validation staged.",
+    repairAttempt: attempt,
+    priorRepairAttempt: attempt,
+  };
+}
+
 function earlierDate(current, candidate) {
   if (!current) {
     return candidate;
@@ -4496,6 +4635,48 @@ function repairModeLabel(value) {
     auto_refine: "Auto-refine",
     frozen_validation: "Frozen validation",
   }[value] ?? value ?? "Standard search";
+}
+
+function runPurpose(run = {}) {
+  const purpose = run.run_purpose ?? {};
+  const repairMode = purpose.repair_mode ?? "standard";
+  const kind = purpose.kind
+    ?? (repairMode === "frozen_validation" ? "frozen_validation" : repairMode === "capital_fit" ? "capital_fit" : "backtest");
+  return { ...purpose, kind, repair_mode: repairMode };
+}
+
+function runPurposeLabel(run = {}) {
+  const purpose = runPurpose(run);
+  return {
+    backtest: "Backtest",
+    regime_scan: "Regime scan",
+    repair: "Make tradeable",
+    capital_fit: "Size / capital fit",
+    frozen_validation: "Frozen validation",
+    cross_market: "Discovery",
+  }[purpose.kind] ?? repairModeLabel(purpose.repair_mode);
+}
+
+function runPurposeClass(run = {}) {
+  const purpose = runPurpose(run);
+  return `run-${purpose.kind || "backtest"}`;
+}
+
+function runPurposeSubLabel(run = {}) {
+  const purpose = runPurpose(run);
+  const bits = [
+    repairModeLabel(purpose.repair_mode),
+    purpose.trading_style ? strategyFamilyLabel(purpose.trading_style) : "",
+    purpose.target_regime ? `${regimeLabel(purpose.target_regime)} only` : "",
+    purpose.source_template_name ? `from ${purpose.source_template_name}` : "",
+  ].filter(Boolean);
+  return [...new Set(bits)].slice(0, 3).join(" · ");
+}
+
+function runPurposeDetail(run = {}) {
+  const label = runPurposeLabel(run);
+  const detail = runPurposeSubLabel(run);
+  return detail ? `${label}: ${detail}` : label;
 }
 
 function calendarRiskLabel(value) {

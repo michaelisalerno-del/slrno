@@ -343,6 +343,57 @@ p {
   flex: 1 1 auto;
 }
 
+.run-pill {
+  border-left-width: 5px;
+}
+
+.run-pill small {
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.78;
+  overflow-wrap: anywhere;
+}
+
+.run-kind-label {
+  font-weight: 800;
+}
+
+.run-pill.run-backtest {
+  background: #eef6ff;
+  border-color: #9cc8f4;
+  color: #143d66;
+}
+
+.run-pill.run-regime_scan {
+  background: #eefaf5;
+  border-color: #90d8b5;
+  color: #174d36;
+}
+
+.run-pill.run-repair {
+  background: #fff7e8;
+  border-color: #edc46b;
+  color: #5d3b00;
+}
+
+.run-pill.run-capital_fit {
+  background: #f2efff;
+  border-color: #b8a6f2;
+  color: #35226c;
+}
+
+.run-pill.run-frozen_validation {
+  background: #edf8fb;
+  border-color: #79c7d4;
+  color: #174b56;
+}
+
+.run-pill.run-cross_market {
+  background: #f7f4ef;
+  border-color: #d1b88d;
+  color: #4d3a19;
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;
