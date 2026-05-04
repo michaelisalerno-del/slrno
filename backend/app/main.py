@@ -734,8 +734,14 @@ async def discover_midcap_markets(
                 if rows:
                     break
     if not rows:
-        source = "built_in_uk_midcap_starter" if not fmp_error else "built_in_fallback_after_fmp_error"
         rows = fallback_midcap_rows(country)
+        source = "built_in_uk_midcap_starter" if not fmp_error else "built_in_fallback_after_fmp_error"
+        if fmp_api_key and rows:
+            try:
+                rows = await _enrich_midcap_fallback_rows_with_fmp_quotes(FMPProvider(fmp_api_key), rows)
+                source = "built_in_midcap_starter_with_fmp_quotes"
+            except Exception as exc:
+                fmp_error = f"{fmp_error}; FMP batch quote fallback failed: {_public_error(exc)}" if fmp_error else _public_error(exc)
     candidates = build_midcap_candidates(rows, criteria, source)[:limit]
     ig_status = "not_checked"
     if verify_ig:
@@ -1791,6 +1797,33 @@ def _cockpit_next_actions(runs: list[dict[str, object]]) -> list[dict[str, str]]
         actions.append({"kind": "no_runs", "label": "No research runs", "detail": "Start in Backtests when ready to generate evidence."})
     actions.append({"kind": "live_disabled", "label": "Live trading locked", "detail": "Order placement remains disabled; use paper/demo review only."})
     return actions
+
+
+async def _enrich_midcap_fallback_rows_with_fmp_quotes(
+    provider: FMPProvider,
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    quote_rows = await provider.batch_quote([str(row.get("symbol") or "") for row in rows])
+    quote_by_symbol = {str(row.get("symbol") or "").upper(): row for row in quote_rows}
+    enriched: list[dict[str, object]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        quote = quote_by_symbol.get(symbol)
+        if not quote:
+            enriched.append(row)
+            continue
+        enriched.append(
+            {
+                **row,
+                "price": quote.get("price") or quote.get("previousClose") or row.get("price"),
+                "volume": quote.get("volume") or quote.get("avgVolume") or quote.get("averageVolume") or row.get("volume"),
+                "marketCap": quote.get("marketCap") or row.get("marketCap"),
+                "exchangeShortName": quote.get("exchange") or quote.get("exchangeShortName") or row.get("exchangeShortName"),
+                "currency": quote.get("currency") or row.get("currency"),
+                "source": "built_in_midcap_starter_with_fmp_quotes",
+            }
+        )
+    return enriched
 
 
 async def _verify_midcap_candidates_with_ig(

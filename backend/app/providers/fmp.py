@@ -97,6 +97,21 @@ class FMPProvider:
         )
         return _screening_rows(payload)
 
+    async def batch_quote(self, symbols: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+        cleaned = [str(symbol or "").strip() for symbol in symbols if str(symbol or "").strip()]
+        if not cleaned:
+            return []
+        payload = await self._get_json(
+            "/batch-quote",
+            {"symbols": ",".join(cleaned[:100])},
+            timeout_seconds=20.0,
+            operation="batch quote",
+            use_cache=True,
+            cache_namespace="fmp_batch_quote",
+            ttl_seconds=self.COMPANY_SCREENER_TTL_SECONDS,
+        )
+        return _quote_rows(payload)
+
     async def historical_bars(self, symbol: str, interval: str, start: str | date, end: str | date) -> list[OHLCBar]:
         if interval not in self._DAILY_INTERVALS:
             raise FMPProviderError("FMP historical fallback only supports daily bars")
@@ -209,6 +224,17 @@ def _screening_rows(payload: Any) -> list[dict[str, Any]]:
         return [row for row in payload if isinstance(row, dict)]
     if isinstance(payload, dict):
         for key in ("data", "results", "companies", "stocks"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _quote_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "results", "quotes"):
             rows = payload.get(key)
             if isinstance(rows, list):
                 return [row for row in rows if isinstance(row, dict)]
