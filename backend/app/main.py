@@ -887,10 +887,7 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
                 market_details = await provider.market_details(resolved_market.ig_epic)
                 profile = profile_from_ig_market(resolved_market, market_details, account_currency)
                 if profile.confidence == "ig_live_epic_rules_no_spread":
-                    try:
-                        recent_price = await provider.recent_price_snapshot(resolved_market.ig_epic)
-                    except Exception:
-                        recent_price = None
+                    recent_price = await _recent_ig_price_snapshot(provider, resolved_market)
                     if recent_price is not None:
                         profile = profile_from_ig_market(resolved_market, market_details, account_currency, recent_price=recent_price)
                 if resolution_note:
@@ -946,6 +943,20 @@ async def _resolve_ig_market(provider: IGDemoProvider, market: MarketMapping) ->
             market.min_backtest_bars,
         )
         return resolved, f"IG EPIC auto-bound from search term '{search_term}' to {epic} ({name})."
+    return None
+
+
+async def _recent_ig_price_snapshot(provider: IGDemoProvider, market: MarketMapping) -> dict[str, object] | None:
+    resolutions = ("MINUTE_5", "MINUTE", "HOUR", "DAY")
+    if market.asset_class == "share" or ".DAILY." in market.ig_epic.upper():
+        resolutions = ("MINUTE_5", "DAY", "HOUR", "MINUTE")
+    for resolution in resolutions:
+        try:
+            snapshot = await provider.recent_price_snapshot(market.ig_epic, resolution=resolution)
+        except Exception:
+            continue
+        if snapshot is not None:
+            return snapshot
     return None
 
 

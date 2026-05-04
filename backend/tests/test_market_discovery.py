@@ -29,8 +29,8 @@ def test_midcap_discovery_builds_installable_uk_share_mapping():
     assert candidate.estimated_spread_bps == 50.0
     assert candidate.contract_point_size == 1.0
     assert mapping.asset_class == "share"
-    assert mapping.default_timeframe == "1day"
-    assert mapping.min_backtest_bars == 250
+    assert mapping.default_timeframe == "5min"
+    assert mapping.min_backtest_bars == 750
 
 
 def test_midcap_discovery_blocks_expensive_us_share_for_small_account_probe_stake():

@@ -212,6 +212,16 @@ class MarketRegistry:
                     """,
                     (market.default_timeframe, market.spread_bps, market.slippage_bps, market.min_backtest_bars, market.market_id),
                 )
+            conn.execute(
+                """
+                UPDATE markets
+                SET default_timeframe = '5min',
+                    min_backtest_bars = CASE WHEN min_backtest_bars < 750 THEN 750 ELSE min_backtest_bars END
+                WHERE asset_class = 'share'
+                  AND plugin_id LIKE 'discovered-%'
+                  AND default_timeframe IN ('', '1day', '1d', 'day', 'daily')
+                """
+            )
 
     def upsert(self, market: MarketMapping) -> None:
         with self._connect() as conn:

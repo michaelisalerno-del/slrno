@@ -46,3 +46,30 @@ def test_market_registry_seeds_priority_ig_markets(tmp_path):
     assert markets["AAPL"].spread_bps == 10.0
     assert markets["LLOY"].asset_class == "share"
     assert markets["LLOY"].min_backtest_bars == 250
+
+
+def test_market_registry_migrates_discovered_daily_shares_to_intraday_default(tmp_path):
+    registry = MarketRegistry(tmp_path / "markets.sqlite3")
+    registry.upsert(
+        MarketMapping(
+            "JD",
+            "JD Sports Fashion",
+            "share",
+            "JD.LSE",
+            "KA.D.JD.DAILY.IP",
+            True,
+            "discovered-jd",
+            "JD Sports Fashion",
+            "JD,JD Sports",
+            "1day",
+            50,
+            25,
+            250,
+        )
+    )
+
+    registry.seed_defaults()
+
+    market = registry.get("JD")
+    assert market.default_timeframe == "5min"
+    assert market.min_backtest_bars == 750

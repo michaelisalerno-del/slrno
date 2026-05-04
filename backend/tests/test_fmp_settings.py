@@ -12,6 +12,7 @@ os.environ.setdefault("SLRNO_HOME", tempfile.mkdtemp(prefix="slrno-test-"))
 
 import app.main as main
 from app.settings_store import SettingsStore
+from app.market_registry import MarketMapping
 
 
 class ReverseCipher:
@@ -166,6 +167,26 @@ def test_ig_provider_selection_uses_product_specific_demo_accounts_without_gener
     assert cfd_provider is not None
     assert cfd_provider.account_id == "CFD98765"
     assert spread_provider is None
+
+
+def test_recent_ig_price_snapshot_tries_daily_for_share_epics():
+    calls: list[str] = []
+
+    class FakeIGProvider:
+        async def recent_price_snapshot(self, _epic: str, resolution: str = "MINUTE_5", max_points: int = 10) -> dict[str, object] | None:
+            calls.append(resolution)
+            if resolution == "MINUTE_5":
+                raise RuntimeError("minute unavailable")
+            if resolution == "DAY":
+                return {"reference_price": 192.1, "resolution": resolution}
+            return None
+
+    market = MarketMapping("AAPL", "Apple", "share", "AAPL.US", "UC.D.AAPL.DAILY.IP")
+
+    snapshot = asyncio.run(main._recent_ig_price_snapshot(FakeIGProvider(), market))
+
+    assert snapshot == {"reference_price": 192.1, "resolution": "DAY"}
+    assert calls == ["MINUTE_5", "DAY"]
 
 
 def test_midcap_endpoint_blocks_candidates_until_ig_catalogue_is_checked(tmp_path, monkeypatch):

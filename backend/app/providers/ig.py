@@ -163,7 +163,15 @@ class IGDemoProvider:
             bid = _safe_optional_float(close.get("bid"))
             offer = _safe_optional_float(close.get("ask") or close.get("offer"))
             if bid is None or offer is None:
-                continue
+                reference_price = _price_reference(close)
+                if reference_price is None:
+                    continue
+                return {
+                    "reference_price": reference_price,
+                    "snapshot_time": str(row.get("snapshotTimeUTC") or row.get("snapshotTime") or ""),
+                    "resolution": resolution,
+                    "source": "ig_prices_recent_reference",
+                }
             return {
                 "bid": bid,
                 "offer": offer,
@@ -265,6 +273,14 @@ def _safe_optional_float(value: object) -> float | None:
         return _optional_float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _price_reference(price: dict[str, object]) -> float | None:
+    for key in ("lastTraded", "last", "mid", "bid", "ask", "offer"):
+        value = _safe_optional_float(price.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def _ig_price_bar(epic: str, row: dict[str, object]) -> OHLCBar:

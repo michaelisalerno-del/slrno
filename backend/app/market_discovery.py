@@ -13,6 +13,8 @@ DEFAULT_MAX_MARKET_CAP = 10_000_000_000.0
 DEFAULT_MIN_VOLUME = 100_000.0
 DEFAULT_MAX_SPREAD_BPS = 60.0
 DEFAULT_STAKE_PROBE = 1.0
+DISCOVERED_SHARE_DEFAULT_TIMEFRAME = "5min"
+DISCOVERED_SHARE_MIN_BACKTEST_BARS = 750
 
 COUNTRY_EXCHANGE_HINTS = {
     "uk": ("LSE", "GB"),
@@ -93,10 +95,10 @@ class MidcapDiscoveryCandidate:
             f"discovered-{self.market_id.lower()}",
             self.ig_name or self.name,
             ",".join(term for term in (self.market_id, self.name, self.symbol) if term),
-            "1day",
+            DISCOVERED_SHARE_DEFAULT_TIMEFRAME,
             self.estimated_spread_bps,
             self.estimated_slippage_bps,
-            250,
+            DISCOVERED_SHARE_MIN_BACKTEST_BARS,
         )
 
     def with_ig_match(self, epic: str, name: str) -> "MidcapDiscoveryCandidate":

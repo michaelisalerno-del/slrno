@@ -172,3 +172,25 @@ def test_profile_from_ig_market_uses_recent_ig_price_when_live_snapshot_missing(
     assert profile.confidence == "ig_recent_epic_price_profile"
     assert profile.validation_status == "ig_price_validated"
     assert profile_badge(profile) == "IG recent EPIC price profile"
+
+
+def test_profile_from_ig_market_accepts_recent_reference_price_for_share_validation():
+    market = MarketMapping("AAPL", "Apple", "share", "AAPL.US", "UC.D.AAPL.DAILY.IP", spread_bps=15.0, slippage_bps=7.5)
+
+    profile = profile_from_ig_market(
+        market,
+        {
+            "instrument": {"epic": "UC.D.AAPL.DAILY.IP", "type": "SHARES"},
+            "snapshot": {"marketStatus": "CLOSED"},
+            "dealingRules": {"minDealSize": {"value": 1}},
+        },
+        recent_price={"reference_price": 192.1, "snapshot_time": "2026-05-01T20:15:00", "resolution": "DAY"},
+    )
+
+    assert profile.reference_price == 192.1
+    assert profile.bid is None
+    assert profile.offer is None
+    assert profile.spread_bps == 15.0
+    assert profile.confidence == "ig_recent_epic_reference_profile"
+    assert profile.validation_status == "ig_price_validated"
+    assert profile_badge(profile) == "IG recent EPIC reference profile"
