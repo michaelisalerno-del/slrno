@@ -149,3 +149,106 @@ def test_daily_template_scanner_builds_and_stores_queue_from_frozen_templates(tm
     )
     assert reviewed["status"] == "reviewed"
     assert reviewed["after_close_results"]["notes"] == "matched expected direction"
+
+
+def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    installed = {}
+
+    class FakeMarkets:
+        def get(self, market_id):
+            return installed.get(market_id)
+
+        def list(self, enabled_only=False):
+            return list(installed.values())
+
+        def upsert(self, mapping):
+            installed[mapping.market_id] = mapping
+
+    class FakeSettings:
+        def get_secret(self, provider, key):
+            return "token" if provider == "eodhd" and key == "api_token" else None
+
+    class FakeBackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, func, *args):
+            self.tasks.append((func, args))
+
+    async def fake_discover_midcaps(**kwargs):
+        return {
+            "schema": "midcap_discovery_v1",
+            "country": kwargs["country"],
+            "data_source": "test",
+            "ig_status": "checked",
+            "eligible_count": 1,
+            "criteria": {"country": kwargs["country"], "product_mode": kwargs["product_mode"]},
+            "candidates": [
+                {
+                    "market_id": "ABC",
+                    "name": "ABC plc",
+                    "volume": 900000,
+                    "market_cap": 2_500_000_000,
+                    "score": 91,
+                    "eligible": True,
+                    "ig_status": "ig_matched",
+                    "blockers": [],
+                    "warnings": [],
+                    "market_mapping": {
+                        "market_id": "ABC",
+                        "name": "ABC plc",
+                        "asset_class": "share",
+                        "eodhd_symbol": "ABC.LSE",
+                        "ig_epic": "IX.D.ABC.DAILY.IP",
+                        "enabled": True,
+                        "plugin_id": "discovered-abc",
+                        "ig_name": "ABC",
+                        "ig_search_terms": "ABC,ABC plc",
+                        "default_timeframe": "5min",
+                        "spread_bps": 18.0,
+                        "slippage_bps": 5.0,
+                        "min_backtest_bars": 750,
+                    },
+                }
+            ],
+        }
+
+    async def fake_sync_costs(payload):
+        return {"status": "synced", "profile_count": len(payload.market_ids), "profiles": [{"market_id": "ABC", "confidence": "test"}]}
+
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "discover_midcap_markets", fake_discover_midcaps)
+    monkeypatch.setattr(main, "sync_ig_market_costs", fake_sync_costs)
+
+    background_tasks = FakeBackgroundTasks()
+    result = asyncio.run(
+        main.start_midcap_template_pipeline(
+            main.MidcapTemplatePipelinePayload(
+                design_id="liquid_uk_midcap_trend_pullback",
+                country="UK",
+                account_size=3000.0,
+                max_markets=4,
+            ),
+            background_tasks,
+        )
+    )
+
+    assert result["schema"] == "midcap_template_pipeline_v1"
+    assert result["status"] == "running"
+    assert result["strategy_generation_allowed_in_daily_mode"] is False
+    assert result["selected_markets"][0]["market_id"] == "ABC"
+    assert installed["ABC"].default_timeframe == "5min"
+    assert result["research_run_id"] is not None
+    assert len(background_tasks.tasks) == 1
+
+    run = store.get_run(result["research_run_id"])
+    assert run is not None
+    assert run["status"] == "running"
+    assert run["config"]["day_trading_mode"] is True
+    assert run["config"]["force_flat_before_close"] is True
+    assert run["config"]["pipeline"]["design_id"] == "liquid_uk_midcap_trend_pullback"
+    assert run["config"]["pipeline"]["daily_mode_source"] == "active_frozen_template_library_only"
+    assert run["config"]["strategy_families"] == ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"]

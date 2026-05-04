@@ -92,6 +92,110 @@ FMP_DAILY_BAR_SYMBOLS = {
     "FTSE100": "^FTSE",
 }
 PRODUCT_MODES = {"spread_bet", "cfd"}
+MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
+    "liquid_uk_midcap_trend_pullback": {
+        "id": "liquid_uk_midcap_trend_pullback",
+        "label": "Liquid UK midcap trend pullback",
+        "market_type": "share",
+        "country": "UK",
+        "behaviour": "Liquid mid-cap shares in a trend-up or orderly pullback regime.",
+        "template_goal": "Find reusable intraday/no-overnight pullback rules that can later be repaired, saved, and Freeze validated.",
+        "strategy_families": ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": 54,
+            "regime_scan_budget_per_regime": 12,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 2.5,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Make Tradeable / Repair Remaining must clear IG, cost, stop, margin, OOS, fold, and regime blockers.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+    "liquid_uk_midcap_breakout": {
+        "id": "liquid_uk_midcap_breakout",
+        "label": "Liquid UK midcap breakout",
+        "market_type": "share",
+        "country": "UK",
+        "behaviour": "Liquid mid-cap shares with volatility expansion, range breaks, or opening continuation.",
+        "template_goal": "Find intraday breakout templates that still survive realistic spread, slippage, and small-account margin checks.",
+        "strategy_families": ["breakout", "volatility_expansion", "intraday_trend"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": 54,
+            "regime_scan_budget_per_regime": 12,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 2.75,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Breakout candidates must prove net OOS profit after spread/slippage and avoid one-session dependence.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+    "liquid_us_midcap_intraday": {
+        "id": "liquid_us_midcap_intraday",
+        "label": "Liquid US midcap intraday",
+        "market_type": "share",
+        "country": "US",
+        "behaviour": "Liquid US mid-cap shares with intraday continuation, pullback, or reversal setups.",
+        "template_goal": "Create no-overnight US share templates while keeping account-size, FX, and IG catalogue gates explicit.",
+        "strategy_families": ["intraday_trend", "breakout", "mean_reversion", "liquidity_sweep_reversal"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": 54,
+            "regime_scan_budget_per_regime": 12,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 3.0,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "US share candidates must keep FX, spread, and minimum-margin pressure visible for the GBP account.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+}
 
 
 class EODHDSettings(BaseModel):
@@ -155,6 +259,7 @@ class ResearchRunPayload(BaseModel):
     repair_mode: str = "standard"
     account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
     source_template: dict[str, object] = Field(default_factory=dict)
+    pipeline: dict[str, object] = Field(default_factory=dict)
     day_trading_mode: bool = False
     force_flat_before_close: bool = False
     paper_queue_limit: int = Field(default=3, ge=1, le=5)
@@ -221,6 +326,24 @@ class DailyTemplateScannerPayload(BaseModel):
 class DailyTemplateAfterClosePayload(BaseModel):
     results: dict[str, object] = Field(default_factory=dict)
     status: str = "reviewed"
+
+
+class MidcapTemplatePipelinePayload(BaseModel):
+    design_id: str = "liquid_uk_midcap_trend_pullback"
+    country: str = "UK"
+    product_mode: str = "spread_bet"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    limit: int = Field(default=40, ge=1, le=120)
+    max_markets: int = Field(default=6, ge=1, le=20)
+    min_market_cap: float = Field(default=DEFAULT_MIN_MARKET_CAP, ge=0)
+    max_market_cap: float = Field(default=DEFAULT_MAX_MARKET_CAP, ge=0)
+    min_volume: float = Field(default=DEFAULT_MIN_VOLUME, ge=0)
+    max_spread_bps: float = Field(default=DEFAULT_MAX_SPREAD_BPS, ge=1)
+    start: str = "2024-01-01"
+    end: str = Field(default_factory=lambda: date.today().isoformat())
+    auto_install: bool = True
+    auto_sync_costs: bool = True
+    auto_start_run: bool = True
 
 
 @app.get("/health")
@@ -626,6 +749,32 @@ def record_daily_template_after_close(scan_id: int, payload: DailyTemplateAfterC
     if scan is None:
         raise HTTPException(status_code=404, detail="Daily template scan not found")
     return scan
+
+
+@app.get("/day-trading/template-designs")
+def day_trading_template_designs() -> dict[str, object]:
+    return {
+        "schema": "day_trading_template_designs_v1",
+        "designs": [_template_design_payload(design) for design in MIDCAP_TEMPLATE_DESIGNS.values()],
+        "policy": {
+            "daily_mode_source": "active_frozen_template_library_only",
+            "strategy_generation_allowed_in_daily_mode": False,
+            "design_mode": "research_discovery_only",
+            "live_ordering_enabled": False,
+            "order_placement": "disabled",
+        },
+    }
+
+
+@app.post("/day-trading/midcap-template-pipeline/start")
+async def start_midcap_template_pipeline(
+    payload: MidcapTemplatePipelinePayload,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if payload.auto_start_run and api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before starting a midcap template-design run")
+    return await _run_midcap_template_pipeline(payload, background_tasks, api_token or "")
 
 
 @app.get("/broker/summary")
@@ -1678,6 +1827,7 @@ def _research_run_config(
         "repair_mode": payload.repair_mode,
         "account_size": payload.account_size,
         "source_template": _compact_source_template(payload.source_template),
+        "pipeline": payload.pipeline if isinstance(payload.pipeline, dict) else {},
         "product_mode": payload.product_mode,
         "day_trading_mode": payload.day_trading_mode,
         "force_flat_before_close": payload.force_flat_before_close or payload.day_trading_mode,
@@ -1779,6 +1929,24 @@ def _market_response(market: MarketMapping) -> dict[str, object]:
         payload["estimated_spread_bps"] = max(market.spread_bps, share_model.dealing_spread_bps)
         payload["estimated_slippage_bps"] = max(market.slippage_bps, share_model.slippage_bps)
     return payload
+
+
+def _market_mapping_from_payload(payload: dict[str, object]) -> MarketMapping:
+    return MarketMapping(
+        str(payload.get("market_id") or ""),
+        str(payload.get("name") or payload.get("market_id") or ""),
+        str(payload.get("asset_class") or "share"),
+        str(payload.get("eodhd_symbol") or payload.get("fmp_symbol") or ""),
+        str(payload.get("ig_epic") or ""),
+        bool(payload.get("enabled", True)),
+        str(payload.get("plugin_id") or ""),
+        str(payload.get("ig_name") or payload.get("name") or ""),
+        str(payload.get("ig_search_terms") or ""),
+        str(payload.get("default_timeframe") or "5min"),
+        _safe_number(payload.get("spread_bps"), payload.get("estimated_spread_bps"), 20.0),
+        _safe_number(payload.get("slippage_bps"), payload.get("estimated_slippage_bps"), 5.0),
+        max(1, int(_safe_number(payload.get("min_backtest_bars"), 750))),
+    )
 
 
 def _cost_profile_for_market(market: MarketMapping) -> IGCostProfile:
@@ -1927,6 +2095,252 @@ def _day_trading_policy(paper_limit: int = 3, review_limit: int = 10, account_si
         ],
         "execution_policy": "broker-safe previews and paper simulation only",
     }
+
+
+def _template_design_payload(design: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(design.get("id") or ""),
+        "label": str(design.get("label") or ""),
+        "market_type": str(design.get("market_type") or "share"),
+        "country": str(design.get("country") or "UK"),
+        "behaviour": str(design.get("behaviour") or ""),
+        "template_goal": str(design.get("template_goal") or ""),
+        "strategy_families": list(design.get("strategy_families") or []),
+        "market_filters": dict(design.get("market_filters") if isinstance(design.get("market_filters"), dict) else {}),
+        "run_defaults": dict(design.get("run_defaults") if isinstance(design.get("run_defaults"), dict) else {}),
+        "session_rules": dict(design.get("session_rules") if isinstance(design.get("session_rules"), dict) else {}),
+        "promotion_contract": list(design.get("promotion_contract") or []),
+    }
+
+
+def _midcap_template_design(design_id: str) -> dict[str, object]:
+    key = str(design_id or "").strip()
+    design = MIDCAP_TEMPLATE_DESIGNS.get(key)
+    if design is None:
+        valid = ", ".join(sorted(MIDCAP_TEMPLATE_DESIGNS))
+        raise HTTPException(status_code=400, detail=f"Unknown template design. Choose one of: {valid}")
+    return _template_design_payload(design)
+
+
+async def _run_midcap_template_pipeline(
+    payload: MidcapTemplatePipelinePayload,
+    background_tasks: BackgroundTasks,
+    api_token: str,
+) -> dict[str, object]:
+    design = _midcap_template_design(payload.design_id)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    discovery = await discover_midcap_markets(
+        country=payload.country or str(design.get("country") or "UK"),
+        product_mode=product_mode,
+        limit=payload.limit,
+        min_market_cap=payload.min_market_cap,
+        max_market_cap=payload.max_market_cap,
+        min_volume=payload.min_volume,
+        max_spread_bps=payload.max_spread_bps,
+        account_size=payload.account_size,
+        verify_ig=True,
+        require_ig_catalogue=True,
+    )
+    candidates = list(discovery.get("candidates") or [])
+    eligible = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and candidate.get("eligible")
+        and candidate.get("ig_status") == "ig_matched"
+        and isinstance(candidate.get("market_mapping"), dict)
+    ]
+    eligible = sorted(eligible, key=lambda item: (_safe_number(item.get("score")), _safe_number(item.get("volume"))), reverse=True)
+    selected_candidates = eligible[: max(1, min(20, payload.max_markets))]
+    installed_markets: list[dict[str, object]] = []
+    selected_market_ids: list[str] = []
+    for candidate in selected_candidates:
+        mapping_payload = candidate.get("market_mapping")
+        if not isinstance(mapping_payload, dict):
+            continue
+        mapping = _market_mapping_from_payload(mapping_payload)
+        if payload.auto_install:
+            markets.upsert(mapping)
+        elif markets.get(mapping.market_id) is None:
+            continue
+        selected_market_ids.append(mapping.market_id)
+        installed_markets.append(
+            {
+                "market_id": mapping.market_id,
+                "name": mapping.name,
+                "score": candidate.get("score", 0),
+                "market_cap": candidate.get("market_cap", 0),
+                "volume": candidate.get("volume", 0),
+                "estimated_spread_bps": candidate.get("estimated_spread_bps", mapping.spread_bps),
+                "estimated_slippage_bps": candidate.get("estimated_slippage_bps", mapping.slippage_bps),
+                "ig_epic": mapping.ig_epic,
+                "market_mapping": _market_response(mapping),
+            }
+        )
+    cost_sync: dict[str, object] = {"status": "skipped", "profile_count": 0}
+    if payload.auto_sync_costs and selected_market_ids:
+        try:
+            cost_sync_result = await sync_ig_market_costs(IGCostSyncPayload(market_ids=selected_market_ids, product_mode=product_mode))
+            cost_sync = {
+                "status": cost_sync_result.get("status", "synced"),
+                "profile_count": cost_sync_result.get("profile_count", 0),
+                "profiles": [
+                    {
+                        "market_id": profile.get("market_id"),
+                        "confidence": profile.get("confidence"),
+                        "estimated_spread_bps": profile.get("estimated_spread_bps"),
+                        "estimated_slippage_bps": profile.get("estimated_slippage_bps"),
+                        "min_deal_size": profile.get("min_deal_size"),
+                        "margin_percent": profile.get("margin_percent"),
+                    }
+                    for profile in list(cost_sync_result.get("profiles") or [])[: payload.max_markets]
+                    if isinstance(profile, dict)
+                ],
+            }
+        except HTTPException as exc:
+            cost_sync = {"status": "error", "profile_count": 0, "error": str(exc.detail)}
+        except Exception as exc:
+            cost_sync = {"status": "error", "profile_count": 0, "error": _public_error(exc)}
+    research_run_id: int | None = None
+    run_payload: ResearchRunPayload | None = None
+    if payload.auto_start_run and selected_market_ids:
+        run_payload = _midcap_template_research_payload(payload, design, selected_market_ids, product_mode, cost_sync)
+        selected_markets = _selected_markets(selected_market_ids)
+        run_market_id = selected_markets[0].market_id if len(selected_markets) == 1 else "MULTI"
+        research_run_id = research_store.create_run(
+            market_id=run_market_id,
+            data_source="eodhd_with_ig_cost_model",
+            status="running",
+            config=_research_run_config(run_payload, selected_markets),
+        )
+        background_tasks.add_task(_run_research_job, research_run_id, run_payload.model_dump(), api_token)
+    rejected = [
+        {
+            "market_id": candidate.get("market_id"),
+            "name": candidate.get("name"),
+            "ig_status": candidate.get("ig_status"),
+            "blockers": candidate.get("blockers", []),
+            "warnings": candidate.get("warnings", []),
+            "score": candidate.get("score", 0),
+        }
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate not in selected_candidates
+    ][:8]
+    status = "running" if research_run_id is not None else "ready_without_run" if selected_market_ids else "blocked_no_eligible_midcaps"
+    return {
+        "schema": "midcap_template_pipeline_v1",
+        "status": status,
+        "design": design,
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "strategy_generation_allowed_in_daily_mode": False,
+        "design_mode": "research_discovery_only",
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "discovery": {
+            "schema": discovery.get("schema"),
+            "country": discovery.get("country"),
+            "data_source": discovery.get("data_source"),
+            "fmp_error": discovery.get("fmp_error"),
+            "ig_status": discovery.get("ig_status"),
+            "eligible_count": discovery.get("eligible_count", 0),
+            "criteria": discovery.get("criteria", {}),
+        },
+        "selected_markets": installed_markets,
+        "rejected_candidates": rejected,
+        "cost_sync": cost_sync,
+        "research_run_id": research_run_id,
+        "research_run_payload": run_payload.model_dump() if run_payload is not None else None,
+        "promotion_pipeline": _midcap_template_promotion_pipeline(status, research_run_id, str(cost_sync.get("status") or "skipped")),
+        "next_actions": [
+            "Open the research run when it finishes and inspect Best Discovery Leads.",
+            "Use Make tradeable or Repair remaining on promising leads; terminal oversized markets should be skipped.",
+            "Save only repaired candidates that remain intraday/no-overnight.",
+            "Run Freeze validate before a template can enter the Daily Template Scanner.",
+        ],
+    }
+
+
+def _midcap_template_research_payload(
+    payload: MidcapTemplatePipelinePayload,
+    design: dict[str, object],
+    market_ids: list[str],
+    product_mode: str,
+    cost_sync: dict[str, object],
+) -> ResearchRunPayload:
+    defaults = design.get("run_defaults") if isinstance(design.get("run_defaults"), dict) else {}
+    return ResearchRunPayload(
+        market_id=market_ids[0],
+        market_ids=market_ids,
+        start=payload.start,
+        end=payload.end,
+        interval=str(defaults.get("interval") or "5min"),
+        engine="adaptive_ig_v1",
+        search_preset=str(defaults.get("search_preset") or "balanced"),
+        trading_style="intraday_only",
+        objective=str(defaults.get("objective") or "profit_first"),
+        search_budget=max(6, min(500, int(_safe_number(defaults.get("search_budget"), 54)))),
+        risk_profile=str(defaults.get("risk_profile") or "conservative"),
+        strategy_families=[str(item) for item in list(design.get("strategy_families") or []) if item],
+        product_mode=product_mode,
+        cost_stress_multiplier=max(1.0, _safe_number(defaults.get("cost_stress_multiplier"), 2.5)),
+        include_regime_scans=True,
+        regime_scan_budget_per_regime=max(1, min(96, int(_safe_number(defaults.get("regime_scan_budget_per_regime"), 12)))),
+        target_regime=None,
+        excluded_months=[],
+        repair_mode="standard",
+        account_size=payload.account_size,
+        source_template={},
+        pipeline={
+            "schema": "midcap_template_pipeline_v1",
+            "design_id": design.get("id"),
+            "design_label": design.get("label"),
+            "country": payload.country,
+            "product_mode": product_mode,
+            "selected_market_ids": market_ids,
+            "auto_install": payload.auto_install,
+            "auto_sync_costs": payload.auto_sync_costs,
+            "auto_start_run": payload.auto_start_run,
+            "cost_sync_status": cost_sync.get("status"),
+            "promotion_required": ["make_tradeable_or_repair_remaining", "save_template", "freeze_validate"],
+            "daily_mode_source": "active_frozen_template_library_only",
+        },
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        paper_queue_limit=3,
+        review_queue_limit=10,
+    )
+
+
+def _midcap_template_promotion_pipeline(status: str, research_run_id: int | None, cost_sync_status: str) -> list[dict[str, object]]:
+    return [
+        {
+            "step": "discover_ig_midcaps",
+            "status": "completed" if status != "blocked_no_eligible_midcaps" else "blocked",
+            "detail": "FMP/built-in midcap universe filtered through the selected IG demo account catalogue.",
+        },
+        {
+            "step": "sync_ig_costs",
+            "status": cost_sync_status if status != "blocked_no_eligible_midcaps" else "blocked",
+            "detail": "Stores spread, slippage, minimum deal size, margin, and stop-distance assumptions for installed markets.",
+        },
+        {
+            "step": "run_intraday_design_search",
+            "status": "running" if research_run_id is not None else "waiting",
+            "detail": "Runs the selected behaviour design on 5-minute bars with no overnight holding.",
+            "run_id": research_run_id,
+        },
+        {
+            "step": "make_tradeable_or_repair_remaining",
+            "status": "requires_finished_run",
+            "detail": "Use existing blocker-specific repair so oversized candidates are skipped and promising ones are retested.",
+        },
+        {
+            "step": "save_and_freeze_validate",
+            "status": "requires_tradeable_candidate",
+            "detail": "Only exact frozen rules that pass validation may enter the daily paper scanner.",
+        },
+    ]
 
 
 async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_token: str) -> dict[str, object]:

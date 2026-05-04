@@ -33,6 +33,7 @@ import {
   getBrokerSummary,
   getCockpitSummary,
   getDayTradingFactorySummary,
+  getDayTradingTemplateDesigns,
   getIgCostProfile,
   getMarketContextStack,
   getMarketContextSummary,
@@ -59,6 +60,7 @@ import {
   saveResearchSchedule,
   saveStrategyTemplate,
   startDailyTemplateScanner,
+  startMidcapTemplatePipeline,
   syncIgCosts,
   updateStrategyTemplateStatus,
 } from "./api";
@@ -193,9 +195,14 @@ function App() {
     account_size: String(WORKING_ACCOUNT_SIZE),
     verify_ig: true,
     require_ig_catalogue: true,
+    design_id: "liquid_uk_midcap_trend_pullback",
+    max_markets: "6",
   });
   const [midcapDiscovery, setMidcapDiscovery] = React.useState(null);
   const [midcapLoading, setMidcapLoading] = React.useState(false);
+  const [templateDesigns, setTemplateDesigns] = React.useState([]);
+  const [midcapPipeline, setMidcapPipeline] = React.useState(null);
+  const [midcapPipelineState, setMidcapPipelineState] = React.useState({ status: "idle", detail: "" });
   const [activeModule, setActiveModule] = React.useState("cockpit");
   const [loadingModule, setLoadingModule] = React.useState("");
   const [cockpit, setCockpit] = React.useState(null);
@@ -290,7 +297,7 @@ function App() {
         setCritique(summary.critique ?? null);
         getResearchCritique().then(setCritique).catch(() => undefined);
       } else if (moduleId === "backtests") {
-        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary, daySummary] = await Promise.all([
+        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary, daySummary, designSummary] = await Promise.all([
           getStatus(),
           getMarkets(),
           getMarketPlugins(),
@@ -298,6 +305,7 @@ function App() {
           getBacktestsSummary(includeArchivedRuns),
           getResearchSummary(80).catch(() => ({ candidates: [] })),
           getDayTradingFactorySummary().catch(() => null),
+          getDayTradingTemplateDesigns().catch(() => ({ designs: [] })),
         ]);
         setStatus(nextStatus);
         setMarkets(nextMarkets);
@@ -308,6 +316,7 @@ function App() {
         setResearchRuns(summary.runs ?? []);
         setCandidates(researchSummary.candidates ?? []);
         setDayFactory(daySummary);
+        setTemplateDesigns(designSummary.designs ?? []);
         resumeLatestActiveRun(summary.runs ?? []);
       } else if (moduleId === "templates") {
         setTemplates(await getTemplatesSummary());
@@ -461,6 +470,62 @@ function App() {
     setResearchRun((current) => ({ ...current, market_id: mapping.market_id, interval: "market_default" }));
     setMessage(`${mapping.market_id} installed as a share market.`);
     await loadModule("backtests");
+  }
+
+  async function runMidcapTemplatePipeline() {
+    const accountSize = optionalNumber(midcapSearch.account_size) ?? WORKING_ACCOUNT_SIZE;
+    const maxMarkets = optionalNumber(midcapSearch.max_markets) ?? 6;
+    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps and starting the template-design run..." });
+    setMessage("Midcap template builder: discovering, installing, syncing costs, and launching the run...");
+    try {
+      const result = await startMidcapTemplatePipeline({
+        design_id: midcapSearch.design_id,
+        country: midcapSearch.country,
+        product_mode: midcapSearch.product_mode,
+        account_size: accountSize,
+        limit: optionalNumber(midcapSearch.limit) ?? 40,
+        max_markets: maxMarkets,
+        min_market_cap: optionalNumber(midcapSearch.min_market_cap) ?? 250000000,
+        max_market_cap: optionalNumber(midcapSearch.max_market_cap) ?? 10000000000,
+        min_volume: optionalNumber(midcapSearch.min_volume) ?? 100000,
+        max_spread_bps: optionalNumber(midcapSearch.max_spread_bps) ?? 60,
+        auto_install: true,
+        auto_sync_costs: true,
+        auto_start_run: true,
+      });
+      setMidcapPipeline(result);
+      const marketIds = (result.selected_markets ?? []).map((item) => item.market_id).filter(Boolean);
+      if (marketIds.length > 0) {
+        setActiveMarketIds(marketIds);
+      }
+      if (result.research_run_payload) {
+        setResearchRun((current) => ({
+          ...current,
+          ...result.research_run_payload,
+          search_budget: String(result.research_run_payload.search_budget ?? ""),
+          regime_scan_budget_per_regime: String(result.research_run_payload.regime_scan_budget_per_regime ?? ""),
+          account_size: String(result.research_run_payload.account_size ?? accountSize),
+          paper_queue_limit: String(result.research_run_payload.paper_queue_limit ?? 3),
+          review_queue_limit: String(result.research_run_payload.review_queue_limit ?? 10),
+        }));
+      }
+      setMidcapPipelineState({
+        status: result.status ?? "started",
+        detail: result.research_run_id
+          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"}.`
+          : `No run started. ${result.discovery?.eligible_count ?? 0} eligible midcap candidate${result.discovery?.eligible_count === 1 ? "" : "s"} found.`,
+      });
+      setMessage(result.research_run_id
+        ? `Midcap template builder started run ${result.research_run_id}.`
+        : "Midcap template builder did not find enough eligible markets to start a run.");
+      await loadModule("backtests").catch(() => undefined);
+      if (result.research_run_id) {
+        await loadRunDetail(result.research_run_id);
+      }
+    } catch (error) {
+      setMidcapPipelineState({ status: "error", detail: error.message });
+      setMessage(error.message);
+    }
   }
 
   async function loadCostProfile(marketId) {
@@ -1630,8 +1695,12 @@ function App() {
               setSearch={setMidcapSearch}
               result={midcapDiscovery}
               loading={midcapLoading}
+              templateDesigns={templateDesigns}
+              pipeline={midcapPipeline}
+              pipelineState={midcapPipelineState}
               onSearch={runMidcapDiscovery}
               onInstall={installDiscoveredMarket}
+              onRunPipeline={runMidcapTemplatePipeline}
             />
 
             <Panel icon={<Plug />} title="Market Plugins">
@@ -3432,11 +3501,28 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
   );
 }
 
-function MidcapDiscoveryPanel({ search, setSearch, result, loading, onSearch, onInstall }) {
+function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesigns = [], pipeline, pipelineState, onSearch, onInstall, onRunPipeline }) {
   const candidates = result?.candidates ?? [];
+  const selectedDesign = templateDesigns.find((design) => design.id === search.design_id) ?? templateDesigns[0];
   return (
     <Panel icon={<Search />} title="Eligible Midcap Finder">
       <form className="compact midcap-search" onSubmit={onSearch}>
+        {templateDesigns.length > 0 && (
+          <>
+            <label>Template design</label>
+            <select
+              value={search.design_id}
+              onChange={(event) => {
+                const nextDesign = templateDesigns.find((design) => design.id === event.target.value);
+                setSearch({ ...search, design_id: event.target.value, country: nextDesign?.country ?? search.country });
+              }}
+            >
+              {templateDesigns.map((design) => (
+                <option value={design.id} key={design.id}>{design.label}</option>
+              ))}
+            </select>
+          </>
+        )}
         <label>Country</label>
         <select value={search.country} onChange={(event) => setSearch({ ...search, country: event.target.value })}>
           <option value="UK">UK shares</option>
@@ -3459,12 +3545,40 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, onSearch, on
         <input value={search.min_volume} onChange={(event) => setSearch({ ...search, min_volume: event.target.value })} type="number" min="0" step="10000" />
         <label>Limit</label>
         <input value={search.limit} onChange={(event) => setSearch({ ...search, limit: event.target.value })} type="number" min="1" max="120" step="1" />
+        <label>Run markets</label>
+        <input value={search.max_markets} onChange={(event) => setSearch({ ...search, max_markets: event.target.value })} type="number" min="1" max="20" step="1" />
         <label className="check compact-check">
           <input type="checkbox" checked readOnly />
           IG catalogue required
         </label>
         <button type="submit" disabled={loading}><Search size={16} /> {loading ? "Searching..." : "Find midcaps"}</button>
       </form>
+      {selectedDesign && (
+        <div className="status compact-status">
+          <strong>{selectedDesign.label}</strong>
+          <span>{selectedDesign.behaviour}</span>
+          <small>{(selectedDesign.strategy_families ?? []).map(strategyFamilyLabel).join(" / ")} · {normalizeInterval(selectedDesign.run_defaults?.interval ?? "5min")} · no overnight</small>
+        </div>
+      )}
+      <div className="button-row">
+        <button type="button" onClick={onRunPipeline} disabled={pipelineState?.status === "running"}>
+          <ShieldCheck size={16} /> {pipelineState?.status === "running" ? "Starting run..." : "Build templates from midcaps"}
+        </button>
+      </div>
+      {pipelineState?.detail && (
+        <div className="status compact-status">
+          <strong>Template builder · {pipelineState.status}</strong>
+          <span>{pipelineState.detail}</span>
+          {pipeline?.research_run_id && <small>Research run {pipeline.research_run_id} · use Make tradeable, save, then Freeze validate winners.</small>}
+        </div>
+      )}
+      {pipeline?.selected_markets?.length > 0 && (
+        <div className="discovery-summary">
+          <Metric label="Run ID" value={pipeline.research_run_id ?? "-"} />
+          <Metric label="Markets" value={pipeline.selected_markets.length} />
+          <Metric label="Cost sync" value={pipeline.cost_sync?.status ?? "n/a"} />
+        </div>
+      )}
       {result && (
         <div className="discovery-summary">
           <Metric label="Eligible" value={result.eligible_count ?? 0} />

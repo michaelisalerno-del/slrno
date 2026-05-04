@@ -96,6 +96,17 @@ export function getLatestDailyTemplateScan() {
   return request("/day-trading/scanner/latest");
 }
 
+export function getDayTradingTemplateDesigns() {
+  return request("/day-trading/template-designs");
+}
+
+export function startMidcapTemplatePipeline(payload) {
+  return request("/day-trading/midcap-template-pipeline/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getBrokerSummary() {
   return request("/broker/summary");
 }
