@@ -77,3 +77,20 @@ def test_promotion_readiness_accepts_recent_ig_reference_profile():
     assert readiness["status"] == "ready_for_paper"
     assert readiness["checks"]["ig_price_validated"] is True
     assert "needs_ig_price_validation" not in readiness["validation_warnings"]
+
+
+def test_promotion_readiness_blocks_ig_minimum_margin_too_large():
+    backtest = {
+        "daily_pnl_sharpe": 1.8,
+        "estimated_slippage_bps": 1,
+        "estimated_spread_bps": 2,
+        "sharpe_observations": 160,
+        "total_cost": 100,
+        "trade_count": 30,
+        "cost_confidence": "ig_live_epic_cost_profile",
+    }
+
+    readiness = promotion_readiness(backtest, ["ig_minimum_margin_too_large_for_account"], {})
+
+    assert readiness["status"] == "blocked"
+    assert "ig_minimum_margin_too_large_for_account" in readiness["blockers"]

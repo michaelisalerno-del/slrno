@@ -1120,6 +1120,9 @@ def _promotion_tier(
         if evidence.get("active_positive_fold_rate") is not None
         else fold_rate
     )
+    capital_violations = set(str(item) for item in capital_profile.get("violations", []) if item)
+    if "ig_minimum_margin_too_large_for_account" in capital_violations:
+        return "reject"
     viable_research_lead = (
         backtest.net_profit > 0
         and backtest.test_profit > 0
@@ -1245,6 +1248,8 @@ def _cost_aware_score(
     score = min(score, _oos_trade_score_cap(evaluation, grade))
     if not capital_profile.get("feasible"):
         score = min(score, 42.0 + 30.0 * capital_component)
+    if "ig_minimum_margin_too_large_for_account" in set(str(item) for item in capital_profile.get("violations", []) if item):
+        score = min(score, 24.0)
     if capital_mode:
         score = min(score, 35.0 + 55.0 * capital_component)
     return round(_clamp(score, -100.0, 100.0), 4)

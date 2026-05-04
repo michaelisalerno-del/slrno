@@ -6,7 +6,7 @@ WORKING_ACCOUNT_SIZE_GBP = 3_000.0
 CAPITAL_SCENARIOS_GBP = (250.0, 500.0, 1_000.0, WORKING_ACCOUNT_SIZE_GBP, 10_000.0)
 RISK_PER_TRADE_FRACTION = 0.01
 DAILY_LOSS_FRACTION = 0.05
-MAX_MARGIN_FRACTION = 0.5
+MAX_MARGIN_FRACTION = 0.35
 MAX_HISTORICAL_DRAWDOWN_FRACTION = 0.25
 
 
@@ -30,6 +30,7 @@ class CapitalScenario:
     historical_max_drawdown: float
     worst_daily_loss: float
     margin_percent: float
+    max_margin_fraction: float
     feasible: bool
     violations: tuple[str, ...]
 
@@ -53,6 +54,7 @@ class CapitalScenario:
             "historical_max_drawdown": self.historical_max_drawdown,
             "worst_daily_loss": self.worst_daily_loss,
             "margin_percent": self.margin_percent,
+            "max_margin_fraction": self.max_margin_fraction,
             "feasible": self.feasible,
             "violations": list(self.violations),
         }
@@ -114,6 +116,10 @@ def capital_scenarios(
             violations.append("margin_too_large")
         if estimated_margin > account_size:
             violations.append("insufficient_account_for_margin")
+        if min_deal_size and requested_stake < min_deal_size and estimated_stop_loss > risk_budget:
+            violations.append("ig_minimum_risk_too_large_for_account")
+        if min_deal_size and requested_stake < min_deal_size and estimated_margin > account_size * MAX_MARGIN_FRACTION:
+            violations.append("ig_minimum_margin_too_large_for_account")
         if historical_max_drawdown > account_size * MAX_HISTORICAL_DRAWDOWN_FRACTION:
             violations.append("historical_drawdown_too_large")
         if worst_daily_loss > daily_loss_limit:
@@ -138,6 +144,7 @@ def capital_scenarios(
                 historical_max_drawdown=round(historical_max_drawdown, 4),
                 worst_daily_loss=round(worst_daily_loss, 4),
                 margin_percent=round(margin_percent, 6),
+                max_margin_fraction=MAX_MARGIN_FRACTION,
                 feasible=not violations,
                 violations=tuple(violations),
             ).as_dict()

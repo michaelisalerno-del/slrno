@@ -111,6 +111,10 @@ def _rule_violations(
         violations.append("margin_too_large")
     if estimated_margin > account_size:
         violations.append("insufficient_account_for_margin")
+    if min_deal_size and requested_stake < min_deal_size and planned_risk > risk_budget:
+        violations.append("ig_minimum_risk_too_large_for_account")
+    if min_deal_size and requested_stake < min_deal_size and estimated_margin > account_size * MAX_MARGIN_FRACTION:
+        violations.append("ig_minimum_margin_too_large_for_account")
     if effective_stake <= 0 or entry <= 0:
         violations.append("missing_price_or_stake")
     return list(dict.fromkeys(violations))

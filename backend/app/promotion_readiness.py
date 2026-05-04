@@ -67,6 +67,8 @@ ROBUSTNESS_BLOCKING_WARNINGS = {
     "historical_daily_loss_stop_breached",
     "historical_drawdown_too_large",
     "insufficient_account_for_margin",
+    "ig_minimum_margin_too_large_for_account",
+    "ig_minimum_risk_too_large_for_account",
     "margin_too_large",
     "missing_reference_price",
     "risk_budget_exceeded",

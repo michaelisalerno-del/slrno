@@ -109,3 +109,18 @@ def test_capital_scenarios_convert_share_points_for_margin_and_risk():
     assert scenario["estimated_margin"] == 4000
     assert "risk_budget_exceeded" in scenario["violations"]
     assert "margin_too_large" in scenario["violations"]
+
+
+def test_capital_scenarios_flag_ig_minimum_margin_too_large_for_account():
+    scenarios = capital_scenarios(
+        {"net_profit": 100},
+        {"position_size": 0.1, "stop_loss_bps": 25},
+        {"bid": 180, "offer": 180, "min_deal_size": 1.0, "margin_percent": 20.0, "contract_point_size": 0.01},
+        account_sizes=(3000,),
+    )
+
+    scenario = {item["account_size"]: item for item in scenarios}[3000.0]
+    assert scenario["stake_floor_applied"] is True
+    assert scenario["max_margin_fraction"] == 0.35
+    assert "ig_minimum_margin_too_large_for_account" in scenario["violations"]
+    assert scenario["feasible"] is False

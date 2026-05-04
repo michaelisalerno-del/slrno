@@ -63,6 +63,7 @@ import {
 import "./styles.css";
 
 const WORKING_ACCOUNT_SIZE = 3000;
+const MAX_MARGIN_FRACTION = 0.35;
 const MAX_REPAIR_ATTEMPTS = 3;
 
 const FALLBACK_ENGINES = [
@@ -550,6 +551,10 @@ function App() {
     if (!autoRefinementPlan) {
       return;
     }
+    if (autoRefinementPlan.stopReason) {
+      setMessage(autoRefinementPlan.stopReason);
+      return;
+    }
     applyAutoRefinementPlan(autoRefinementPlan);
     setMessage(autoRefinementPlan.stageMessage);
   }
@@ -644,6 +649,12 @@ function App() {
   }
 
   async function launchAutoRefinementPlan(plan, launchMessage = "Launching auto-refine run...") {
+    if (plan.stopReason) {
+      setActiveModule("backtests");
+      setActiveTab("builder");
+      setMessage(plan.stopReason);
+      return;
+    }
     const runConfig = applyAutoRefinementPlan(plan);
     setActiveModule("backtests");
     setActiveTab("results");
@@ -717,6 +728,12 @@ function App() {
   async function refineFurther(source) {
     const template = refinementTemplateFromSource(source, researchRun);
     const plan = autoRefinementPlanForTemplate(template, researchRun, enabledMarkets, template.market_id ? [template.market_id] : activeMarketIds);
+    if (plan.stopReason) {
+      setRefinementTemplate(template);
+      setActiveTab("builder");
+      setMessage(plan.stopReason);
+      return;
+    }
     const runConfig = { ...researchRun, ...plan.runPatch };
     setRefinementTemplate(template);
     setActiveMarketIds(plan.marketIds);
@@ -2721,6 +2738,7 @@ function FactoryLeadCard({ lead, onMakeTradeable, onRepairRemaining, onFreezeVal
         <Metric label="OOS" value={formatMoney(lead.oos)} />
         <Metric label="Trades" value={lead.trades} />
         <Metric label="Cost/gross" value={percent(lead.costToGross)} />
+        <Metric label={`${accountSizeLabel(lead.accountSize)} fit`} value={lead.capitalFit} />
       </div>
       <div className="warning-row">
         <WarningChips warnings={lead.warnings} limit={5} empty="Gate clear" />
@@ -3944,6 +3962,8 @@ function factoryLeadFromSource(source = {}) {
   const pattern = parameters.bar_pattern_analysis ?? {};
   const evidence = evidenceProfileForSource(source);
   const warnings = warningCodesForSource(source);
+  const accountSize = testingAccountSizeForSource(source);
+  const accountScenario = accountScenarioFor(source.capital_scenarios, accountSize);
   const marketId = String(source.market_id || parameters.market_id || "").trim();
   const regime = String(parameters.target_regime || pattern.target_regime || pattern.dominant_profit_regime?.key || "").trim();
   const name = String(source.strategy_name || source.name || "").trim();
@@ -3970,14 +3990,25 @@ function factoryLeadFromSource(source = {}) {
     oosTrades: Number(evidence.oos_trade_count ?? 0),
     costToGross: Number(backtest.cost_to_gross_ratio ?? 0),
     warnings,
+    accountSize,
+    accountScenario,
+    capitalFeasible: accountScenario ? Boolean(accountScenario.feasible) : null,
+    capitalFit: accountFeasibility(source.capital_scenarios, accountSize),
   };
 }
 
 function factoryViableLead(lead = {}) {
+  if (hasTerminalCapitalWarning(lead.warnings)) {
+    return false;
+  }
   if (["paper_candidate", "validated_candidate", "research_candidate", "incubator", "watchlist"].includes(lead.tier)) {
     return lead.trades > 0 || lead.net > 0 || lead.oos > 0;
   }
   return lead.score >= 25 && lead.net > 0 && lead.trades >= 5 && (lead.oos > 0 || lead.oosTrades >= 6);
+}
+
+function hasTerminalCapitalWarning(warnings = []) {
+  return arrayValue(warnings).some((warning) => warning === "ig_minimum_margin_too_large_for_account");
 }
 
 function factoryLeadRank(lead = {}) {
@@ -4406,7 +4437,7 @@ function repairActionsForTemplate(template) {
       primary: actions.length === 0,
     });
   }
-  if (hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high")) {
+  if (hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high", "ig_minimum_risk_too_large_for_account", "ig_minimum_margin_too_large_for_account")) {
     add({
       id: "capital-fit",
       preset: "capital_fit",
@@ -4564,7 +4595,8 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
   const crossMarketDiscovery = crossMarket && discoveryMarketCount > 0;
   const costStress = hasAny("negative_after_costs", "costs_overwhelm_edge", "negative_expectancy_after_costs", "high_turnover_cost_drag");
   const syncCosts = hasAny("needs_ig_price_validation", "missing_cost_profile", "missing_spread_slippage");
-  const capitalBlocked = hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high");
+  const capitalBlocked = hasAny("risk_budget_exceeded", "historical_drawdown_too_large", "historical_daily_loss_stop_breached", "margin_too_large", "insufficient_account_for_margin", "below_ig_min_deal_size", "missing_reference_price", "drawdown_too_high", "ig_minimum_risk_too_large_for_account", "ig_minimum_margin_too_large_for_account");
+  const terminalCapitalBlocked = hasAny("ig_minimum_margin_too_large_for_account");
   const sourceTemplate = {
     ...frozenTemplatePayload(template),
     repair_attempt_count: repairAttempt,
@@ -4629,6 +4661,23 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
       repairAttempt: priorRepairAttempt,
       priorRepairAttempt,
       stopReason: "No remaining blockers were attached. Use Freeze validate or save the template instead of searching again.",
+    };
+  }
+  if (terminalCapitalBlocked) {
+    const accountLabel = accountSizeLabel(optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE);
+    return {
+      marketIds,
+      runPatch: {},
+      steps: [],
+      syncCosts: false,
+      summary: `IG minimum margin is too large for ${accountLabel}; move on to the next market/template or raise testing capital.`,
+      targetRegime,
+      crossMarketDiscovery: false,
+      targets: [],
+      stageMessage: "Skipped: IG minimum margin too large for selected capital.",
+      repairAttempt: priorRepairAttempt,
+      priorRepairAttempt,
+      stopReason: `Skip this one for ${accountLabel}: IG minimum margin is too large, so smaller search parameters cannot make it fit. Move on to the next lead.`,
     };
   }
 
@@ -4992,12 +5041,13 @@ function capitalBlockReasons(scenario = {}) {
 
 function capitalBlockReason(violation, scenario = {}) {
   const accountSize = Number(scenario.account_size ?? WORKING_ACCOUNT_SIZE);
-  const halfAccount = accountSize * 0.5;
+  const maxMarginFraction = Number(scenario.max_margin_fraction ?? MAX_MARGIN_FRACTION);
+  const marginCap = accountSize * maxMarginFraction;
   const values = {
     risk: formatMoney(scenario.estimated_stop_loss),
     riskBudget: formatMoney(scenario.risk_budget),
     margin: formatMoney(scenario.estimated_margin),
-    marginLimit: formatMoney(halfAccount),
+    marginLimit: formatMoney(marginCap),
     account: formatMoney(accountSize),
     drawdown: formatMoney(scenario.historical_max_drawdown),
     drawdownLimit: formatMoney(accountSize * 0.25),
@@ -5012,6 +5062,8 @@ function capitalBlockReason(violation, scenario = {}) {
     risk_budget_exceeded: `risk ${values.risk} > ${values.riskBudget}`,
     margin_too_large: `margin ${values.margin} > ${values.marginLimit}`,
     insufficient_account_for_margin: `margin ${values.margin} > ${values.account}`,
+    ig_minimum_risk_too_large_for_account: `IG min risk ${values.risk} > ${values.riskBudget}`,
+    ig_minimum_margin_too_large_for_account: `IG min margin ${values.margin} > ${values.marginLimit}`,
     historical_drawdown_too_large: `drawdown ${values.drawdown} > ${values.drawdownLimit}`,
     historical_daily_loss_stop_breached: `daily loss ${values.dailyLoss} > ${values.dailyLimit}`,
   }[violation] ?? humanWarnings([violation])[0];
@@ -5078,6 +5130,8 @@ function humanWarnings(warnings = []) {
     shock_regime_dependency: "Shock-regime dependency",
     target_regime_low_oos_trades: "Target-regime low OOS trades",
     below_ig_min_deal_size: "Below IG min stake",
+    ig_minimum_risk_too_large_for_account: "IG min risk too large",
+    ig_minimum_margin_too_large_for_account: "IG min margin too large",
     historical_daily_loss_stop_breached: "Daily loss stop breached",
     historical_drawdown_too_large: "Historical drawdown too large",
     risk_budget_exceeded: "Risk budget exceeded",
@@ -5135,6 +5189,8 @@ const PAPER_BLOCKER_WARNINGS = new Set([
   "event_strategy_requires_label",
   "historical_daily_loss_stop_breached",
   "historical_drawdown_too_large",
+  "ig_minimum_margin_too_large_for_account",
+  "ig_minimum_risk_too_large_for_account",
   "insufficient_account_for_margin",
   "legacy_sharpe_diagnostics",
   "limited_sharpe_sample",
