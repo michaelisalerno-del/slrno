@@ -153,14 +153,11 @@ const CANDIDATE_FACTORY_MODES = [
 ];
 
 const MODULES = [
-  ["cockpit", "Cockpit", Home],
-  ["guide", "Guide", BookOpen],
-  ["backtests", "Backtests", BarChart3],
-  ["templates", "Templates", Library],
-  ["research", "Research", Sparkles],
-  ["paper", "Paper Trading", LineChart],
-  ["broker", "Broker", Wallet],
-  ["risk", "Risk", LockKeyhole],
+  ["cockpit", "Today", Home],
+  ["broker", "Accounts", Wallet],
+  ["backtests", "Build Templates", Sparkles],
+  ["paper", "Daily Paper", LineChart],
+  ["templates", "Library", Library],
   ["settings", "Settings", SlidersHorizontal],
 ];
 
@@ -212,6 +209,7 @@ function App() {
   const [dailyScannerState, setDailyScannerState] = React.useState({ status: "idle", detail: "" });
   const [broker, setBroker] = React.useState(null);
   const [risk, setRisk] = React.useState(null);
+  const [selectedProductMode, setSelectedProductMode] = React.useState("spread_bet");
   const [includeArchivedRuns, setIncludeArchivedRuns] = React.useState(false);
   const [exportIncludeBars, setExportIncludeBars] = React.useState(true);
   const [market, setMarket] = React.useState({
@@ -228,7 +226,7 @@ function App() {
     min_backtest_bars: 750,
     enabled: true,
   });
-  const [activeTab, setActiveTab] = React.useState("builder");
+  const [activeTab, setActiveTab] = React.useState("factory");
   const [activeMarketIds, setActiveMarketIds] = React.useState(["NAS100"]);
   const [researchRun, setResearchRun] = React.useState({
     market_id: "NAS100",
@@ -277,7 +275,7 @@ function App() {
     setLoadingModule(moduleId);
     try {
       if (moduleId === "cockpit") {
-        const [summary, context] = await Promise.all([
+        const [summary, context, brokerSummary] = await Promise.all([
           getCockpitSummary(),
           getMarketContextStack()
             .catch(() => getMarketContextSummary())
@@ -287,17 +285,19 @@ function App() {
               reason: error.message,
               events: [],
             })),
+          getBrokerSummary().catch(() => null),
         ]);
         setCockpit(summary);
         setMarketContext(context);
         setStatus(summary.providers ?? []);
+        setIgAccountRoles(brokerSummary?.ig_account_roles ?? null);
       } else if (moduleId === "research") {
         const summary = await getResearchSummary();
         setCandidates(summary.candidates ?? []);
         setCritique(summary.critique ?? null);
         getResearchCritique().then(setCritique).catch(() => undefined);
       } else if (moduleId === "backtests") {
-        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary, daySummary, designSummary] = await Promise.all([
+        const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary, daySummary, designSummary, brokerSummary] = await Promise.all([
           getStatus(),
           getMarkets(),
           getMarketPlugins(),
@@ -306,6 +306,7 @@ function App() {
           getResearchSummary(80).catch(() => ({ candidates: [] })),
           getDayTradingFactorySummary().catch(() => null),
           getDayTradingTemplateDesigns().catch(() => ({ designs: [] })),
+          getBrokerSummary().catch(() => null),
         ]);
         setStatus(nextStatus);
         setMarkets(nextMarkets);
@@ -317,14 +318,27 @@ function App() {
         setCandidates(researchSummary.candidates ?? []);
         setDayFactory(daySummary);
         setTemplateDesigns(designSummary.designs ?? []);
+        setIgAccountRoles(brokerSummary?.ig_account_roles ?? null);
         resumeLatestActiveRun(summary.runs ?? []);
       } else if (moduleId === "templates") {
         setTemplates(await getTemplatesSummary());
       } else if (moduleId === "paper") {
-        setPaper(await getPaperSummary());
+        const [nextPaper, daySummary, brokerSummary] = await Promise.all([
+          getPaperSummary(),
+          getDayTradingFactorySummary().catch(() => null),
+          getBrokerSummary().catch(() => null),
+        ]);
+        setPaper(nextPaper);
+        setDayFactory(daySummary);
+        setIgAccountRoles(brokerSummary?.ig_account_roles ?? null);
       } else if (moduleId === "broker") {
-        const [summary, nextMarkets] = await Promise.all([getBrokerSummary(), getMarkets()]);
+        const [summary, nextMarkets, nextRisk] = await Promise.all([
+          getBrokerSummary(),
+          getMarkets(),
+          getRiskSummary().catch(() => null),
+        ]);
         setBroker(summary);
+        setRisk(nextRisk);
         setStatus(summary.providers ?? []);
         setIgAccountRoles(summary.ig_account_roles ?? null);
         setMarkets(nextMarkets);
@@ -417,6 +431,15 @@ function App() {
     } catch (error) {
       setMessage(error.message);
     }
+  }
+
+  function chooseAccountMode(productMode) {
+    const mode = normalizeProductMode(productMode);
+    setSelectedProductMode(mode);
+    setResearchRun((current) => ({ ...current, product_mode: mode }));
+    setMidcapSearch((current) => ({ ...current, product_mode: mode }));
+    setIgRoles((current) => ({ ...current, defaultProductMode: mode }));
+    setMessage(`${productModeLabel(mode)} workspace selected. Live order placement remains disabled.`);
   }
 
   async function submitMarket(event) {
@@ -1264,9 +1287,16 @@ function App() {
       <header className="topbar app-topbar">
         <div>
           <h1>slrno</h1>
-          <p>Trading cockpit, research evidence, and paper-only validation.</p>
+          <p>One guided workflow for template design, frozen-rule paper trading, and account safety.</p>
         </div>
-        <div className="mode"><ShieldCheck size={18} /> Live orders locked</div>
+        <div className="topbar-actions">
+          <AccountSwitcher
+            accountRoles={igAccountRoles}
+            selectedProductMode={selectedProductMode}
+            onSelect={chooseAccountMode}
+          />
+          <div className="mode"><ShieldCheck size={18} /> Live orders locked</div>
+        </div>
       </header>
 
       <nav className="module-nav" aria-label="Primary">
@@ -1312,8 +1342,8 @@ function App() {
           <section className="lab-shell">
             <div className="lab-header">
               <div>
-                <h2><BarChart3 size={20} /> Backtests</h2>
-                <p>Build runs, inspect evidence, archive noise, and export bundles for analysis.</p>
+                <h2><Sparkles size={20} /> Build Templates</h2>
+                <p>Find eligible markets, design intraday templates, repair blockers, and freeze exact rules before daily paper.</p>
               </div>
               <div className={`run-state ${researchState.status}`}>
                 <strong>{researchState.status.toUpperCase()}</strong>
@@ -1326,11 +1356,47 @@ function App() {
                 </div>
               </div>
             </div>
+            <AccountWorkspaceNotice productMode={selectedProductMode} accountRoles={igAccountRoles} />
+            <div className="grid two build-start-grid">
+              <MidcapDiscoveryPanel
+                search={midcapSearch}
+                setSearch={setMidcapSearch}
+                result={midcapDiscovery}
+                loading={midcapLoading}
+                templateDesigns={templateDesigns}
+                pipeline={midcapPipeline}
+                pipelineState={midcapPipelineState}
+                onSearch={runMidcapDiscovery}
+                onInstall={installDiscoveredMarket}
+                onRunPipeline={runMidcapTemplatePipeline}
+              />
+              <Panel icon={<ShieldCheck />} title="Template Workflow">
+                <div className="factory-flow compact-flow">
+                  {[
+                    ["1", "Find", "Choose account and discover IG-eligible markets."],
+                    ["2", "Design", "Run intraday/no-overnight template discovery."],
+                    ["3", "Repair", "Clear cost, OOS, fold, regime, and capital blockers."],
+                    ["4", "Freeze", "Retest exact parameters before reuse."],
+                    ["5", "Paper", "Daily mode matches frozen templates only."],
+                  ].map(([step, title, detail]) => (
+                    <div className="factory-step" key={title}>
+                      <span>{step}</span>
+                      <strong>{title}</strong>
+                      <small>{detail}</small>
+                    </div>
+                  ))}
+                </div>
+                <div className="status compact-status">
+                  <strong>Daily rules are not invented here</strong>
+                  <span>Discovery produces leads. Only saved and Freeze-validated intraday templates can enter Daily Paper.</span>
+                </div>
+              </Panel>
+            </div>
             <div className="tabs">
               {[
-                ["builder", "New Test"],
-                ["factory", "Candidate Factory"],
-                ["results", "Runs"],
+                ["factory", "Repair & Freeze"],
+                ["builder", "Advanced Run"],
+                ["results", "Evidence Runs"],
               ].map(([id, label]) => (
                 <button className={activeTab === id ? "tab active" : "tab"} key={id} type="button" onClick={() => setActiveTab(id)}>
                   {label}
@@ -1656,11 +1722,9 @@ function App() {
                 activeMarketIds={activeMarketIds}
                 selectedMarkets={selectedMarkets}
                 researchRun={researchRun}
-                dailyScannerState={dailyScannerState}
                 toggleMarket={toggleMarket}
                 onRunFactory={runCandidateFactory}
                 onStageFactory={stageCandidateFactory}
-                onRunDailyScanner={runDailyTemplateScanner}
                 onMakeTradeable={makeTradeable}
                 onRepairRemaining={repairRemaining}
                 onFreezeValidate={freezeValidate}
@@ -1690,19 +1754,6 @@ function App() {
           </section>
 
           <section className="grid two lower-grid">
-            <MidcapDiscoveryPanel
-              search={midcapSearch}
-              setSearch={setMidcapSearch}
-              result={midcapDiscovery}
-              loading={midcapLoading}
-              templateDesigns={templateDesigns}
-              pipeline={midcapPipeline}
-              pipelineState={midcapPipelineState}
-              onSearch={runMidcapDiscovery}
-              onInstall={installDiscoveredMarket}
-              onRunPipeline={runMidcapTemplatePipeline}
-            />
-
             <Panel icon={<Plug />} title="Market Plugins">
               <div className="plugin-list">
                 {plugins.slice(0, 8).map((plugin) => (
@@ -1757,8 +1808,26 @@ function App() {
         </>
       )}
 
-      {activeModule === "paper" && <PaperView summary={paper} />}
-      {activeModule === "broker" && <BrokerView summary={broker} markets={markets} />}
+      {activeModule === "paper" && (
+        <DailyPaperView
+          summary={paper}
+          dayFactory={dayFactory}
+          dailyScannerState={dailyScannerState}
+          productMode={selectedProductMode}
+          accountRoles={igAccountRoles}
+          onRunDailyScanner={runDailyTemplateScanner}
+          onRefresh={() => loadModule("paper")}
+        />
+      )}
+      {activeModule === "broker" && (
+        <BrokerView
+          summary={broker}
+          risk={risk}
+          markets={markets}
+          selectedProductMode={selectedProductMode}
+          onSelectProductMode={chooseAccountMode}
+        />
+      )}
       {activeModule === "risk" && <RiskView summary={risk} />}
 
       {activeModule === "settings" && (
@@ -1796,6 +1865,48 @@ function App() {
   );
 }
 
+function AccountSwitcher({ accountRoles, selectedProductMode, onSelect }) {
+  const modes = [
+    ["spread_bet", "Spread Bet"],
+    ["cfd", "CFD"],
+  ];
+  return (
+    <div className="account-switcher" aria-label="Account workspace">
+      {modes.map(([mode, label]) => {
+        const role = accountRoles?.[mode] ?? {};
+        return (
+          <button
+            type="button"
+            className={selectedProductMode === mode ? "account-switch active" : "account-switch"}
+            key={mode}
+            onClick={() => onSelect(mode)}
+          >
+            <span>{label}</span>
+            <small>{role.active ? "active" : role.configured ? "saved" : "not set"}</small>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function AccountWorkspaceNotice({ productMode, accountRoles }) {
+  const role = accountRoles?.[productMode] ?? {};
+  return (
+    <div className="account-workspace-notice">
+      <div>
+        <strong>{productModeLabel(productMode)} workspace</strong>
+        <span>{role.active ? `${role.display_name || role.masked_account_id || "Demo account"} active` : "Set this IG demo account role in Settings before broker catalogue checks."}</span>
+      </div>
+      <div className="badge-group">
+        <span className={`badge ${role.active ? "good" : "warn"}`}>{role.active ? "Account active" : "Needs account role"}</span>
+        {productMode === "cfd" && <span className="badge warn">CFD cost model incomplete</span>}
+        <span className="badge base">Live orders locked</span>
+      </div>
+    </div>
+  );
+}
+
 function CockpitView({ summary, marketContext, setActiveModule }) {
   const runs = summary?.runs ?? {};
   const latest = runs.latest;
@@ -1808,8 +1919,8 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
     <section className="lab-shell cockpit">
       <div className="lab-header">
         <div>
-          <h2><Home size={20} /> Trading Cockpit</h2>
-          <p>Account mode, system health, research state, and risk locks.</p>
+          <h2><Home size={20} /> Today</h2>
+          <p>System health, latest evidence, market context, and the safest next action.</p>
         </div>
         <span className="mode"><LockKeyhole size={16} /> {summary?.live_ordering_enabled ? "Live enabled" : "Live disabled"}</span>
       </div>
@@ -1823,7 +1934,7 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
         <Panel icon={<Activity />} title="Next Actions">
           <div className="status-list">
             {(summary?.next_actions ?? []).map((item) => (
-              <button className="status action-status" type="button" key={item.kind} onClick={() => setActiveModule(item.kind === "no_runs" ? "backtests" : "research")}>
+              <button className="status action-status" type="button" key={item.kind} onClick={() => setActiveModule(item.kind === "providers" ? "settings" : "backtests")}>
                 <strong>{item.label}</strong>
                 <span>{item.detail}</span>
               </button>
@@ -1837,7 +1948,7 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
                 <strong>Run {latest.id} · {latest.status}</strong>
                 <span>{latest.market_id} · {latest.trial_count} trials · best {round(latest.best_score)}</span>
               </div>
-              <button className="secondary" type="button" onClick={() => setActiveModule("backtests")}>Open Backtests</button>
+              <button className="secondary" type="button" onClick={() => setActiveModule("backtests")}>Build Templates</button>
             </div>
           ) : <span className="muted">No research runs yet.</span>}
         </Panel>
@@ -1953,8 +2064,8 @@ function GuideView({ setActiveModule }) {
           <p>A practical map of the trading cockpit, research workflow, robustness gates, and evidence exports.</p>
         </div>
         <div className="button-row">
-          <button type="button" className="secondary" onClick={() => setActiveModule("backtests")}><BarChart3 size={16} /> Backtests</button>
-          <button type="button" className="ghost" onClick={() => setActiveModule("research")}><Sparkles size={16} /> Research</button>
+          <button type="button" className="secondary" onClick={() => setActiveModule("backtests")}><Sparkles size={16} /> Build Templates</button>
+          <button type="button" className="ghost" onClick={() => setActiveModule("paper")}><LineChart size={16} /> Daily Paper</button>
         </div>
       </div>
 
@@ -2159,9 +2270,12 @@ function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemain
   const pattern = template.pattern ?? payload.pattern ?? {};
   const evidence = payload.evidence ?? {};
   const searchAudit = payload.search_audit ?? {};
+  const parameters = template.parameters ?? payload.parameters ?? {};
+  const sourceTemplate = template.source_template ?? payload.source_template ?? {};
   const accountSize = template.testing_account_size || WORKING_ACCOUNT_SIZE;
-  const frozenParameterCount = Object.keys(template.source_template?.parameters ?? payload.source_template?.parameters ?? {}).length;
+  const frozenParameterCount = Object.keys(sourceTemplate?.parameters ?? {}).length;
   const capital = accountFeasibility(template.capital_scenarios ?? payload.capital_scenarios, accountSize);
+  const intraday = Boolean(sourceTemplate.force_flat_before_close || sourceTemplate.no_overnight || parameters.force_flat_before_close || parameters.no_overnight || parameters.day_trading_mode);
   const showRepairRemaining = shouldShowRepairRemaining(template);
   const showFreezeValidate = shouldShowFreezeValidate(template);
   return (
@@ -2181,6 +2295,12 @@ function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemain
           <small>{template.status}</small>
           <strong>{readinessLabel(template.readiness_status)}</strong>
         </div>
+      </div>
+      <div className="lifecycle-badges">
+        <span className={`badge ${intraday ? "good" : "warn"}`}>{intraday ? "Intraday" : "Overnight / swing"}</span>
+        <span className={`badge ${frozenParameterCount > 0 ? "good" : "warn"}`}>{frozenParameterCount > 0 ? "Frozen rules" : "Needs freeze"}</span>
+        <span className={`badge ${String(capital).toLowerCase().includes("ok") ? "good" : "warn"}`}>{capital}</span>
+        <span className="badge base">Broker preview only</span>
       </div>
       <div className="mini-metrics template-metrics">
         <Metric label="Frozen params" value={frozenParameterCount} />
@@ -2213,6 +2333,114 @@ function TemplateCard({ template, onUseTemplate, onMakeTradeable, onRepairRemain
   );
 }
 
+function DailyPaperView({ summary, dayFactory, dailyScannerState, productMode, accountRoles, onRunDailyScanner, onRefresh }) {
+  const tracked = summary?.tracked_candidates ?? [];
+  const counts = dayFactory?.counts ?? {};
+  const dailyQueue = dayFactory?.daily_paper_queue ?? [];
+  const reviewSignals = dayFactory?.review_signals ?? [];
+  const unsuitableSignals = dayFactory?.unsuitable ?? [];
+  const latestScan = dayFactory?.latest_scan;
+  return (
+    <section className="lab-shell">
+      <div className="lab-header">
+        <div>
+          <h2><LineChart size={20} /> Daily Paper</h2>
+          <p>Market-open scans use active frozen intraday templates only. No parameter search, no live orders.</p>
+        </div>
+        <div className="button-row">
+          <button type="button" onClick={onRunDailyScanner} disabled={dailyScannerState?.status === "running"}>
+            <Search size={16} /> {dailyScannerState?.status === "running" ? "Scanning..." : "Start Daily Scan"}
+          </button>
+          <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh</button>
+        </div>
+      </div>
+      <AccountWorkspaceNotice productMode={productMode} accountRoles={accountRoles} />
+      <div className="metrics four">
+        <Metric label="Frozen day templates" value={counts.frozen_day_templates ?? 0} />
+        <Metric label="Paper queue" value={counts.daily_paper_queue ?? dailyQueue.length} />
+        <Metric label="Review signals" value={counts.eligible_review_signals ?? reviewSignals.length} />
+        <Metric label="Order mode" value="disabled" />
+      </div>
+      <div className="status-list daily-status">
+        <div className="status compact-status">
+          <strong>Daily mode source · frozen templates only</strong>
+          <span>Discovery leads stay blocked until Make tradeable, Save template, and Freeze validate are complete.</span>
+          <small>{productMode === "cfd" ? "CFD account selection is available for catalogue checks, but CFD-specific cost validation still needs a dedicated model." : "Spread bet mode uses the current IG-style spread-bet cost model."}</small>
+        </div>
+        {dailyScannerState?.detail && (
+          <div className="status compact-status">
+            <strong>Scanner · {dailyScannerState.status}</strong>
+            <span>{dailyScannerState.detail}</span>
+          </div>
+        )}
+        {latestScan && (
+          <div className="status compact-status">
+            <strong>Latest scan · {latestScan.trading_date}</strong>
+            <span>{latestScan.counts?.daily_paper_queue ?? 0} paper previews · {latestScan.counts?.review_signals ?? 0} review signals · {latestScan.status}</span>
+            <small>Scan {latestScan.id} · strategy generation disabled</small>
+          </div>
+        )}
+      </div>
+      <div className="lab-grid daily-paper-grid">
+        <section className="lab-section span-2">
+          <h3>1-3 Paper Previews</h3>
+          <div className="factory-lead-grid">
+            {dailyQueue.map((lead) => <DayTradingQueueCard key={`${lead.id}-${lead.market_id}`} lead={lead} />)}
+            {dailyQueue.length === 0 && <span className="muted">No active frozen intraday template has produced a paper preview yet.</span>}
+          </div>
+        </section>
+        <section className="lab-section">
+          <h3>Review Signals</h3>
+          <div className="status-list">
+            {reviewSignals.slice(0, 10).map((lead) => (
+              <div className="status compact-status" key={`${lead.id}-${lead.market_id}-daily-review`}>
+                <strong>{lead.market_id} · {lead.strategy_name}</strong>
+                <span>{strategyFamilyLabel(lead.strategy_family)} · OOS {formatMoney(lead.oos_net_profit)} · trades {lead.trade_count}</span>
+                <small>{lead.target_regime ? `${regimeLabel(lead.target_regime)} only · ` : ""}Preview only</small>
+              </div>
+            ))}
+            {reviewSignals.length === 0 && <span className="muted">The review queue fills after frozen templates match today's eligible markets.</span>}
+          </div>
+        </section>
+        <section className="lab-section">
+          <h3>Unsuitable / Move On</h3>
+          <div className="status-list">
+            {unsuitableSignals.slice(0, 8).map((lead) => (
+              <div className="status compact-status" key={`${lead.id}-${lead.market_id}-daily-unsuitable`}>
+                <strong>{lead.market_id} · {lead.strategy_name}</strong>
+                <span>{lead.unsuitable_reason || "Capital fit failed for this account."}</span>
+                <small>The factory skips this so attention stays on feasible markets.</small>
+              </div>
+            ))}
+            {unsuitableSignals.length === 0 && <span className="muted">No terminal account-fit blockers in the latest queue.</span>}
+          </div>
+        </section>
+        <section className="lab-section span-2">
+          <h3>30-Day Paper Review</h3>
+          <div className="candidate-list">
+            {tracked.map((candidate) => (
+              <div className="candidate-card compact" key={candidate.id}>
+                <div className="label-row">
+                  <strong>{candidate.strategy_name}</strong>
+                  <span className="badge good">Paper queue</span>
+                </div>
+                <span>{candidate.market_id} · current {regimeLabel(candidate.current_regime)}</span>
+                <div className="mini-metrics">
+                  <Metric label="Allowed" value={(candidate.allowed_regimes ?? []).map(regimeLabel).join(" / ") || "n/a"} />
+                  <Metric label="Blocked" value={(candidate.blocked_regimes ?? []).map(regimeLabel).join(" / ") || "none"} />
+                  <Metric label="Best regime" value={regimeLabel(candidate.dominant_profit_regime)} />
+                  <Metric label={accountSizeLabel(candidate.testing_account_size)} value={(candidate.capital_summary?.feasible_accounts ?? []).includes(Number(candidate.testing_account_size ?? WORKING_ACCOUNT_SIZE)) ? "OK" : "Blocked"} />
+                </div>
+              </div>
+            ))}
+            {tracked.length === 0 && <span className="muted">No candidates have passed the freshness, cost, capital, and regime gates into longer paper review yet.</span>}
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
 function PaperView({ summary }) {
   const tracked = summary?.tracked_candidates ?? [];
   return (
@@ -2235,7 +2463,7 @@ function PaperView({ summary }) {
           <div className="candidate-card compact" key={candidate.id}>
             <div className="label-row">
               <strong>{candidate.strategy_name}</strong>
-              <span className="badge success-badge">Paper queue</span>
+              <span className="badge good">Paper queue</span>
             </div>
             <span>{candidate.market_id} · current {regimeLabel(candidate.current_regime)}</span>
             <div className="mini-metrics">
@@ -2252,7 +2480,22 @@ function PaperView({ summary }) {
   );
 }
 
-function BrokerView({ summary, markets }) {
+function AccountRoleCard({ mode, title, detail, role, active, onSelect }) {
+  return (
+    <button type="button" className={active ? "account-card active" : "account-card"} onClick={onSelect}>
+      <div className="label-row">
+        <strong>{title}</strong>
+        <span className={`badge ${role?.active ? "good" : role?.configured ? "base" : "warn"}`}>
+          {role?.active ? "Active" : role?.configured ? "Saved" : "Not set"}
+        </span>
+      </div>
+      <span>{role?.display_name || role?.masked_account_id || detail}</span>
+      <small>{mode === "cfd" ? "CFD templates must not be treated as ready until CFD-specific validation is complete." : "Default path for current £3k template discovery and daily paper."}</small>
+    </button>
+  );
+}
+
+function BrokerView({ summary, risk, markets, selectedProductMode, onSelectProductMode }) {
   const defaultMarket = markets[0]?.market_id ?? "NAS100";
   const [previewForm, setPreviewForm] = React.useState({
     market_id: defaultMarket,
@@ -2294,10 +2537,26 @@ function BrokerView({ summary, markets }) {
     <section className="lab-shell">
       <div className="lab-header">
         <div>
-          <h2><Wallet size={20} /> Broker</h2>
-          <p>IG demo connectivity, market rules, and read-only broker state.</p>
+          <h2><Wallet size={20} /> Accounts</h2>
+          <p>Two demo account workspaces with separate catalogue checks, capital view, and broker-safe previews.</p>
         </div>
         <span className="mode"><LockKeyhole size={16} /> {summary?.order_placement ?? "disabled"}</span>
+      </div>
+      <div className="account-grid">
+        {[
+          ["spread_bet", "Spread Bet Demo", "Current research and paper workflow uses the spread-bet cost model."],
+          ["cfd", "CFD Demo", "Catalogue checks work, but dedicated CFD cost and margin modelling is still incomplete."],
+        ].map(([mode, title, detail]) => (
+          <AccountRoleCard
+            key={mode}
+            mode={mode}
+            title={title}
+            detail={detail}
+            role={summary?.ig_account_roles?.[mode]}
+            active={selectedProductMode === mode}
+            onSelect={() => onSelectProductMode(mode)}
+          />
+        ))}
       </div>
       <div className="grid two">
         <Panel icon={<Activity />} title="Connection">
@@ -2316,6 +2575,14 @@ function BrokerView({ summary, markets }) {
             <Metric label="EPICs" value={markets.filter((item) => item.ig_epic).length} />
             <Metric label="Enabled" value={markets.filter((item) => item.enabled).length} />
             <Metric label="Execution" value="off" />
+          </div>
+        </Panel>
+        <Panel icon={<LockKeyhole />} title="Capital Guardrails">
+          <div className="metrics four">
+            <Metric label="Workspace" value={productModeLabel(selectedProductMode)} />
+            <Metric label="Risk/trade" value={percent(risk?.risk_per_trade_fraction)} />
+            <Metric label="Daily stop" value={percent(risk?.daily_loss_fraction)} />
+            <Metric label="Live orders" value={risk?.live_ordering_enabled ? "on" : "off"} />
           </div>
         </Panel>
       </div>
@@ -2726,11 +2993,9 @@ function CandidateFactoryView({
   activeMarketIds,
   selectedMarkets,
   researchRun,
-  dailyScannerState,
   toggleMarket,
   onRunFactory,
   onStageFactory,
-  onRunDailyScanner,
   onMakeTradeable,
   onRepairRemaining,
   onFreezeValidate,
@@ -2742,8 +3007,6 @@ function CandidateFactoryView({
   const coverage = factoryCoverageRows(leads);
   const gaps = factoryRegimeGaps(runDetail, leads, activeMarketIds);
   const latestRun = researchRuns[0];
-  const dailyQueue = dayFactory?.daily_paper_queue ?? [];
-  const reviewSignals = dayFactory?.review_signals ?? [];
   const unsuitableSignals = dayFactory?.unsuitable ?? [];
   const discoveryLeads = dayFactory?.discovery_leads_not_live ?? [];
   const needsFreezeTemplates = dayFactory?.template_library?.needs_freeze_validation ?? [];
@@ -2756,16 +3019,13 @@ function CandidateFactoryView({
     <div className="lab-grid candidate-factory">
       <section className="lab-section span-2 factory-hero">
         <div>
-          <h3><Sparkles size={18} /> Candidate Factory</h3>
+          <h3><ShieldCheck size={18} /> Repair & Freeze Board</h3>
           <p>
-            Discovery can search for ideas, but daily paper mode never invents a fresh strategy. It only matches active
-            frozen templates to eligible markets, produces broker-safe previews, and keeps live placement disabled.
+            Turn discovery leads into reusable frozen templates. Daily paper scanning lives in Daily Paper and only uses
+            active frozen intraday rules.
           </p>
         </div>
         <div className="button-row">
-          <button type="button" onClick={onRunDailyScanner} disabled={dailyScannerState?.status === "running"}>
-            <Search size={16} /> {dailyScannerState?.status === "running" ? "Scanning..." : "Start Daily Scan"}
-          </button>
           <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh template queue</button>
         </div>
       </section>
@@ -2774,9 +3034,9 @@ function CandidateFactoryView({
         <h3>Factory Status</h3>
         <div className="metrics four">
           <Metric label="Frozen day templates" value={dayCounts.frozen_day_templates ?? 0} />
-          <Metric label="Day paper queue" value={dayCounts.daily_paper_queue ?? 0} />
-          <Metric label="Review matches" value={dayCounts.eligible_review_signals ?? 0} />
+          <Metric label="Needs freeze" value={dayCounts.non_frozen_day_templates ?? needsFreezeTemplates.length} />
           <Metric label="Discovery leads" value={dayCounts.discovery_leads_needing_freeze ?? summary.researchLeads} />
+          <Metric label="Account blockers" value={unsuitableSignals.length} />
         </div>
         <div className="factory-flow">
           {[
@@ -2799,44 +3059,6 @@ function CandidateFactoryView({
             <span>Research candidates are discovery leads until they are saved and Freeze validated. Market-open automation can come later.</span>
             <small>Intraday templates force flat before the next session; overnight/swing templates stay separate until funding and gap risk are explicitly proven.</small>
           </div>
-          {dailyScannerState?.detail && (
-            <div className="status compact-status">
-              <strong>Daily scanner · {dailyScannerState.status}</strong>
-              <span>{dailyScannerState.detail}</span>
-              <small>Scanner output is stored with the daily queue for after-close review.</small>
-            </div>
-          )}
-          {dayFactory?.latest_scan && (
-            <div className="status compact-status">
-              <strong>Latest stored scan · {dayFactory.latest_scan.trading_date}</strong>
-              <span>{dayFactory.latest_scan.counts?.daily_paper_queue ?? 0} paper previews · {dayFactory.latest_scan.counts?.review_signals ?? 0} review signals · {dayFactory.latest_scan.status}</span>
-              <small>Scan {dayFactory.latest_scan.id} · frozen rules only · live placement disabled</small>
-            </div>
-          )}
-        </div>
-      </section>
-
-      <section className="lab-section span-2">
-        <h3>Daily Paper Queue From Frozen Templates</h3>
-        <div className="factory-lead-grid">
-          {dailyQueue.map((lead) => (
-            <DayTradingQueueCard key={`${lead.id}-${lead.market_id}`} lead={lead} />
-          ))}
-          {dailyQueue.length === 0 && <span className="muted">No active frozen day-trading template has cleared paper gates yet.</span>}
-        </div>
-      </section>
-
-      <section className="lab-section span-2">
-        <h3>Eligible Frozen Template Matches For Review</h3>
-        <div className="status-list">
-          {reviewSignals.slice(0, 10).map((lead) => (
-            <div className="status compact-status" key={`${lead.id}-${lead.market_id}-review`}>
-              <strong>{lead.market_id} · {lead.strategy_name}</strong>
-              <span>{strategyFamilyLabel(lead.strategy_family)} · {lead.match_scope ? `${readableSnake(lead.match_scope)} · ` : ""}OOS {formatMoney(lead.oos_net_profit)} · trades {lead.trade_count} · {tierLabel(lead.promotion_tier)}</span>
-              <small>{lead.target_regime ? `${regimeLabel(lead.target_regime)} only · ` : ""}Preview only · live placement disabled</small>
-            </div>
-          ))}
-          {reviewSignals.length === 0 && <span className="muted">Save and Freeze validate intraday templates before expecting daily matches.</span>}
         </div>
       </section>
 
@@ -3825,6 +4047,14 @@ function SecretBadge({ status }) {
 
 function providerStatus(statuses, provider) {
   return statuses.find((item) => item.provider === provider);
+}
+
+function normalizeProductMode(value) {
+  return String(value || "").replace("-", "_").toLowerCase() === "cfd" ? "cfd" : "spread_bet";
+}
+
+function productModeLabel(value) {
+  return normalizeProductMode(value) === "cfd" ? "CFD Demo" : "Spread Bet Demo";
 }
 
 function isActiveRun(run) {
