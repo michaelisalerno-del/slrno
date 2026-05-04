@@ -721,6 +721,7 @@ button.ghost {
 }
 
 .cost-card,
+.midcap-card,
 .pareto-card,
 .factory-mode-card,
 .factory-lead-card,
@@ -839,6 +840,7 @@ button.ghost {
 }
 
 .cost-card > div:first-child,
+.midcap-card-head,
 .plugin,
 .engine {
   display: flex;
@@ -848,10 +850,44 @@ button.ghost {
 }
 
 .plugin div,
+.midcap-card-head > div,
 .engine div {
   display: grid;
   gap: 3px;
   min-width: 0;
+}
+
+.midcap-search {
+  margin-bottom: 12px;
+}
+
+.discovery-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.midcap-list {
+  display: grid;
+  gap: 10px;
+  max-height: 520px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.midcap-card {
+  min-width: 0;
+}
+
+.midcap-card span,
+.midcap-card small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.midcap-card button {
+  justify-self: start;
 }
 
 .trial-list {
@@ -1297,6 +1333,7 @@ th {
   .guide-columns,
   .guide-metric-grid,
   .cost-grid,
+  .discovery-summary,
   .pareto-grid,
   .candidate-grid,
   .factory-flow,

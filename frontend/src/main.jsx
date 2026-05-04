@@ -14,8 +14,10 @@ import {
   LineChart,
   LockKeyhole,
   Plug,
+  Plus,
   RefreshCw,
   Save,
+  Search,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -26,6 +28,7 @@ import {
   archiveResearchRun,
   createResearchRun,
   deleteResearchRun,
+  discoverMidcaps,
   getBacktestsSummary,
   getBrokerSummary,
   getCockpitSummary,
@@ -50,6 +53,7 @@ import {
   saveEodhd,
   saveFmp,
   saveIg,
+  saveIgAccountRoles,
   saveMarket,
   saveResearchSchedule,
   saveStrategyTemplate,
@@ -164,6 +168,21 @@ function App() {
   const [eodhdKey, setEodhdKey] = React.useState("");
   const [fmpKey, setFmpKey] = React.useState("");
   const [ig, setIg] = React.useState({ apiKey: "", username: "", password: "", accountId: "" });
+  const [igRoles, setIgRoles] = React.useState({ spreadBetAccountId: "", cfdAccountId: "", defaultProductMode: "spread_bet" });
+  const [igAccountRoles, setIgAccountRoles] = React.useState(null);
+  const [midcapSearch, setMidcapSearch] = React.useState({
+    country: "UK",
+    product_mode: "spread_bet",
+    limit: "40",
+    min_market_cap: "250000000",
+    max_market_cap: "10000000000",
+    min_volume: "100000",
+    max_spread_bps: "60",
+    account_size: String(WORKING_ACCOUNT_SIZE),
+    verify_ig: true,
+  });
+  const [midcapDiscovery, setMidcapDiscovery] = React.useState(null);
+  const [midcapLoading, setMidcapLoading] = React.useState(false);
   const [activeModule, setActiveModule] = React.useState("cockpit");
   const [loadingModule, setLoadingModule] = React.useState("");
   const [cockpit, setCockpit] = React.useState(null);
@@ -201,6 +220,7 @@ function App() {
     search_budget: "",
     risk_profile: "balanced",
     strategy_families: [],
+    product_mode: "spread_bet",
     cost_stress_multiplier: 2.0,
     include_regime_scans: true,
     regime_scan_budget_per_regime: "",
@@ -276,12 +296,14 @@ function App() {
         const [summary, nextMarkets] = await Promise.all([getBrokerSummary(), getMarkets()]);
         setBroker(summary);
         setStatus(summary.providers ?? []);
+        setIgAccountRoles(summary.ig_account_roles ?? null);
         setMarkets(nextMarkets);
       } else if (moduleId === "risk") {
         setRisk(await getRiskSummary());
       } else if (moduleId === "settings") {
         const summary = await getSettingsSummary();
         setStatus(summary.providers ?? []);
+        setIgAccountRoles(summary.ig_account_roles ?? null);
         setCacheStatus(summary.cache ?? null);
       }
     } finally {
@@ -353,6 +375,20 @@ function App() {
     }
   }
 
+  async function submitIgAccountRoles(event) {
+    event.preventDefault();
+    setMessage("Saving IG account roles...");
+    try {
+      const result = await saveIgAccountRoles(igRoles);
+      setIgRoles({ spreadBetAccountId: "", cfdAccountId: "", defaultProductMode: igRoles.defaultProductMode });
+      setIgAccountRoles(result.ig_account_roles ?? null);
+      setMessage("IG account roles saved.");
+      await loadModule(activeModule);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
   async function submitMarket(event) {
     event.preventDefault();
     await saveMarket(market);
@@ -366,16 +402,44 @@ function App() {
     await loadModule("backtests");
   }
 
-  async function syncCosts() {
-    const market_ids = activeMarketIds.length ? activeMarketIds : enabledMarkets.map((item) => item.market_id);
+  async function syncCosts(marketIds = activeMarketIds, productMode = researchRun.product_mode || "spread_bet") {
+    const market_ids = marketIds.length ? marketIds : enabledMarkets.map((item) => item.market_id);
     setMessage("Syncing IG cost profiles...");
-    const result = await syncIgCosts({ market_ids });
+    const result = await syncIgCosts({ market_ids, product_mode: productMode });
     const next = { ...costProfiles };
     for (const profile of result.profiles) {
       next[profile.market_id] = profile;
     }
     setCostProfiles(next);
     setMessage(`Synced ${result.profile_count} IG cost profiles.`);
+  }
+
+  async function runMidcapDiscovery(event) {
+    event.preventDefault();
+    setMidcapLoading(true);
+    setMessage("Searching eligible mid-cap shares...");
+    try {
+      const result = await discoverMidcaps(midcapSearch);
+      setMidcapDiscovery(result);
+      setMessage(`Found ${result.eligible_count ?? 0} eligible mid-cap candidate${result.eligible_count === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setMidcapLoading(false);
+    }
+  }
+
+  async function installDiscoveredMarket(candidate) {
+    const mapping = candidate.market_mapping;
+    if (!mapping) {
+      setMessage("Discovery candidate is missing a market mapping.");
+      return;
+    }
+    await saveMarket(mapping);
+    setActiveMarketIds([mapping.market_id]);
+    setResearchRun((current) => ({ ...current, market_id: mapping.market_id, interval: "market_default" }));
+    setMessage(`${mapping.market_id} installed as a share market.`);
+    await loadModule("backtests");
   }
 
   async function loadCostProfile(marketId) {
@@ -461,7 +525,7 @@ function App() {
         repair_mode: runConfig.repair_mode || "standard",
         account_size: testingCapital,
         source_template: runConfig.source_template && Object.keys(runConfig.source_template).length ? runConfig.source_template : {},
-        product_mode: "spread_bet",
+        product_mode: runConfig.product_mode || "spread_bet",
       });
       setActiveTab("results");
       setMessage(`Run ${result.run_id} started: ${budget} base trials per market${regimeScanNote}.`);
@@ -529,7 +593,7 @@ function App() {
     setActiveTab("results");
     try {
       setMessage("Candidate Factory: syncing IG cost profiles...");
-      const result = await syncIgCosts({ market_ids: plan.marketIds });
+      const result = await syncIgCosts({ market_ids: plan.marketIds, product_mode: runConfig.product_mode || "spread_bet" });
       setCostProfiles((current) => {
         const next = { ...current };
         for (const profile of result.profiles ?? []) {
@@ -585,7 +649,7 @@ function App() {
     try {
       if (plan.syncCosts) {
         setMessage("Make tradeable: syncing IG cost profiles...");
-        const result = await syncIgCosts({ market_ids: plan.marketIds });
+        const result = await syncIgCosts({ market_ids: plan.marketIds, product_mode: runConfig.product_mode || "spread_bet" });
         setCostProfiles((current) => {
           const next = { ...current };
           for (const profile of result.profiles ?? []) {
@@ -666,7 +730,7 @@ function App() {
     }
     try {
       setMessage("Make tradeable: syncing IG cost profiles...");
-      const result = await syncIgCosts({ market_ids: plan.marketIds });
+      const result = await syncIgCosts({ market_ids: plan.marketIds, product_mode: runConfig.product_mode || "spread_bet" });
       setCostProfiles((current) => {
         const next = { ...current };
         for (const profile of result.profiles ?? []) {
@@ -1435,6 +1499,15 @@ function App() {
           </section>
 
           <section className="grid two lower-grid">
+            <MidcapDiscoveryPanel
+              search={midcapSearch}
+              setSearch={setMidcapSearch}
+              result={midcapDiscovery}
+              loading={midcapLoading}
+              onSearch={runMidcapDiscovery}
+              onInstall={installDiscoveredMarket}
+            />
+
             <Panel icon={<Plug />} title="Market Plugins">
               <div className="plugin-list">
                 {plugins.slice(0, 8).map((plugin) => (
@@ -1509,9 +1582,13 @@ function App() {
             setFmpKey={setFmpKey}
             ig={ig}
             setIg={setIg}
+            igRoles={igRoles}
+            setIgRoles={setIgRoles}
+            igAccountRoles={igAccountRoles}
             submitEodhd={submitEodhd}
             submitFmp={submitFmp}
             submitIg={submitIg}
+            submitIgAccountRoles={submitIgAccountRoles}
             eodhdStatus={eodhdStatus}
             fmpStatus={fmpStatus}
             igStatus={igStatus}
@@ -3106,7 +3183,83 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
   );
 }
 
-function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, submitEodhd, submitFmp, submitIg, eodhdStatus, fmpStatus, igStatus, cacheStatus, pruneCache }) {
+function MidcapDiscoveryPanel({ search, setSearch, result, loading, onSearch, onInstall }) {
+  const candidates = result?.candidates ?? [];
+  return (
+    <Panel icon={<Search />} title="Eligible Midcap Finder">
+      <form className="compact midcap-search" onSubmit={onSearch}>
+        <label>Country</label>
+        <select value={search.country} onChange={(event) => setSearch({ ...search, country: event.target.value })}>
+          <option value="UK">UK shares</option>
+          <option value="US">US shares</option>
+        </select>
+        <label>Account role</label>
+        <select value={search.product_mode} onChange={(event) => setSearch({ ...search, product_mode: event.target.value })}>
+          <option value="spread_bet">Spread bet</option>
+          <option value="cfd">CFD account</option>
+        </select>
+        <label>Account size (£)</label>
+        <input value={search.account_size} onChange={(event) => setSearch({ ...search, account_size: event.target.value })} type="number" min="100" step="50" />
+        <label>Max spread bps</label>
+        <input value={search.max_spread_bps} onChange={(event) => setSearch({ ...search, max_spread_bps: event.target.value })} type="number" min="1" step="1" />
+        <label>Min market cap</label>
+        <input value={search.min_market_cap} onChange={(event) => setSearch({ ...search, min_market_cap: event.target.value })} type="number" min="0" step="10000000" />
+        <label>Max market cap</label>
+        <input value={search.max_market_cap} onChange={(event) => setSearch({ ...search, max_market_cap: event.target.value })} type="number" min="0" step="10000000" />
+        <label>Min volume</label>
+        <input value={search.min_volume} onChange={(event) => setSearch({ ...search, min_volume: event.target.value })} type="number" min="0" step="10000" />
+        <label>Limit</label>
+        <input value={search.limit} onChange={(event) => setSearch({ ...search, limit: event.target.value })} type="number" min="1" max="120" step="1" />
+        <label className="check compact-check">
+          <input type="checkbox" checked={search.verify_ig} onChange={(event) => setSearch({ ...search, verify_ig: event.target.checked })} />
+          Check IG
+        </label>
+        <button type="submit" disabled={loading}><Search size={16} /> {loading ? "Searching..." : "Find midcaps"}</button>
+      </form>
+      {result && (
+        <div className="discovery-summary">
+          <Metric label="Eligible" value={result.eligible_count ?? 0} />
+          <Metric label="Source" value={result.data_source ?? "n/a"} />
+          <Metric label="IG check" value={result.ig_status ?? "n/a"} />
+        </div>
+      )}
+      <div className="midcap-list">
+        {candidates.slice(0, 8).map((candidate) => (
+          <div className="midcap-card" key={candidate.market_id}>
+            <div className="midcap-card-head">
+              <div>
+                <strong>{candidate.market_id}</strong>
+                <span>{candidate.name}</span>
+                <small>{candidate.eodhd_symbol} · {candidate.exchange || candidate.country}</small>
+              </div>
+              <span className={`badge ${candidate.eligible ? "good" : "warn"}`}>{candidate.eligible ? "Eligible" : "Blocked"}</span>
+            </div>
+            <div className="mini-metrics">
+              <Metric label="Mkt cap" value={formatLargeMoney(candidate.market_cap)} />
+              <Metric label="Price" value={round(candidate.price)} />
+              <Metric label="Volume" value={formatLargeNumber(candidate.volume)} />
+              <Metric label="£1/pt margin" value={formatMoney(candidate.estimated_margin_for_probe_stake)} />
+              <Metric label="Spread/slip" value={`${round(candidate.estimated_spread_bps)} / ${round(candidate.estimated_slippage_bps)} bps`} />
+              <Metric label="IG" value={candidate.ig_status?.replaceAll("_", " ") ?? "n/a"} />
+            </div>
+            {(candidate.blockers?.length > 0 || candidate.warnings?.length > 0) && (
+              <div className="warning-row">
+                <WarningChips warnings={[...(candidate.blockers ?? []), ...(candidate.warnings ?? [])]} limit={6} />
+              </div>
+            )}
+            <button type="button" className="ghost" onClick={() => onInstall(candidate)} disabled={candidate.ig_status === "ig_not_found"}>
+              <Plus size={16} /> Install market
+            </button>
+          </div>
+        ))}
+        {result && candidates.length === 0 && <span className="muted">No mid-cap candidates matched these filters.</span>}
+        {!result && <span className="muted">Search FMP/IG for share candidates before adding them to the backtest market list.</span>}
+      </div>
+    </Panel>
+  );
+}
+
+function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, igRoles, setIgRoles, igAccountRoles, submitEodhd, submitFmp, submitIg, submitIgAccountRoles, eodhdStatus, fmpStatus, igStatus, cacheStatus, pruneCache }) {
   return (
     <div className="grid two">
       <Panel icon={<KeyRound />} title="Provider Settings">
@@ -3145,6 +3298,30 @@ function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, sub
           <input value={ig.accountId} onChange={(event) => setIg({ ...ig, accountId: event.target.value })} />
           <button>{igStatus?.configured ? "Replace IG demo" : "Validate IG demo"}</button>
         </form>
+        <form onSubmit={submitIgAccountRoles}>
+          <div className="label-row">
+            <label>IG account roles</label>
+            <span className="secret-badge saved">Optional</span>
+          </div>
+          <label>Spread betting account code</label>
+          <input
+            value={igRoles.spreadBetAccountId}
+            onChange={(event) => setIgRoles({ ...igRoles, spreadBetAccountId: event.target.value })}
+            placeholder={igAccountRoles?.spread_bet?.masked_account_id || "Spread betting account"}
+          />
+          <label>CFD account code</label>
+          <input
+            value={igRoles.cfdAccountId}
+            onChange={(event) => setIgRoles({ ...igRoles, cfdAccountId: event.target.value })}
+            placeholder={igAccountRoles?.cfd?.masked_account_id || "CFD account"}
+          />
+          <label>Default account role</label>
+          <select value={igRoles.defaultProductMode} onChange={(event) => setIgRoles({ ...igRoles, defaultProductMode: event.target.value })}>
+            <option value="spread_bet">Spread bet</option>
+            <option value="cfd">CFD</option>
+          </select>
+          <button>Save account roles</button>
+        </form>
       </Panel>
       <Panel icon={<Activity />} title="Connection Status">
         <div className="status-list">
@@ -3155,6 +3332,15 @@ function SettingsView({ eodhdKey, setEodhdKey, fmpKey, setFmpKey, ig, setIg, sub
               {item.last_error && <small>{item.last_error}</small>}
             </div>
           ))}
+          {igAccountRoles && (
+            <div className="status">
+              <strong>IG ACCOUNT ROLES</strong>
+              <span>
+                Default {String(igAccountRoles.default_product_mode || "spread_bet").replace("_", " ")} · spread bet {igAccountRoles.spread_bet?.configured ? igAccountRoles.spread_bet.masked_account_id : "not set"} · CFD {igAccountRoles.cfd?.configured ? igAccountRoles.cfd.masked_account_id : "not set"}
+              </span>
+              <small>Live order placement remains disabled.</small>
+            </div>
+          )}
         </div>
       </Panel>
       <Panel icon={<Database />} title="Market Data Cache">
@@ -5081,6 +5267,34 @@ function formatMoney(value) {
   const absolute = Math.abs(number);
   const decimals = absolute > 0 && absolute < 10 ? 2 : 0;
   return `${prefix}${absolute.toFixed(decimals)}`;
+}
+
+function formatLargeMoney(value) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "n/a";
+  }
+  if (number >= 1_000_000_000) {
+    return `£${round(number / 1_000_000_000)}bn`;
+  }
+  if (number >= 1_000_000) {
+    return `£${round(number / 1_000_000)}m`;
+  }
+  return formatMoney(number);
+}
+
+function formatLargeNumber(value) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "n/a";
+  }
+  if (number >= 1_000_000) {
+    return `${round(number / 1_000_000)}m`;
+  }
+  if (number >= 1_000) {
+    return `${round(number / 1_000)}k`;
+  }
+  return String(Math.round(number));
 }
 
 function formatRatio(value) {

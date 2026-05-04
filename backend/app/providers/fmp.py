@@ -14,6 +14,7 @@ class FMPProviderError(RuntimeError):
 class FMPProvider:
     BASE_URL = "https://financialmodelingprep.com/stable"
     ECONOMIC_CALENDAR_TTL_SECONDS = 6 * 60 * 60
+    COMPANY_SCREENER_TTL_SECONDS = 6 * 60 * 60
     ECONOMIC_CALENDAR_CHUNK_DAYS = 90
     HISTORICAL_PRICE_TTL_SECONDS = 180 * 24 * 60 * 60
     _DAILY_INTERVALS = {"1day", "1d", "day", "daily"}
@@ -63,6 +64,38 @@ class FMPProvider:
             events.extend(_calendar_rows(payload))
             cursor = chunk_end + timedelta(days=1)
         return sorted(events, key=_calendar_sort_key)
+
+    async def company_screener(
+        self,
+        *,
+        exchange: str = "",
+        country: str = "",
+        market_cap_more_than: float | int | None = None,
+        market_cap_lower_than: float | int | None = None,
+        min_volume: float | int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, object] = {"limit": max(1, min(200, int(limit)))}
+        if exchange:
+            params["exchange"] = exchange
+        if country:
+            params["country"] = country
+        if market_cap_more_than is not None:
+            params["marketCapMoreThan"] = max(0, float(market_cap_more_than))
+        if market_cap_lower_than is not None:
+            params["marketCapLowerThan"] = max(0, float(market_cap_lower_than))
+        if min_volume is not None:
+            params["volumeMoreThan"] = max(0, float(min_volume))
+        payload = await self._get_json(
+            "/company-screener",
+            params,
+            timeout_seconds=20.0,
+            operation="company screener",
+            use_cache=True,
+            cache_namespace="fmp_company_screener",
+            ttl_seconds=self.COMPANY_SCREENER_TTL_SECONDS,
+        )
+        return _screening_rows(payload)
 
     async def historical_bars(self, symbol: str, interval: str, start: str | date, end: str | date) -> list[OHLCBar]:
         if interval not in self._DAILY_INTERVALS:
@@ -165,6 +198,17 @@ def _calendar_rows(payload: Any) -> list[dict[str, Any]]:
         return [row for row in payload if isinstance(row, dict)]
     if isinstance(payload, dict):
         for key in ("calendar", "data", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _screening_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "results", "companies", "stocks"):
             rows = payload.get(key)
             if isinstance(rows, list):
                 return [row for row in rows if isinstance(row, dict)]

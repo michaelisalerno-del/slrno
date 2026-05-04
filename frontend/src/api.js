@@ -122,8 +122,30 @@ export function saveIg(values) {
   });
 }
 
+export function saveIgAccountRoles(values) {
+  return request("/settings/ig/accounts", {
+    method: "POST",
+    body: JSON.stringify({
+      spread_bet_account_id: values.spreadBetAccountId,
+      cfd_account_id: values.cfdAccountId,
+      default_product_mode: values.defaultProductMode,
+    }),
+  });
+}
+
 export function getMarkets() {
   return request("/markets");
+}
+
+export function discoverMidcaps(params = {}) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") {
+      query.set(key, value);
+    }
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request(`/markets/discovery/midcaps${suffix}`);
 }
 
 export function getMarketPlugins() {

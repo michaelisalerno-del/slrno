@@ -69,3 +69,26 @@ def test_save_fmp_marks_error_when_validation_fails(tmp_path, monkeypatch):
     assert fmp_status["configured"] is True
     assert fmp_status["last_status"] == "error"
     assert fmp_status["last_error"] == "bad key"
+
+
+def test_save_ig_account_roles_tracks_separate_spread_bet_and_cfd_accounts(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    monkeypatch.setattr(main, "settings", store)
+
+    result = main.save_ig_account_roles(
+        main.IGAccountRolesPayload(
+            spread_bet_account_id="ABC12345",
+            cfd_account_id="CFD98765",
+            default_product_mode="cfd",
+        )
+    )
+
+    roles = result["ig_account_roles"]
+    assert result["status"] == "saved"
+    assert roles["default_product_mode"] == "cfd"
+    assert roles["spread_bet"]["configured"] is True
+    assert roles["spread_bet"]["masked_account_id"].endswith("2345")
+    assert roles["cfd"]["configured"] is True
+    assert roles["cfd"]["masked_account_id"].endswith("8765")
+    assert "ABC12345" not in str(roles)
+    assert store.get_secret("ig_accounts", "spread_bet_account_id") == "ABC12345"

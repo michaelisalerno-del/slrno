@@ -34,6 +34,17 @@ from .ig_costs import (
 from .ig_spread_bet_engines import list_spread_bet_engines
 from .market_context import summarize_economic_calendar, unavailable_market_context
 from .market_data_cache import MarketDataCache
+from .market_discovery import (
+    DEFAULT_MAX_MARKET_CAP,
+    DEFAULT_MAX_SPREAD_BPS,
+    DEFAULT_MIN_MARKET_CAP,
+    DEFAULT_MIN_VOLUME,
+    MidcapDiscoveryCandidate,
+    MidcapDiscoveryCriteria,
+    build_midcap_candidates,
+    country_exchange_hint,
+    fallback_midcap_rows,
+)
 from .market_plugins import get_market_plugin, list_market_plugins
 from .market_registry import MarketMapping, MarketRegistry
 from .providers.eodhd import EODHDProvider
@@ -74,11 +85,12 @@ MULTI_MARKET_MIN_TRIALS_PER_MARKET = {
     "balanced": 9,
     "deep": 12,
 }
-SETTINGS_PROVIDERS = ("eodhd", "fmp", "ig")
+SETTINGS_PROVIDERS = ("eodhd", "fmp", "ig", "ig_accounts")
 EODHD_MONTHLY_COMMODITIES = set(EODHDProvider._MONTHLY_COMMODITIES)
 FMP_DAILY_BAR_SYMBOLS = {
     "FTSE100": "^FTSE",
 }
+PRODUCT_MODES = {"spread_bet", "cfd"}
 
 
 class EODHDSettings(BaseModel):
@@ -95,6 +107,12 @@ class IGSettings(BaseModel):
     password: str = Field(min_length=1)
     account_id: str = ""
     environment: str = "demo"
+
+
+class IGAccountRolesPayload(BaseModel):
+    spread_bet_account_id: str = ""
+    cfd_account_id: str = ""
+    default_product_mode: str = "spread_bet"
 
 
 class MarketPayload(BaseModel):
@@ -171,6 +189,7 @@ class StrategyTemplateStatusPayload(BaseModel):
 
 class IGCostSyncPayload(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
+    product_mode: str = "default"
 
 
 class BrokerOrderPreviewPayload(BaseModel):
@@ -502,6 +521,7 @@ def broker_summary() -> dict[str, object]:
         "order_placement": "disabled",
         "providers": _settings_provider_statuses(),
         "mode": "demo_read_only",
+        "ig_account_roles": _ig_account_roles_summary(),
         "preview_policy": {
             "enabled": True,
             "places_orders": False,
@@ -528,6 +548,7 @@ def settings_summary() -> dict[str, object]:
     cache = MarketDataCache()
     return {
         "providers": _settings_provider_statuses(),
+        "ig_account_roles": _ig_account_roles_summary(),
         "cache": {
             "stats": cache.stats().as_dict(),
             "namespaces": cache.namespace_stats(),
@@ -652,9 +673,94 @@ async def save_ig(payload: IGSettings) -> dict[str, str]:
     return {"status": "connected", "environment": "demo", "account_id": account.account_id}
 
 
+@app.post("/settings/ig/accounts")
+def save_ig_account_roles(payload: IGAccountRolesPayload) -> dict[str, object]:
+    product_mode = _normalize_product_mode(payload.default_product_mode)
+    settings.set_secret("ig_accounts", "spread_bet_account_id", payload.spread_bet_account_id.strip())
+    settings.set_secret("ig_accounts", "cfd_account_id", payload.cfd_account_id.strip())
+    settings.set_secret("ig_accounts", "default_product_mode", product_mode)
+    settings.set_status("ig_accounts", "saved")
+    return {"status": "saved", "ig_account_roles": _ig_account_roles_summary()}
+
+
 @app.get("/markets")
 def list_markets() -> list[dict[str, object]]:
     return [_market_response(market) for market in markets.list()]
+
+
+@app.get("/markets/discovery/midcaps")
+async def discover_midcap_markets(
+    country: str = "UK",
+    product_mode: str = "spread_bet",
+    limit: int = Query(default=40, ge=1, le=120),
+    min_market_cap: float = Query(default=DEFAULT_MIN_MARKET_CAP, ge=0),
+    max_market_cap: float = Query(default=DEFAULT_MAX_MARKET_CAP, ge=0),
+    min_volume: float = Query(default=DEFAULT_MIN_VOLUME, ge=0),
+    max_spread_bps: float = Query(default=DEFAULT_MAX_SPREAD_BPS, ge=1),
+    account_size: float = Query(default=WORKING_ACCOUNT_SIZE_GBP, gt=0),
+    verify_ig: bool = True,
+) -> dict[str, object]:
+    criteria = MidcapDiscoveryCriteria(
+        country=country,
+        product_mode=_normalize_product_mode(product_mode),
+        min_market_cap=min_market_cap,
+        max_market_cap=max_market_cap,
+        min_volume=min_volume,
+        max_spread_bps=max_spread_bps,
+        account_size=account_size,
+    )
+    source = "fmp_company_screener"
+    rows: list[dict[str, object]] = []
+    fmp_error = ""
+    fmp_api_key = settings.get_secret("fmp", "api_key")
+    exchange_hint, country_hint = country_exchange_hint(country)
+    if fmp_api_key:
+        provider = FMPProvider(fmp_api_key)
+        exchanges = ["NASDAQ", "NYSE", "AMEX"] if country_hint == "US" else [exchange_hint]
+        for exchange in exchanges:
+            try:
+                rows.extend(
+                    await provider.company_screener(
+                        exchange=exchange,
+                        country=country_hint,
+                        market_cap_more_than=min_market_cap,
+                        market_cap_lower_than=max_market_cap,
+                        min_volume=min_volume,
+                        limit=limit,
+                    )
+                )
+            except Exception as exc:
+                fmp_error = _public_error(exc)
+                if rows:
+                    break
+    if not rows:
+        source = "built_in_uk_midcap_starter" if not fmp_error else "built_in_fallback_after_fmp_error"
+        rows = fallback_midcap_rows(country)
+    candidates = build_midcap_candidates(rows, criteria, source)[:limit]
+    ig_status = "not_checked"
+    if verify_ig:
+        provider = _ig_provider_from_settings(criteria.product_mode)
+        if provider is None:
+            ig_status = "ig_not_configured"
+        else:
+            candidates = await _verify_midcap_candidates_with_ig(provider, candidates)
+            ig_status = "checked"
+    return {
+        "schema": "midcap_discovery_v1",
+        "country": country,
+        "product_mode": criteria.product_mode,
+        "account_size": criteria.account_size,
+        "data_source": source,
+        "fmp_error": fmp_error,
+        "ig_status": ig_status,
+        "criteria": criteria.as_dict(),
+        "eligible_count": sum(1 for candidate in candidates if candidate.eligible),
+        "candidates": [candidate.as_dict() for candidate in candidates],
+        "notes": [
+            "Discovery only installs a market mapping; candidates still need full backtest, IG cost sync, OOS, fold, regime, and paper gates.",
+            "CFD account roles can be saved now, but the current research engine still uses the spread-bet cost model unless a future CFD cost model is added.",
+        ],
+    }
 
 
 @app.get("/market-data/cache")
@@ -730,7 +836,8 @@ def ig_spread_bet_engines() -> list[dict[str, object]]:
 @app.post("/ig/markets/sync-costs")
 async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
     selected = _selected_markets(payload.market_ids)
-    provider = _ig_provider_from_settings()
+    product_mode = None if payload.product_mode == "default" else _normalize_product_mode(payload.product_mode)
+    provider = _ig_provider_from_settings(product_mode)
     account_currency = "GBP"
     if provider is not None:
         try:
@@ -1686,11 +1793,72 @@ def _cockpit_next_actions(runs: list[dict[str, object]]) -> list[dict[str, str]]
     return actions
 
 
-def _ig_provider_from_settings() -> IGDemoProvider | None:
+async def _verify_midcap_candidates_with_ig(
+    provider: IGDemoProvider,
+    candidates: list[MidcapDiscoveryCandidate],
+) -> list[MidcapDiscoveryCandidate]:
+    verified: list[MidcapDiscoveryCandidate] = []
+    for candidate in candidates:
+        market = candidate.market_mapping()
+        try:
+            resolved = await _resolve_ig_market(provider, market)
+        except Exception:
+            resolved = None
+        if resolved is None:
+            verified.append(candidate.with_ig_match("", ""))
+            continue
+        resolved_market, _note = resolved
+        verified.append(candidate.with_ig_match(resolved_market.ig_epic, resolved_market.ig_name))
+    return sorted(verified, key=lambda item: (item.eligible, item.ig_status == "ig_matched", item.score), reverse=True)
+
+
+def _ig_account_roles_summary() -> dict[str, object]:
+    spread_bet_id = settings.get_secret("ig_accounts", "spread_bet_account_id") or ""
+    cfd_id = settings.get_secret("ig_accounts", "cfd_account_id") or ""
+    default_product_mode = _normalize_product_mode(settings.get_secret("ig_accounts", "default_product_mode") or "spread_bet")
+    return {
+        "default_product_mode": default_product_mode,
+        "spread_bet": {
+            "configured": bool(spread_bet_id),
+            "masked_account_id": _mask_account_id(spread_bet_id),
+        },
+        "cfd": {
+            "configured": bool(cfd_id),
+            "masked_account_id": _mask_account_id(cfd_id),
+        },
+        "live_ordering_enabled": False,
+        "notes": [
+            "Account roles are used for validation/search context only; order placement remains disabled.",
+            "Backtests remain spread-bet cost model until a dedicated CFD cost model is added.",
+        ],
+    }
+
+
+def _mask_account_id(account_id: str) -> str:
+    value = str(account_id or "").strip()
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "*" * len(value)
+    return f"{'*' * max(3, len(value) - 4)}{value[-4:]}"
+
+
+def _normalize_product_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    return normalized if normalized in PRODUCT_MODES else "spread_bet"
+
+
+def _account_id_for_product_mode(product_mode: str | None = None) -> str:
+    mode = _normalize_product_mode(product_mode or settings.get_secret("ig_accounts", "default_product_mode") or "spread_bet")
+    role_key = "cfd_account_id" if mode == "cfd" else "spread_bet_account_id"
+    return settings.get_secret("ig_accounts", role_key) or ""
+
+
+def _ig_provider_from_settings(product_mode: str | None = None) -> IGDemoProvider | None:
     api_key = settings.get_secret("ig", "api_key")
     username = settings.get_secret("ig", "username")
     password = settings.get_secret("ig", "password")
-    account_id = settings.get_secret("ig", "account_id") or ""
+    account_id = _account_id_for_product_mode(product_mode) or settings.get_secret("ig", "account_id") or ""
     if not api_key or not username or not password:
         return None
     return IGDemoProvider(api_key, username, password, account_id)
