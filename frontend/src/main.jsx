@@ -58,6 +58,7 @@ import {
   saveMarket,
   saveResearchSchedule,
   saveStrategyTemplate,
+  startDailyTemplateScanner,
   syncIgCosts,
   updateStrategyTemplateStatus,
 } from "./api";
@@ -201,6 +202,7 @@ function App() {
   const [marketContext, setMarketContext] = React.useState(null);
   const [paper, setPaper] = React.useState(null);
   const [dayFactory, setDayFactory] = React.useState(null);
+  const [dailyScannerState, setDailyScannerState] = React.useState({ status: "idle", detail: "" });
   const [broker, setBroker] = React.useState(null);
   const [risk, setRisk] = React.useState(null);
   const [includeArchivedRuns, setIncludeArchivedRuns] = React.useState(false);
@@ -632,6 +634,39 @@ function App() {
       await launchResearchRun(runConfig, plan.marketIds, plan.launchMessage);
     } catch (error) {
       setResearchState({ status: "error", detail: error.message, progress: 100 });
+      setMessage(error.message);
+    }
+  }
+
+  async function runDailyTemplateScanner() {
+    const testingCapital = optionalNumber(researchRun.account_size) ?? WORKING_ACCOUNT_SIZE;
+    setDailyScannerState({ status: "running", detail: "Scanning active frozen templates against today's eligible 5-minute markets..." });
+    setMessage("Daily Template Scanner: applying frozen rules only...");
+    try {
+      const result = await startDailyTemplateScanner({
+        market_ids: activeMarketIds,
+        product_mode: researchRun.product_mode || "spread_bet",
+        account_size: testingCapital,
+        paper_limit: optionalNumber(researchRun.paper_queue_limit) ?? 3,
+        review_limit: optionalNumber(researchRun.review_queue_limit) ?? 10,
+        lookback_days: 10,
+        max_markets: 40,
+      });
+      setDayFactory((current) => ({
+        ...(current ?? {}),
+        daily_paper_queue: result.daily_paper_queue ?? [],
+        review_signals: result.review_signals ?? [],
+        unsuitable: result.unsuitable ?? [],
+        latest_scan: result.latest_scan ?? null,
+        counts: { ...(current?.counts ?? {}), ...(result.counts ?? {}) },
+      }));
+      setDailyScannerState({
+        status: result.status ?? "finished",
+        detail: `Scan ${result.scan_id}: ${result.counts?.daily_paper_queue ?? 0} paper preview${result.counts?.daily_paper_queue === 1 ? "" : "s"}, ${result.counts?.review_signals ?? 0} review signal${result.counts?.review_signals === 1 ? "" : "s"}.`,
+      });
+      setMessage(`Daily Template Scanner finished: ${result.counts?.daily_paper_queue ?? 0} paper preview${result.counts?.daily_paper_queue === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setDailyScannerState({ status: "error", detail: error.message });
       setMessage(error.message);
     }
   }
@@ -1556,9 +1591,11 @@ function App() {
                 activeMarketIds={activeMarketIds}
                 selectedMarkets={selectedMarkets}
                 researchRun={researchRun}
+                dailyScannerState={dailyScannerState}
                 toggleMarket={toggleMarket}
                 onRunFactory={runCandidateFactory}
                 onStageFactory={stageCandidateFactory}
+                onRunDailyScanner={runDailyTemplateScanner}
                 onMakeTradeable={makeTradeable}
                 onRepairRemaining={repairRemaining}
                 onFreezeValidate={freezeValidate}
@@ -2620,9 +2657,11 @@ function CandidateFactoryView({
   activeMarketIds,
   selectedMarkets,
   researchRun,
+  dailyScannerState,
   toggleMarket,
   onRunFactory,
   onStageFactory,
+  onRunDailyScanner,
   onMakeTradeable,
   onRepairRemaining,
   onFreezeValidate,
@@ -2654,7 +2693,12 @@ function CandidateFactoryView({
             frozen templates to eligible markets, produces broker-safe previews, and keeps live placement disabled.
           </p>
         </div>
-        <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh template queue</button>
+        <div className="button-row">
+          <button type="button" onClick={onRunDailyScanner} disabled={dailyScannerState?.status === "running"}>
+            <Search size={16} /> {dailyScannerState?.status === "running" ? "Scanning..." : "Start Daily Scan"}
+          </button>
+          <button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh template queue</button>
+        </div>
       </section>
 
       <section className="lab-section span-2">
@@ -2686,6 +2730,20 @@ function CandidateFactoryView({
             <span>Research candidates are discovery leads until they are saved and Freeze validated. Market-open automation can come later.</span>
             <small>Intraday templates force flat before the next session; overnight/swing templates stay separate until funding and gap risk are explicitly proven.</small>
           </div>
+          {dailyScannerState?.detail && (
+            <div className="status compact-status">
+              <strong>Daily scanner · {dailyScannerState.status}</strong>
+              <span>{dailyScannerState.detail}</span>
+              <small>Scanner output is stored with the daily queue for after-close review.</small>
+            </div>
+          )}
+          {dayFactory?.latest_scan && (
+            <div className="status compact-status">
+              <strong>Latest stored scan · {dayFactory.latest_scan.trading_date}</strong>
+              <span>{dayFactory.latest_scan.counts?.daily_paper_queue ?? 0} paper previews · {dayFactory.latest_scan.counts?.review_signals ?? 0} review signals · {dayFactory.latest_scan.status}</span>
+              <small>Scan {dayFactory.latest_scan.id} · frozen rules only · live placement disabled</small>
+            </div>
+          )}
         </div>
       </section>
 
@@ -2878,11 +2936,11 @@ function DayTradingQueueCard({ lead }) {
       <span>{[normalizeInterval(lead.interval), strategyFamilyLabel(lead.strategy_family), lead.target_regime ? `${regimeLabel(lead.target_regime)} only` : ""].filter(Boolean).join(" · ")}</span>
       <div className="mini-metrics">
         <Metric label="Paper score" value={round(lead.paper_readiness_score)} />
-        <Metric label="Net" value={formatMoney(lead.net_profit)} />
+        <Metric label="Side" value={lead.side ?? "-"} />
+        <Metric label="Regime" value={regimeLabel(lead.current_regime)} />
+        <Metric label="Setup" value={readableSnake(lead.signal_state)} />
         <Metric label="OOS" value={formatMoney(lead.oos_net_profit)} />
-        <Metric label="Trades" value={lead.trade_count} />
-        <Metric label="Funding" value={formatMoney(lead.funding_cost)} />
-        <Metric label="Order mode" value="Disabled" />
+        <Metric label="Order mode" value="Preview" />
       </div>
       <div className="warning-row">
         <WarningChips warnings={lead.warnings} limit={5} empty="Gate clear" />

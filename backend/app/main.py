@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import asdict
 from datetime import date, timedelta
 from math import isfinite
 
@@ -9,7 +10,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .adaptive_research import SEARCH_PRESETS, AdaptiveSearchConfig, available_research_engines, run_adaptive_search
+from .adaptive_research import SEARCH_PRESETS, AdaptiveSearchConfig, apply_frozen_template_rules, available_research_engines, run_adaptive_search
 from .bar_patterns import analyze_market_regimes
 from .broker_preview import broker_order_preview
 from .capital import (
@@ -204,6 +205,22 @@ class BrokerOrderPreviewPayload(BaseModel):
     entry_price: float | None = Field(default=None, gt=0)
     stop: float | None = Field(default=None, gt=0)
     limit: float | None = Field(default=None, gt=0)
+
+
+class DailyTemplateScannerPayload(BaseModel):
+    trading_date: str | None = None
+    market_ids: list[str] = Field(default_factory=list)
+    product_mode: str = "spread_bet"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    paper_limit: int = Field(default=3, ge=1, le=5)
+    review_limit: int = Field(default=10, ge=1, le=20)
+    lookback_days: int = Field(default=10, ge=1, le=30)
+    max_markets: int = Field(default=40, ge=1, le=120)
+
+
+class DailyTemplateAfterClosePayload(BaseModel):
+    results: dict[str, object] = Field(default_factory=dict)
+    status: str = "reviewed"
 
 
 @app.get("/health")
@@ -539,6 +556,10 @@ def day_trading_factory_summary(
     discovery_leads = [_day_trading_signal_payload(candidate, account_size) for candidate in candidates if _is_day_trading_source(candidate)]
     discovery_leads = [candidate for candidate in discovery_leads if candidate is not None]
     non_frozen_day_templates = [template for template in day_templates if not _is_frozen_template(template)]
+    latest_scan = research_store.latest_day_trading_scan() if hasattr(research_store, "latest_day_trading_scan") else None
+    latest_daily_queue = latest_scan.get("daily_paper_queue", []) if isinstance(latest_scan, dict) else []
+    latest_review_signals = latest_scan.get("review_signals", []) if isinstance(latest_scan, dict) else []
+    latest_unsuitable = latest_scan.get("unsuitable", []) if isinstance(latest_scan, dict) else []
     return {
         "schema": "day_trading_template_factory_v2",
         "mode": "manual",
@@ -555,14 +576,17 @@ def day_trading_factory_summary(
             "day_trading_templates": len(day_templates),
             "frozen_day_templates": len(frozen_day_templates),
             "non_frozen_day_templates": len(non_frozen_day_templates),
-            "eligible_review_signals": len(eligible),
-            "daily_paper_queue": len(paper_queue),
-            "unsuitable": len(unsuitable),
+            "template_ready_for_scan": len(paper_queue),
+            "eligible_review_signals": len(latest_review_signals),
+            "daily_paper_queue": len(latest_daily_queue),
+            "unsuitable": len(latest_unsuitable) if latest_scan else len(unsuitable),
             "overnight_or_swing_templates": len(overnight_templates),
         },
-        "daily_paper_queue": paper_queue,
-        "review_signals": review_signals,
-        "unsuitable": unsuitable[:review_limit],
+        "daily_paper_queue": latest_daily_queue,
+        "review_signals": latest_review_signals,
+        "unsuitable": (latest_unsuitable if latest_scan else unsuitable)[:review_limit],
+        "template_ready_without_scan": paper_queue,
+        "latest_scan": latest_scan,
         "template_library": {
             "day_trading_templates": [_template_queue_payload(template) for template in day_templates[:review_limit]],
             "needs_freeze_validation": [_template_queue_payload(template) for template in non_frozen_day_templates[:review_limit]],
@@ -576,6 +600,32 @@ def day_trading_factory_summary(
             "After close, review expected versus actual; do not change live/paper rules without another validation cycle.",
         ],
     }
+
+
+@app.post("/day-trading/scanner/start")
+async def start_daily_template_scanner(payload: DailyTemplateScannerPayload) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before starting the daily template scanner")
+    return await _run_daily_template_scanner(payload, api_token)
+
+
+@app.get("/day-trading/scanner/latest")
+def latest_daily_template_scan() -> dict[str, object]:
+    latest = research_store.latest_day_trading_scan()
+    if latest is None:
+        return {"status": "not_started", "latest_scan": None}
+    return {"status": latest.get("status", "unknown"), "latest_scan": latest}
+
+
+@app.post("/day-trading/scanner/{scan_id}/after-close")
+def record_daily_template_after_close(scan_id: int, payload: DailyTemplateAfterClosePayload) -> dict[str, object]:
+    if payload.status not in {"reviewed", "closed", "error"}:
+        raise HTTPException(status_code=400, detail="After-close status must be reviewed, closed, or error")
+    scan = research_store.update_day_trading_scan_results(scan_id, payload.results, payload.status)
+    if scan is None:
+        raise HTTPException(status_code=404, detail="Daily template scan not found")
+    return scan
 
 
 @app.get("/broker/summary")
@@ -1876,6 +1926,363 @@ def _day_trading_policy(paper_limit: int = 3, review_limit: int = 10, account_si
             "35% max margin use for the selected account",
         ],
         "execution_policy": "broker-safe previews and paper simulation only",
+    }
+
+
+async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_token: str) -> dict[str, object]:
+    trading_date = _scanner_trading_date(payload.trading_date)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    selected_markets = _selected_markets(payload.market_ids) if payload.market_ids else []
+    templates = [
+        template
+        for template in research_store.list_templates(limit=250)
+        if template.get("status") == "active" and _is_day_trading_template(template) and _is_frozen_template(template)
+    ]
+    provider = EODHDProvider(api_token)
+    bars_cache: dict[tuple[str, str], list[object]] = {}
+    review_candidates: list[dict[str, object]] = []
+    unsuitable: list[dict[str, object]] = []
+    no_setup: list[dict[str, object]] = []
+    scanned_pairs = 0
+    seen_pairs: set[tuple[int, str]] = set()
+    market_statuses: list[dict[str, object]] = []
+    for template in templates:
+        for market in _scanner_markets_for_template(template, selected_markets, payload.max_markets):
+            pair_key = (int(template.get("id") or 0), market.market_id)
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            scanned_pairs += 1
+            row = await _evaluate_daily_template_match(
+                provider,
+                template,
+                market,
+                trading_date,
+                payload.lookback_days,
+                payload.account_size,
+                product_mode,
+                bars_cache,
+            )
+            market_statuses.append(
+                {
+                    "template_id": template.get("id"),
+                    "template_name": template.get("name"),
+                    "market_id": market.market_id,
+                    "status": row.get("status"),
+                    "bar_count": row.get("bar_count", 0),
+                    "reason": row.get("unsuitable_reason") or row.get("no_setup_reason") or "",
+                }
+            )
+            if row.get("unsuitable"):
+                unsuitable.append(row)
+            elif row.get("setup_detected"):
+                review_candidates.append(row)
+            else:
+                no_setup.append(row)
+    review_signals = sorted(review_candidates, key=_daily_scan_signal_rank, reverse=True)[: payload.review_limit]
+    daily_paper_queue = [item for item in review_signals if item.get("paper_ready")][: payload.paper_limit]
+    scan_status = "ready_queue" if daily_paper_queue else "no_paper_setups"
+    config: dict[str, object] = {
+        "schema": "daily_template_scanner_config_v1",
+        "trading_date": trading_date.isoformat(),
+        "market_ids": [market.market_id for market in selected_markets],
+        "product_mode": product_mode,
+        "account_size": payload.account_size,
+        "paper_limit": payload.paper_limit,
+        "review_limit": payload.review_limit,
+        "lookback_days": payload.lookback_days,
+        "max_markets": payload.max_markets,
+        "template_count": len(templates),
+        "scanned_template_market_pairs": scanned_pairs,
+        "no_setup_count": len(no_setup),
+        "market_statuses": market_statuses,
+        "strategy_generation_allowed": False,
+    }
+    saved = research_store.save_day_trading_scan(
+        trading_date=trading_date.isoformat(),
+        status=scan_status,
+        account_size=payload.account_size,
+        product_mode=product_mode,
+        config=config,
+        daily_paper_queue=daily_paper_queue,
+        review_signals=review_signals,
+        unsuitable=unsuitable[: payload.review_limit],
+    )
+    return {
+        "schema": "daily_template_scanner_v1",
+        "scan_id": saved["id"],
+        "created_at": saved["created_at"],
+        "trading_date": trading_date.isoformat(),
+        "status": scan_status,
+        "mode": "manual",
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_template_library_only",
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "counts": {
+            "active_frozen_templates": len(templates),
+            "scanned_template_market_pairs": scanned_pairs,
+            "daily_paper_queue": len(daily_paper_queue),
+            "review_signals": len(review_signals),
+            "unsuitable": len(unsuitable),
+            "no_setup": len(no_setup),
+        },
+        "daily_paper_queue": daily_paper_queue,
+        "review_signals": review_signals,
+        "unsuitable": unsuitable[: payload.review_limit],
+        "no_setup_sample": no_setup[: min(10, payload.review_limit)],
+        "latest_scan": saved,
+    }
+
+
+def _scanner_trading_date(value: object) -> date:
+    if value in (None, ""):
+        return date.today()
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="trading_date must be YYYY-MM-DD") from exc
+
+
+def _scanner_markets_for_template(
+    template: dict[str, object],
+    selected_markets: list[MarketMapping],
+    max_markets: int,
+) -> list[MarketMapping]:
+    if selected_markets:
+        candidates = selected_markets
+    else:
+        scope = _template_match_scope(template)
+        market_type = _market_type_for_template(template)
+        if scope == "share_behavior" and market_type == "share":
+            candidates = [market for market in markets.list(enabled_only=True) if market.asset_class == "share"]
+        else:
+            market = markets.get(str(template.get("market_id") or _template_source_template(template).get("market_id") or ""))
+            candidates = [market] if market is not None else []
+    output: list[MarketMapping] = []
+    seen: set[str] = set()
+    for market in candidates:
+        if market.market_id in seen or not market.enabled or not market.eodhd_symbol:
+            continue
+        seen.add(market.market_id)
+        output.append(market)
+        if len(output) >= max_markets:
+            break
+    return output
+
+
+async def _evaluate_daily_template_match(
+    provider: EODHDProvider,
+    template: dict[str, object],
+    market: MarketMapping,
+    trading_date: date,
+    lookback_days: int,
+    account_size: float,
+    product_mode: str,
+    bars_cache: dict[tuple[str, str], list[object]],
+) -> dict[str, object]:
+    interval = "5min"
+    base = _daily_scan_base_payload(template, market, trading_date, interval, product_mode)
+    profile = _cost_profile_for_market(market)
+    profile_payload = profile.as_dict()
+    epic = str(market.ig_epic or profile_payload.get("epic") or "").strip()
+    if not epic:
+        return {**base, "status": "unsuitable", "unsuitable": True, "unsuitable_reason": "IG EPIC is missing; sync/bind IG costs before daily scanning."}
+    cache_key = (market.market_id, interval)
+    try:
+        bars = bars_cache.get(cache_key)
+        if bars is None:
+            start = (trading_date - timedelta(days=lookback_days)).isoformat()
+            bars = provider and await provider.historical_bars(market.eodhd_symbol, interval, start, trading_date.isoformat())
+            bars_cache[cache_key] = bars
+    except Exception as exc:
+        return {**base, "status": "unsuitable", "unsuitable": True, "unsuitable_reason": f"EODHD latest 5min bars failed: {_public_error(exc)}"}
+    typed_bars = [bar for bar in bars if hasattr(bar, "timestamp") and hasattr(bar, "close")]
+    minimum_bars = _daily_scanner_minimum_bars(template)
+    if len(typed_bars) < minimum_bars:
+        return {
+            **base,
+            "status": "no_setup_today",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "no_setup_reason": f"Need at least {minimum_bars} latest 5min bars for this frozen template.",
+        }
+    try:
+        signal_result = apply_frozen_template_rules(
+            typed_bars,
+            market.market_id,
+            interval,
+            profile,
+            _template_source_template(template),
+            family=str(template.get("strategy_family") or ""),
+            risk_profile="conservative",
+            target_regime=str(template.get("target_regime") or ""),
+            account_size=account_size,
+        )
+    except Exception as exc:
+        return {**base, "status": "unsuitable", "unsuitable": True, "bar_count": len(typed_bars), "unsuitable_reason": f"Frozen template application failed: {_public_error(exc)}"}
+    latest_bar = typed_bars[-1]
+    if signal_result.current_signal == 0:
+        return {
+            **base,
+            "status": "no_setup_today",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "latest_bar": _bar_payload(latest_bar),
+            "current_regime": signal_result.current_regime,
+            "target_regime": signal_result.target_regime,
+            "regime_allowed": signal_result.regime_allowed,
+            "no_setup_reason": "Frozen rules did not produce an active setup on the latest 5min bar.",
+        }
+    side = "BUY" if signal_result.current_signal > 0 else "SELL"
+    stop, limit = _daily_scanner_stop_limit(float(latest_bar.close), side, signal_result.parameters)
+    stake = _safe_number(signal_result.parameters.get("position_size")) or 1.0
+    preview = broker_order_preview(
+        _market_response(market),
+        profile_payload,
+        side,
+        stake,
+        account_size,
+        entry_price=float(latest_bar.close),
+        stop=stop,
+        limit=limit,
+    )
+    rule_violations = [str(item) for item in preview.get("rule_violations", []) if item]
+    terminal = _has_terminal_capital_blocker(rule_violations, {"violations": rule_violations})
+    if rule_violations:
+        return {
+            **base,
+            "status": "unsuitable",
+            "unsuitable": True,
+            "setup_detected": True,
+            "bar_count": len(typed_bars),
+            "latest_bar": _bar_payload(latest_bar),
+            "current_regime": signal_result.current_regime,
+            "target_regime": signal_result.target_regime,
+            "side": side,
+            "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
+            "broker_preview": preview,
+            "rule_violations": rule_violations,
+            "unsuitable_reason": _unsuitable_reason(rule_violations, {"violations": rule_violations}) if terminal else f"Broker preview failed: {', '.join(rule_violations)}.",
+        }
+    search_audit = _template_parameters(template).get("search_audit")
+    search_audit = search_audit if isinstance(search_audit, dict) else {}
+    backtest_summary = _summary_backtest(asdict(signal_result.backtest))
+    return {
+        **base,
+        "status": "paper_preview",
+        "unsuitable": False,
+        "setup_detected": True,
+        "paper_ready": True,
+        "eligible_for_review": True,
+        "bar_count": len(typed_bars),
+        "latest_bar": _bar_payload(latest_bar),
+        "current_regime": signal_result.current_regime,
+        "target_regime": signal_result.target_regime,
+        "regime_allowed": signal_result.regime_allowed,
+        "side": side,
+        "signal": signal_result.current_signal,
+        "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
+        "signal_age_bars": signal_result.signal_age_bars,
+        "broker_preview": preview,
+        "rule_violations": [],
+        "paper_readiness_score": search_audit.get("paper_readiness_score", template.get("robustness_score", 0)),
+        "net_profit": backtest_summary.get("net_profit", 0),
+        "oos_net_profit": _safe_number(_template_evidence(template).get("oos_net_profit"), backtest_summary.get("test_profit")),
+        "trade_count": int(_safe_number(backtest_summary.get("trade_count"))),
+        "cost_to_gross_ratio": backtest_summary.get("cost_to_gross_ratio", 0),
+        "backtest_window": backtest_summary,
+    }
+
+
+def _daily_scan_base_payload(
+    template: dict[str, object],
+    market: MarketMapping,
+    trading_date: date,
+    interval: str,
+    product_mode: str,
+) -> dict[str, object]:
+    return {
+        "source_type": "daily_frozen_template_scan",
+        "strategy_generation_allowed": False,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "broker_preview_only": True,
+        "frozen_rules": True,
+        "daily_rule": "apply_frozen_template_without_parameter_changes",
+        "trading_date": trading_date.isoformat(),
+        "template_id": template.get("id"),
+        "strategy_name": template.get("name"),
+        "market_id": market.market_id,
+        "market_name": market.name,
+        "market_type": market.asset_class,
+        "match_scope": _template_match_scope(template),
+        "interval": interval,
+        "product_mode": product_mode,
+        "strategy_family": template.get("strategy_family") or _template_source_template(template).get("family"),
+        "promotion_tier": template.get("promotion_tier"),
+        "readiness_status": template.get("readiness_status"),
+        "robustness_score": template.get("robustness_score", 0),
+        "warnings": _template_warning_codes(template),
+        "unsuitable": False,
+        "setup_detected": False,
+        "paper_ready": False,
+        "eligible_for_review": False,
+    }
+
+
+def _daily_scanner_minimum_bars(template: dict[str, object]) -> int:
+    parameters = _template_parameters(template)
+    lookback = max(2, _safe_int(parameters.get("lookback")) or 2)
+    max_hold = max(1, _safe_int(parameters.get("max_hold_bars")) or 1)
+    return max(lookback + max_hold + 2, 20)
+
+
+def _daily_scanner_stop_limit(entry: float, side: str, parameters: dict[str, object]) -> tuple[float | None, float | None]:
+    stop_bps = _safe_number(parameters.get("stop_loss_bps")) or 50.0
+    target_bps = _safe_number(parameters.get("take_profit_bps")) or 80.0
+    if side == "SELL":
+        return round(entry * (1 + stop_bps / 10_000), 8), round(entry * (1 - target_bps / 10_000), 8)
+    return round(entry * (1 - stop_bps / 10_000), 8), round(entry * (1 + target_bps / 10_000), 8)
+
+
+def _daily_signal_state(previous_signal: int, current_signal: int) -> str:
+    if current_signal == 0:
+        return "flat"
+    if previous_signal == 0:
+        return "new_entry"
+    if previous_signal == current_signal:
+        return "active_hold"
+    return "reversal"
+
+
+def _daily_scan_signal_rank(signal: dict[str, object]) -> tuple[float, ...]:
+    state_rank = {"new_entry": 3, "reversal": 2, "active_hold": 1}.get(str(signal.get("signal_state") or ""), 0)
+    preview = signal.get("broker_preview") if isinstance(signal.get("broker_preview"), dict) else {}
+    margin = _safe_number(preview.get("estimated_margin"))
+    account_size = _safe_number(preview.get("account_size")) or WORKING_ACCOUNT_SIZE_GBP
+    margin_headroom = 1.0 - min(1.0, margin / max(1.0, account_size * 0.35))
+    return (
+        state_rank,
+        _safe_number(signal.get("paper_readiness_score")),
+        _safe_number(signal.get("oos_net_profit")),
+        _safe_number(signal.get("robustness_score")),
+        margin_headroom,
+        -_safe_number(signal.get("cost_to_gross_ratio")),
+        -_safe_number(signal.get("signal_age_bars")),
+    )
+
+
+def _bar_payload(bar: object) -> dict[str, object]:
+    return {
+        "timestamp": getattr(bar, "timestamp", None).isoformat() if getattr(bar, "timestamp", None) is not None else "",
+        "open": round(_safe_number(getattr(bar, "open", None)), 8),
+        "high": round(_safe_number(getattr(bar, "high", None)), 8),
+        "low": round(_safe_number(getattr(bar, "low", None)), 8),
+        "close": round(_safe_number(getattr(bar, "close", None)), 8),
+        "volume": round(_safe_number(getattr(bar, "volume", None)), 4),
     }
 
 

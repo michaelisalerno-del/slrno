@@ -112,10 +112,10 @@ def test_day_trading_factory_summary_uses_frozen_templates_not_candidates(monkey
 
     assert summary["live_ordering_enabled"] is False
     assert summary["strategy_generation_allowed"] is False
-    assert summary["counts"]["daily_paper_queue"] == 1
-    assert summary["daily_paper_queue"][0]["source_type"] == "frozen_template"
-    assert summary["daily_paper_queue"][0]["strategy_name"] == "liquid_midcap_pullback"
-    assert summary["daily_paper_queue"][0]["order_placement"] == "disabled"
+    assert summary["counts"]["daily_paper_queue"] == 0
+    assert summary["counts"]["template_ready_for_scan"] == 1
+    assert summary["template_ready_without_scan"][0]["strategy_name"] == "liquid_midcap_pullback"
+    assert summary["template_ready_without_scan"][0]["order_placement"] == "disabled"
     assert summary["counts"]["discovery_leads_needing_freeze"] == 1
     assert summary["discovery_leads_not_live"][0]["strategy_name"] == "research_lead_not_live"
     assert summary["counts"]["non_frozen_day_templates"] == 1

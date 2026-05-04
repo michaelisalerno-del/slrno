@@ -180,6 +180,26 @@ class ResearchStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_templates_status ON strategy_templates(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_templates_market ON strategy_templates(market_id, interval)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_templates_fingerprint ON strategy_templates(source_fingerprint)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS day_trading_scans (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  created_at TEXT NOT NULL,
+                  trading_date TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  account_size REAL NOT NULL,
+                  product_mode TEXT NOT NULL,
+                  config_json TEXT NOT NULL,
+                  queue_json TEXT NOT NULL,
+                  review_json TEXT NOT NULL,
+                  unsuitable_json TEXT NOT NULL,
+                  results_json TEXT NOT NULL DEFAULT '{}',
+                  error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_day_trading_scans_created ON day_trading_scans(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_day_trading_scans_date ON day_trading_scans(trading_date)")
 
     def _add_column(self, conn: sqlite3.Connection, table: str, name: str, definition: str) -> None:
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -924,6 +944,105 @@ class ResearchStore:
             )
         return self.get_template(template_id)
 
+    def save_day_trading_scan(
+        self,
+        *,
+        trading_date: str,
+        status: str,
+        account_size: float,
+        product_mode: str,
+        config: dict[str, object],
+        daily_paper_queue: list[dict[str, object]],
+        review_signals: list[dict[str, object]],
+        unsuitable: list[dict[str, object]],
+        results: dict[str, object] | None = None,
+        error: str = "",
+    ) -> dict[str, object]:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO day_trading_scans(
+                  created_at, trading_date, status, account_size, product_mode, config_json,
+                  queue_json, review_json, unsuitable_json, results_json, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _now(),
+                    trading_date,
+                    status,
+                    float(account_size),
+                    product_mode,
+                    json.dumps(config, sort_keys=True, default=str),
+                    json.dumps(daily_paper_queue, sort_keys=True, default=str),
+                    json.dumps(review_signals, sort_keys=True, default=str),
+                    json.dumps(unsuitable, sort_keys=True, default=str),
+                    json.dumps(results or {}, sort_keys=True, default=str),
+                    error,
+                ),
+            )
+            scan_id = int(cursor.lastrowid)
+        scan = self.get_day_trading_scan(scan_id)
+        if scan is None:
+            raise RuntimeError("Saved day trading scan could not be reloaded")
+        return scan
+
+    def get_day_trading_scan(self, scan_id: int) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, created_at, trading_date, status, account_size, product_mode, config_json,
+                       queue_json, review_json, unsuitable_json, results_json, error
+                FROM day_trading_scans
+                WHERE id = ?
+                """,
+                (scan_id,),
+            ).fetchone()
+        return _day_trading_scan_from_row(row) if row is not None else None
+
+    def latest_day_trading_scan(self) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, created_at, trading_date, status, account_size, product_mode, config_json,
+                       queue_json, review_json, unsuitable_json, results_json, error
+                FROM day_trading_scans
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return _day_trading_scan_from_row(row) if row is not None else None
+
+    def list_day_trading_scans(self, limit: int = 20) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, trading_date, status, account_size, product_mode, config_json,
+                       queue_json, review_json, unsuitable_json, results_json, error
+                FROM day_trading_scans
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [_day_trading_scan_from_row(row) for row in rows]
+
+    def update_day_trading_scan_results(
+        self,
+        scan_id: int,
+        results: dict[str, object],
+        status: str = "reviewed",
+    ) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM day_trading_scans WHERE id = ?", (scan_id,)).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE day_trading_scans SET status = ?, results_json = ? WHERE id = ?",
+                (status, json.dumps(results, sort_keys=True, default=str), scan_id),
+            )
+        return self.get_day_trading_scan(scan_id)
+
 
 def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:
     parameters = evaluation.candidate.parameters
@@ -1328,6 +1447,33 @@ def _template_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, objec
     }
 
 
+def _day_trading_scan_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
+    config = _json_dict(row[6])
+    daily_paper_queue = _json_list(row[7])
+    review_signals = _json_list(row[8])
+    unsuitable = _json_list(row[9])
+    results = _json_dict(row[10])
+    return {
+        "id": row[0],
+        "created_at": row[1],
+        "trading_date": row[2],
+        "status": row[3],
+        "account_size": row[4],
+        "product_mode": row[5],
+        "config": config,
+        "daily_paper_queue": daily_paper_queue,
+        "review_signals": review_signals,
+        "unsuitable": unsuitable,
+        "after_close_results": results,
+        "error": row[11],
+        "counts": {
+            "daily_paper_queue": len(daily_paper_queue),
+            "review_signals": len(review_signals),
+            "unsuitable": len(unsuitable),
+        },
+    }
+
+
 def _template_status(value: object) -> str:
     status = _clean_string(value or "active")
     return status if status in {"active", "paused", "archived"} else "active"
@@ -1347,6 +1493,14 @@ def _json_dict(value: object) -> dict[str, object]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _json_list(value: object) -> list[dict[str, object]]:
+    try:
+        decoded = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
 
 
 def _clean_string(value: object) -> str:

@@ -85,6 +85,17 @@ export function getDayTradingFactorySummary(params = {}) {
   return request(`/day-trading/factory/summary${suffix}`);
 }
 
+export function startDailyTemplateScanner(payload) {
+  return request("/day-trading/scanner/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getLatestDailyTemplateScan() {
+  return request("/day-trading/scanner/latest");
+}
+
 export function getBrokerSummary() {
   return request("/broker/summary");
 }

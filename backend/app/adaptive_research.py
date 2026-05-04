@@ -136,6 +136,19 @@ class AdaptiveSearchResult:
     regime_scan: dict[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class FrozenTemplateSignalResult:
+    parameters: dict[str, object]
+    signals: tuple[int, ...]
+    current_signal: int
+    previous_signal: int
+    signal_age_bars: int
+    current_regime: str
+    target_regime: str
+    regime_allowed: bool
+    backtest: BacktestResult
+
+
 def available_research_engines() -> list[dict[str, object]]:
     return list(ENGINE_DEFINITIONS)
 
@@ -548,6 +561,69 @@ def _frozen_validation_mode(repair_mode: str, source_template: dict[str, object]
     return repair_mode == "frozen_validation" and bool(source_template.get("parameters"))
 
 
+def apply_frozen_template_rules(
+    bars: list[OHLCBar],
+    market_id: str,
+    timeframe: str,
+    cost_profile: IGCostProfile,
+    source_template: dict[str, object],
+    *,
+    family: str = "",
+    risk_profile: str = "balanced",
+    target_regime: str | None = None,
+    account_size: float = WORKING_ACCOUNT_SIZE_GBP,
+) -> FrozenTemplateSignalResult:
+    if len(bars) < 2:
+        raise ValueError("At least two bars are required to apply a frozen template")
+    template = _source_template(source_template)
+    strategy_family = family or str(template.get("family") or "intraday_trend")
+    regime_target = _target_regime(target_regime or template.get("target_regime"))
+    parameters = _frozen_parameters(template, strategy_family, risk_profile, regime_target)
+    parameters = _apply_day_trading_contract(
+        parameters,
+        strategy_family,
+        timeframe,
+        AdaptiveSearchConfig(day_trading_mode=True, force_flat_before_close=True, account_size=account_size),
+    )
+    signals = _generate_signals(bars, strategy_family, parameters)
+    market_regime, regime_by_date = market_regime_context(bars)
+    current_regime = str(market_regime.get("current_regime") or "unknown")
+    if regime_target:
+        signals = [
+            signal if regime_by_date.get(bar.timestamp.date(), "unknown") == regime_target else 0
+            for bar, signal in zip(bars, signals)
+        ]
+    current_signal = signals[-1] if signals else 0
+    previous_signal = signals[-2] if len(signals) >= 2 else 0
+    backtest_config = replace(
+        backtest_config_from_profile(cost_profile, starting_cash=account_size),
+        position_size=float(parameters.get("position_size") or 1.0),
+    )
+    backtest = run_vector_backtest(bars, signals, backtest_config)
+    output_parameters: dict[str, object] = {
+        **parameters,
+        "market_id": market_id,
+        "timeframe": timeframe,
+        "family": strategy_family,
+        "target_regime": regime_target or "",
+        "day_trading_mode": True,
+        "holding_period": "intraday",
+        "force_flat_before_close": True,
+        "no_overnight": True,
+    }
+    return FrozenTemplateSignalResult(
+        parameters=output_parameters,
+        signals=tuple(signals),
+        current_signal=current_signal,
+        previous_signal=previous_signal,
+        signal_age_bars=_signal_age(signals),
+        current_regime=current_regime,
+        target_regime=regime_target or "",
+        regime_allowed=not regime_target or current_regime == regime_target,
+        backtest=backtest,
+    )
+
+
 def _frozen_parameters(
     source_template: dict[str, object],
     family: str,
@@ -567,6 +643,18 @@ def _frozen_parameters(
     if source_template.get("source_id") is not None:
         parameters["frozen_template_source_id"] = str(source_template["source_id"])
     return parameters
+
+
+def _signal_age(signals: list[int]) -> int:
+    if not signals or signals[-1] == 0:
+        return 0
+    latest = signals[-1]
+    age = 0
+    for signal in reversed(signals):
+        if signal != latest:
+            break
+        age += 1
+    return age
 
 
 def _coerce_frozen_parameter(key: str, value: object, fallback: object) -> float | int | str:
