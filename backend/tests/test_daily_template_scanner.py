@@ -269,6 +269,10 @@ def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_pat
     assert run["status"] == "running"
     assert run["config"]["day_trading_mode"] is True
     assert run["config"]["force_flat_before_close"] is True
+    assert run["config"]["search_budget"] == main.TWO_VCPU_MIDCAP_SEARCH_BUDGET
+    assert run["config"]["diagnostic_limit"] == main.TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT
+    assert run["config"]["include_market_context"] is False
     assert run["config"]["pipeline"]["design_id"] == "liquid_uk_midcap_trend_pullback"
+    assert run["config"]["pipeline"]["server_profile"] == "guided_midcap_2vcpu_profile_v1"
     assert run["config"]["pipeline"]["daily_mode_source"] == "active_frozen_template_library_only"
     assert run["config"]["strategy_families"] == ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"]

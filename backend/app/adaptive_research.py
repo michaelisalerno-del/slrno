@@ -125,6 +125,7 @@ class AdaptiveSearchConfig:
     force_flat_before_close: bool = False
     paper_queue_limit: int = 3
     review_queue_limit: int = 10
+    diagnostic_limit: int | None = None
     seed: int = 7
 
 
@@ -147,6 +148,16 @@ class FrozenTemplateSignalResult:
     target_regime: str
     regime_allowed: bool
     backtest: BacktestResult
+
+
+@dataclass(frozen=True)
+class _AdaptiveTrialWork:
+    evaluation: CandidateEvaluation
+    signals: tuple[int, ...]
+    backtest_config: BacktestConfig
+    stress: BacktestResult
+    family: str
+    target_regime: str | None
 
 
 def available_research_engines() -> list[dict[str, object]]:
@@ -185,11 +196,12 @@ def run_adaptive_search(
         compound_position_size=False,
     )
     folds = _adaptive_folds(len(bars))
-    evaluations: list[CandidateEvaluation] = []
+    trial_work: list[_AdaptiveTrialWork] = []
     market_regime, regime_by_date = market_regime_context(bars)
     eligible_regimes = eligible_specialist_regimes(bars)
     target_regime = _target_regime(config.target_regime or frozen_template.get("target_regime"))
     reference_price = _latest_reference_price(bars)
+    fast_diagnostics = _fast_diagnostic_scan_enabled(config, frozen_validation)
 
     for trial_index in range(budget):
         family = families[trial_index % len(families)]
@@ -217,29 +229,37 @@ def run_adaptive_search(
         probabilities = _signals_to_probabilities(signals)
         metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
         score = balanced_score(backtest, fold_results, stress, backtest_config)
-        pattern_analysis = analyze_strategy_patterns(
-            bars,
-            signals,
-            backtest_config,
-            backtest,
-            target_regime=target_regime,
-            market_regime=market_regime,
-            regime_by_date=regime_by_date,
-        )
-        calendar_analysis = analyze_calendar_strategy_patterns(
-            bars,
-            signals,
-            backtest_config,
-            backtest,
-            market_context=config.market_context,
-            strategy_family=family,
-        )
+        if fast_diagnostics:
+            pattern_analysis = _deferred_pattern_analysis(market_regime, target_regime)
+            calendar_analysis = _deferred_calendar_analysis(config.market_context)
+            diagnostic_warnings = ("diagnostics_deferred_fast_scan",)
+        else:
+            pattern_analysis = analyze_strategy_patterns(
+                bars,
+                signals,
+                backtest_config,
+                backtest,
+                target_regime=target_regime,
+                market_regime=market_regime,
+                regime_by_date=regime_by_date,
+            )
+            calendar_analysis = analyze_calendar_strategy_patterns(
+                bars,
+                signals,
+                backtest_config,
+                backtest,
+                market_context=config.market_context,
+                strategy_family=family,
+            )
+            diagnostic_warnings = ()
         warnings = tuple(
             sorted(
                 set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
                     str(warning) for warning in pattern_analysis.get("warnings", [])
                 ).union(str(warning) for warning in calendar_analysis.get("warnings", [])).union(
                     _day_trading_warnings(backtest, family, timeframe, parameters)
+                ).union(
+                    diagnostic_warnings
                 )
             )
         )
@@ -287,16 +307,23 @@ def run_adaptive_search(
             parameters=parameters,
             probabilities=probabilities,
         )
-        evaluations.append(
-            CandidateEvaluation(
-                candidate=candidate,
-                metrics=metrics,
-                backtest=backtest,
-                fold_results=fold_results,
-                robustness_score=score,
-                passed=len(warnings) == 0,
-                warnings=warnings,
-                research_only=True,
+        trial_work.append(
+            _AdaptiveTrialWork(
+                evaluation=CandidateEvaluation(
+                    candidate=candidate,
+                    metrics=metrics,
+                    backtest=backtest,
+                    fold_results=fold_results,
+                    robustness_score=score,
+                    passed=len(warnings) == 0,
+                    warnings=warnings,
+                    research_only=True,
+                ),
+                signals=tuple(signals),
+                backtest_config=backtest_config,
+                stress=stress,
+                family=family,
+                target_regime=target_regime,
             )
         )
 
@@ -332,29 +359,37 @@ def run_adaptive_search(
                 probabilities = _signals_to_probabilities(signals)
                 metrics = classification_metrics(labels, probabilities, top_quantile=0.2)
                 score = balanced_score(backtest, fold_results, stress, backtest_config)
-                pattern_analysis = analyze_strategy_patterns(
-                    bars,
-                    signals,
-                    backtest_config,
-                    backtest,
-                    target_regime=target_regime,
-                    market_regime=market_regime,
-                    regime_by_date=regime_by_date,
-                )
-                calendar_analysis = analyze_calendar_strategy_patterns(
-                    bars,
-                    signals,
-                    backtest_config,
-                    backtest,
-                    market_context=config.market_context,
-                    strategy_family=family,
-                )
+                if fast_diagnostics:
+                    pattern_analysis = _deferred_pattern_analysis(market_regime, target_regime)
+                    calendar_analysis = _deferred_calendar_analysis(config.market_context)
+                    diagnostic_warnings = ("diagnostics_deferred_fast_scan",)
+                else:
+                    pattern_analysis = analyze_strategy_patterns(
+                        bars,
+                        signals,
+                        backtest_config,
+                        backtest,
+                        target_regime=target_regime,
+                        market_regime=market_regime,
+                        regime_by_date=regime_by_date,
+                    )
+                    calendar_analysis = analyze_calendar_strategy_patterns(
+                        bars,
+                        signals,
+                        backtest_config,
+                        backtest,
+                        market_context=config.market_context,
+                        strategy_family=family,
+                    )
+                    diagnostic_warnings = ()
                 warnings = tuple(
                     sorted(
                         set(_warnings(backtest, fold_results, stress, backtest_config, family, cost_profile)).union(
                             str(warning) for warning in pattern_analysis.get("warnings", [])
                         ).union(str(warning) for warning in calendar_analysis.get("warnings", [])).union(
                             _day_trading_warnings(backtest, family, timeframe, parameters)
+                        ).union(
+                            diagnostic_warnings
                         )
                     )
                 )
@@ -395,20 +430,37 @@ def run_adaptive_search(
                     parameters=parameters,
                     probabilities=probabilities,
                 )
-                evaluations.append(
-                    CandidateEvaluation(
-                        candidate=candidate,
-                        metrics=metrics,
-                        backtest=backtest,
-                        fold_results=fold_results,
-                        robustness_score=score,
-                        passed=len(warnings) == 0,
-                        warnings=warnings,
-                        research_only=True,
+                trial_work.append(
+                    _AdaptiveTrialWork(
+                        evaluation=CandidateEvaluation(
+                            candidate=candidate,
+                            metrics=metrics,
+                            backtest=backtest,
+                            fold_results=fold_results,
+                            robustness_score=score,
+                            passed=len(warnings) == 0,
+                            warnings=warnings,
+                            research_only=True,
+                        ),
+                        signals=tuple(signals),
+                        backtest_config=backtest_config,
+                        stress=stress,
+                        family=family,
+                        target_regime=target_regime,
                     )
                 )
                 regime_scan_trial_count += 1
 
+    if fast_diagnostics:
+        trial_work = _complete_fast_diagnostics(
+            trial_work,
+            bars,
+            market_regime,
+            regime_by_date,
+            config,
+            cost_profile,
+        )
+    evaluations = [work.evaluation for work in trial_work]
     total_trials = len(evaluations)
     ranked = _annotate_evaluations(tuple(evaluations), total_trials, tuple(families), config, cost_profile)
     regime_scan = {
@@ -420,6 +472,141 @@ def run_adaptive_search(
         "target_regime": target_regime,
     }
     return AdaptiveSearchResult(ranked, _pareto(ranked), cost_profile, regime_scan)
+
+
+def _fast_diagnostic_scan_enabled(config: AdaptiveSearchConfig, frozen_validation: bool) -> bool:
+    if frozen_validation:
+        return False
+    if config.diagnostic_limit is None:
+        return False
+    try:
+        return int(config.diagnostic_limit) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _complete_fast_diagnostics(
+    trial_work: list[_AdaptiveTrialWork],
+    bars: list[OHLCBar],
+    market_regime: dict[str, object],
+    regime_by_date: dict[date, str],
+    config: AdaptiveSearchConfig,
+    cost_profile: IGCostProfile,
+) -> list[_AdaptiveTrialWork]:
+    if not trial_work:
+        return []
+    diagnostic_limit = max(1, min(len(trial_work), int(config.diagnostic_limit or len(trial_work))))
+    selected_indexes = _fast_diagnostic_indexes(trial_work, diagnostic_limit)
+    output: list[_AdaptiveTrialWork] = []
+    for index, work in enumerate(trial_work):
+        if index not in selected_indexes:
+            output.append(work)
+            continue
+        evaluation = work.evaluation
+        pattern_analysis = analyze_strategy_patterns(
+            bars,
+            list(work.signals),
+            work.backtest_config,
+            evaluation.backtest,
+            target_regime=work.target_regime,
+            market_regime=market_regime,
+            regime_by_date=regime_by_date,
+        )
+        calendar_analysis = analyze_calendar_strategy_patterns(
+            bars,
+            list(work.signals),
+            work.backtest_config,
+            evaluation.backtest,
+            market_context=config.market_context,
+            strategy_family=work.family,
+        )
+        warnings = tuple(
+            sorted(
+                set(_warnings(evaluation.backtest, evaluation.fold_results, work.stress, work.backtest_config, work.family, cost_profile))
+                .union(str(warning) for warning in pattern_analysis.get("warnings", []))
+                .union(str(warning) for warning in calendar_analysis.get("warnings", []))
+                .union(_day_trading_warnings(evaluation.backtest, work.family, str(evaluation.candidate.parameters.get("timeframe") or ""), evaluation.candidate.parameters))
+            )
+        )
+        parameters = {
+            **evaluation.candidate.parameters,
+            "bar_pattern_analysis": pattern_analysis,
+            "calendar_context_analysis": calendar_analysis,
+            "fast_scan_diagnostics": "completed",
+        }
+        parameters.pop("diagnostics_deferred_reason", None)
+        output.append(
+            replace(
+                work,
+                evaluation=replace(
+                    evaluation,
+                    candidate=replace(evaluation.candidate, parameters=parameters),
+                    warnings=warnings,
+                    passed=len(warnings) == 0,
+                ),
+            )
+        )
+    return output
+
+
+def _fast_diagnostic_indexes(trial_work: list[_AdaptiveTrialWork], diagnostic_limit: int) -> set[int]:
+    ranked = sorted(
+        enumerate(trial_work),
+        key=lambda item: _fast_diagnostic_rank(item[1].evaluation),
+        reverse=True,
+    )
+    return {index for index, _work in ranked[:diagnostic_limit]}
+
+
+def _fast_diagnostic_rank(evaluation: CandidateEvaluation) -> tuple[float, ...]:
+    stress_net_profit = _safe_float(evaluation.candidate.parameters.get("stress_net_profit"))
+    evidence = evaluation.candidate.parameters.get("evidence_profile")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    return (
+        1.0 if evaluation.backtest.test_profit > 0 and stress_net_profit > 0 else 0.0,
+        1.0 if _safe_float(evidence.get("oos_net_profit")) > 0 else 0.0,
+        _positive_fold_rate(evaluation.fold_results),
+        evaluation.robustness_score,
+        evaluation.backtest.test_profit,
+        stress_net_profit,
+        evaluation.backtest.net_profit,
+        -evaluation.backtest.max_drawdown,
+    )
+
+
+def _deferred_pattern_analysis(market_regime: dict[str, object], target_regime: str | None) -> dict[str, object]:
+    return {
+        "schema": "bar_pattern_analysis_v1",
+        "analysis_status": "deferred_fast_scan",
+        "market_regime": {
+            "current_regime": market_regime.get("current_regime", "unknown"),
+            "regime_counts": market_regime.get("regime_counts", {}),
+        },
+        "target_regime": target_regime,
+        "allowed_regimes": [target_regime] if target_regime else [],
+        "blocked_regimes": [],
+        "regime_verdict": "deferred_fast_scan",
+        "regime_gated_backtest": {},
+        "regime_trade_evidence": {"schema": "regime_trade_evidence_v1", "available": False, "reason": "deferred_fast_scan"},
+        "regime_summary": [],
+        "monthly_summary": [],
+        "session_summary": [],
+        "trade_summary": {},
+        "warnings": ["diagnostics_deferred_fast_scan"],
+    }
+
+
+def _deferred_calendar_analysis(market_context: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema": "calendar_context_analysis_v1",
+        "analysis_status": "deferred_fast_scan",
+        "available": bool(market_context.get("available")) if isinstance(market_context, dict) else False,
+        "event_dates": [],
+        "event_window_dates": [],
+        "policy_backtests": [],
+        "recommended_policy": "deferred_fast_scan",
+        "warnings": ["diagnostics_deferred_fast_scan"],
+    }
 
 
 def balanced_score(
@@ -1175,6 +1362,9 @@ def _annotate_evaluations(
                 "force_flat_before_close": bool(evaluation.candidate.parameters.get("force_flat_before_close")),
                 "paper_queue_limit": max(1, min(5, _safe_int(config.paper_queue_limit) or 3)),
                 "review_queue_limit": max(1, min(20, _safe_int(config.review_queue_limit) or 10)),
+                "diagnostic_limit": _safe_int(config.diagnostic_limit) if config.diagnostic_limit is not None else None,
+                "fast_scan_diagnostics": evaluation.candidate.parameters.get("fast_scan_diagnostics")
+                or ("deferred" if "diagnostics_deferred_fast_scan" in evaluation.warnings else "full"),
                 "frozen_validation": bool(evaluation.candidate.parameters.get("frozen_template_validation")),
                 "source_template_name": (evaluation.candidate.parameters.get("source_template") or {}).get("name")
                 if isinstance(evaluation.candidate.parameters.get("source_template"), dict)
@@ -1329,6 +1519,8 @@ def _promotion_tier(
     capital_violations = set(str(item) for item in capital_profile.get("violations", []) if item)
     if "ig_minimum_margin_too_large_for_account" in capital_violations:
         return "reject"
+    if "diagnostics_deferred_fast_scan" in set(evaluation.warnings):
+        return "reject"
     viable_research_lead = (
         backtest.net_profit > 0
         and backtest.test_profit > 0
@@ -1456,6 +1648,8 @@ def _cost_aware_score(
         score = min(score, 42.0 + 30.0 * capital_component)
     if "ig_minimum_margin_too_large_for_account" in set(str(item) for item in capital_profile.get("violations", []) if item):
         score = min(score, 24.0)
+    if "diagnostics_deferred_fast_scan" in set(evaluation.warnings):
+        score = min(score, 38.0)
     if capital_mode:
         score = min(score, 35.0 + 55.0 * capital_component)
     return round(_clamp(score, -100.0, 100.0), 4)

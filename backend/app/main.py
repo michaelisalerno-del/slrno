@@ -93,6 +93,11 @@ FMP_DAILY_BAR_SYMBOLS = {
     "FTSE100": "^FTSE",
 }
 PRODUCT_MODES = {"spread_bet", "cfd"}
+TWO_VCPU_MIDCAP_DISCOVERY_LIMIT = 24
+TWO_VCPU_MIDCAP_MARKET_CAP = 3
+TWO_VCPU_MIDCAP_SEARCH_BUDGET = 36
+TWO_VCPU_MIDCAP_REGIME_BUDGET = 6
+TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT = 18
 MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
     "liquid_uk_midcap_trend_pullback": {
         "id": "liquid_uk_midcap_trend_pullback",
@@ -111,8 +116,8 @@ MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
         "run_defaults": {
             "interval": "5min",
             "search_preset": "balanced",
-            "search_budget": 54,
-            "regime_scan_budget_per_regime": 12,
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
             "objective": "profit_first",
             "risk_profile": "conservative",
             "cost_stress_multiplier": 2.5,
@@ -145,8 +150,8 @@ MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
         "run_defaults": {
             "interval": "5min",
             "search_preset": "balanced",
-            "search_budget": 54,
-            "regime_scan_budget_per_regime": 12,
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
             "objective": "profit_first",
             "risk_profile": "conservative",
             "cost_stress_multiplier": 2.75,
@@ -179,8 +184,8 @@ MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
         "run_defaults": {
             "interval": "5min",
             "search_preset": "balanced",
-            "search_budget": 54,
-            "regime_scan_budget_per_regime": 12,
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
             "objective": "profit_first",
             "risk_profile": "conservative",
             "cost_stress_multiplier": 3.0,
@@ -213,8 +218,8 @@ MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
         "run_defaults": {
             "interval": "5min",
             "search_preset": "balanced",
-            "search_budget": 54,
-            "regime_scan_budget_per_regime": 12,
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
             "objective": "profit_first",
             "risk_profile": "conservative",
             "cost_stress_multiplier": 3.25,
@@ -247,8 +252,8 @@ MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
         "run_defaults": {
             "interval": "5min",
             "search_preset": "balanced",
-            "search_budget": 54,
-            "regime_scan_budget_per_regime": 12,
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
             "objective": "profit_first",
             "risk_profile": "conservative",
             "cost_stress_multiplier": 3.0,
@@ -323,6 +328,8 @@ class ResearchRunPayload(BaseModel):
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = True
     regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
+    diagnostic_limit: int | None = Field(default=None, ge=1, le=500)
+    include_market_context: bool = True
     target_regime: str | None = None
     excluded_months: list[str] = Field(default_factory=list)
     repair_mode: str = "standard"
@@ -389,7 +396,7 @@ class DailyTemplateScannerPayload(BaseModel):
     paper_limit: int = Field(default=3, ge=1, le=5)
     review_limit: int = Field(default=10, ge=1, le=20)
     lookback_days: int = Field(default=10, ge=1, le=30)
-    max_markets: int = Field(default=40, ge=1, le=120)
+    max_markets: int = Field(default=24, ge=1, le=120)
 
 
 class DailyTemplateAfterClosePayload(BaseModel):
@@ -402,13 +409,13 @@ class MidcapTemplatePipelinePayload(BaseModel):
     country: str = "UK"
     product_mode: str = "spread_bet"
     account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
-    limit: int = Field(default=40, ge=1, le=120)
-    max_markets: int = Field(default=6, ge=1, le=20)
+    limit: int = Field(default=TWO_VCPU_MIDCAP_DISCOVERY_LIMIT, ge=1, le=120)
+    max_markets: int = Field(default=TWO_VCPU_MIDCAP_MARKET_CAP, ge=1, le=20)
     min_market_cap: float = Field(default=DEFAULT_MIN_MARKET_CAP, ge=0)
     max_market_cap: float = Field(default=DEFAULT_MAX_MARKET_CAP, ge=0)
     min_volume: float = Field(default=DEFAULT_MIN_VOLUME, ge=0)
     max_spread_bps: float = Field(default=DEFAULT_MAX_SPREAD_BPS, ge=1)
-    start: str = "2024-01-01"
+    start: str = "2025-01-01"
     end: str = Field(default_factory=lambda: date.today().isoformat())
     auto_install: bool = True
     auto_sync_costs: bool = True
@@ -1477,7 +1484,15 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             market_status["history_expanded"] = True
         market_statuses.append(market_status)
         persist_status()
-        market_status["market_context"] = await _market_context_summary_for_range(start, payload.end, market_id=market.market_id, limit=8)
+        if payload.include_market_context:
+            market_status["market_context"] = await _market_context_summary_for_range(start, payload.end, market_id=market.market_id, limit=8)
+        else:
+            market_status["market_context"] = _market_context_unavailable(
+                "Skipped by the fast 2 vCPU guided scan profile.",
+                start,
+                payload.end,
+                market_id=market.market_id,
+            )
         persist_status()
         if not market.enabled:
             _mark_market_failed(market_status, market_failures, market, f"Market {market.market_id} is disabled")
@@ -1611,6 +1626,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         cost_stress_multiplier=max(1.0, payload.cost_stress_multiplier),
                         include_regime_scans=payload.include_regime_scans,
                         regime_scan_budget_per_regime=payload.regime_scan_budget_per_regime,
+                        diagnostic_limit=payload.diagnostic_limit,
                         target_regime=payload.target_regime,
                         repair_mode=payload.repair_mode,
                         account_size=payload.account_size,
@@ -1970,6 +1986,8 @@ def _research_run_config(
         "cost_stress_multiplier": payload.cost_stress_multiplier,
         "include_regime_scans": payload.include_regime_scans,
         "regime_scan_budget_per_regime": payload.regime_scan_budget_per_regime,
+        "diagnostic_limit": payload.diagnostic_limit,
+        "include_market_context": payload.include_market_context,
         "target_regime": payload.target_regime,
         "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
         "repair_mode": payload.repair_mode,
@@ -2292,6 +2310,35 @@ def _validate_midcap_design_country(design: dict[str, object], country: str) -> 
     return requested_country
 
 
+def _midcap_pipeline_market_cap(requested_max_markets: int) -> int:
+    return max(1, min(TWO_VCPU_MIDCAP_MARKET_CAP, int(requested_max_markets or TWO_VCPU_MIDCAP_MARKET_CAP)))
+
+
+def _midcap_pipeline_discovery_limit(requested_limit: int, run_market_cap: int) -> int:
+    target = max(TWO_VCPU_MIDCAP_DISCOVERY_LIMIT, run_market_cap * 8)
+    return max(run_market_cap, min(int(requested_limit or target), target))
+
+
+def _midcap_pipeline_server_profile(
+    requested_max_markets: int,
+    requested_limit: int,
+    run_market_cap: int,
+    discovery_limit: int,
+) -> dict[str, object]:
+    return {
+        "schema": "guided_midcap_2vcpu_profile_v1",
+        "reason": "Keep guided scans responsive on the 2 vCPU server; use repair/freeze for deeper follow-up once a lead is worth it.",
+        "requested_max_markets": requested_max_markets,
+        "run_market_cap": run_market_cap,
+        "requested_discovery_limit": requested_limit,
+        "discovery_limit": discovery_limit,
+        "search_budget_per_market": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+        "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
+        "diagnostic_limit_per_market": TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
+        "market_context": "skipped_for_guided_pilot",
+    }
+
+
 async def _run_midcap_template_pipeline(
     payload: MidcapTemplatePipelinePayload,
     background_tasks: BackgroundTasks,
@@ -2300,10 +2347,12 @@ async def _run_midcap_template_pipeline(
     design = _midcap_template_design(payload.design_id)
     requested_country = _validate_midcap_design_country(design, payload.country)
     product_mode = _normalize_product_mode(payload.product_mode)
+    run_market_cap = _midcap_pipeline_market_cap(payload.max_markets)
+    discovery_limit = _midcap_pipeline_discovery_limit(payload.limit, run_market_cap)
     discovery = await discover_midcap_markets(
         country=requested_country,
         product_mode=product_mode,
-        limit=payload.limit,
+        limit=discovery_limit,
         min_market_cap=payload.min_market_cap,
         max_market_cap=payload.max_market_cap,
         min_volume=payload.min_volume,
@@ -2322,7 +2371,7 @@ async def _run_midcap_template_pipeline(
         and isinstance(candidate.get("market_mapping"), dict)
     ]
     eligible = sorted(eligible, key=lambda item: (_safe_number(item.get("score")), _safe_number(item.get("volume"))), reverse=True)
-    selected_candidates = eligible[: max(1, min(20, payload.max_markets))]
+    selected_candidates = eligible[:run_market_cap]
     installed_markets: list[dict[str, object]] = []
     selected_market_ids: list[str] = []
     for candidate in selected_candidates:
@@ -2407,6 +2456,7 @@ async def _run_midcap_template_pipeline(
         "product_mode": product_mode,
         "strategy_generation_allowed_in_daily_mode": False,
         "design_mode": "research_discovery_only",
+        "server_profile": _midcap_pipeline_server_profile(payload.max_markets, payload.limit, run_market_cap, discovery_limit),
         "live_ordering_enabled": False,
         "order_placement": "disabled",
         "discovery": {
@@ -2463,6 +2513,8 @@ def _midcap_template_research_payload(
         cost_stress_multiplier=max(1.0, _safe_number(defaults.get("cost_stress_multiplier"), 2.5)),
         include_regime_scans=True,
         regime_scan_budget_per_regime=max(1, min(96, int(_safe_number(defaults.get("regime_scan_budget_per_regime"), 12)))),
+        diagnostic_limit=TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
+        include_market_context=False,
         target_regime=None,
         excluded_months=[],
         repair_mode="standard",
@@ -2479,6 +2531,8 @@ def _midcap_template_research_payload(
             "auto_sync_costs": payload.auto_sync_costs,
             "auto_start_run": payload.auto_start_run,
             "cost_sync_status": cost_sync.get("status"),
+            "server_profile": "guided_midcap_2vcpu_profile_v1",
+            "diagnostic_limit_per_market": TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
             "promotion_required": ["make_tradeable_or_repair_remaining", "save_template", "freeze_validate"],
             "daily_mode_source": "active_frozen_template_library_only",
         },

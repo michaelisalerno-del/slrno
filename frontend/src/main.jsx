@@ -195,7 +195,7 @@ function App() {
   const [midcapSearch, setMidcapSearch] = React.useState({
     country: "UK",
     product_mode: "spread_bet",
-    limit: "40",
+    limit: "24",
     min_market_cap: "250000000",
     max_market_cap: "10000000000",
     min_volume: "100000",
@@ -204,7 +204,7 @@ function App() {
     verify_ig: true,
     require_ig_catalogue: true,
     design_id: "liquid_uk_midcap_trend_pullback",
-    max_markets: "6",
+    max_markets: "3",
   });
   const [midcapDiscovery, setMidcapDiscovery] = React.useState(null);
   const [midcapLoading, setMidcapLoading] = React.useState(false);
@@ -508,16 +508,16 @@ function App() {
 
   async function runMidcapTemplatePipeline() {
     const accountSize = optionalNumber(midcapSearch.account_size) ?? WORKING_ACCOUNT_SIZE;
-    const maxMarkets = optionalNumber(midcapSearch.max_markets) ?? 6;
-    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps, starting the no-overnight design run, then showing the repair/freeze gates..." });
-    setMessage("Midcap template pipeline: discovering, installing, syncing costs, and launching the design run...");
+    const maxMarkets = optionalNumber(midcapSearch.max_markets) ?? 3;
+    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps, then running a fast 2 vCPU no-overnight design pass with repair/freeze gates..." });
+    setMessage("Midcap template pipeline: quick guided scan, IG costs, then no-overnight design run...");
     try {
       const result = await startMidcapTemplatePipeline({
         design_id: midcapSearch.design_id,
         country: midcapSearch.country,
         product_mode: midcapSearch.product_mode,
         account_size: accountSize,
-        limit: optionalNumber(midcapSearch.limit) ?? 40,
+        limit: optionalNumber(midcapSearch.limit) ?? 24,
         max_markets: maxMarkets,
         min_market_cap: optionalNumber(midcapSearch.min_market_cap) ?? 250000000,
         max_market_cap: optionalNumber(midcapSearch.max_market_cap) ?? 10000000000,
@@ -546,7 +546,7 @@ function App() {
       setMidcapPipelineState({
         status: result.status ?? "started",
         detail: result.research_run_id
-          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"}; repair and freeze gates are attached to the result.`
+          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; repair and freeze gates are attached to the result.`
           : `No run started. ${result.discovery?.eligible_count ?? 0} eligible midcap candidate${result.discovery?.eligible_count === 1 ? "" : "s"} found.`,
       });
       setMessage(result.research_run_id
@@ -749,7 +749,7 @@ function App() {
         paper_limit: optionalNumber(researchRun.paper_queue_limit) ?? 3,
         review_limit: optionalNumber(researchRun.review_queue_limit) ?? 10,
         lookback_days: 10,
-        max_markets: 40,
+        max_markets: 24,
       });
       setDayFactory((current) => ({
         ...(current ?? {}),
@@ -3796,7 +3796,7 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
         <label>Limit</label>
         <input value={search.limit} onChange={(event) => setSearch({ ...search, limit: event.target.value })} type="number" min="1" max="120" step="1" />
         <label>Run markets</label>
-        <input value={search.max_markets} onChange={(event) => setSearch({ ...search, max_markets: event.target.value })} type="number" min="1" max="20" step="1" />
+        <input value={search.max_markets} onChange={(event) => setSearch({ ...search, max_markets: event.target.value })} type="number" min="1" max="3" step="1" />
         <label className="check compact-check">
           <input type="checkbox" checked readOnly />
           IG catalogue required
@@ -3814,7 +3814,7 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
         <div className="status compact-status">
           <strong>{selectedDesign.label}</strong>
           <span>{selectedDesign.behaviour}</span>
-          <small>{(selectedDesign.strategy_families ?? []).map(strategyFamilyLabel).join(" / ")} · {normalizeInterval(selectedDesign.run_defaults?.interval ?? "5min")} · no overnight · guided discovery, repair and freeze gates</small>
+          <small>{(selectedDesign.strategy_families ?? []).map(strategyFamilyLabel).join(" / ")} · {normalizeInterval(selectedDesign.run_defaults?.interval ?? "5min")} · {selectedDesign.run_defaults?.search_budget ?? 36} pilot trials/market · no overnight · guided discovery, repair and freeze gates</small>
         </div>
       )}
       {pipelineState?.detail && (
@@ -5787,6 +5787,7 @@ function humanWarnings(warnings = []) {
     day_trade_held_overnight: "Held overnight",
     day_trade_missing_flat_policy: "Missing flat policy",
     day_trade_requires_intraday_bars: "Needs intraday bars",
+    diagnostics_deferred_fast_scan: "Fast-scan diagnostics deferred",
     ig_minimum_risk_too_large_for_account: "IG min risk too large",
     ig_minimum_margin_too_large_for_account: "IG min margin too large",
     historical_daily_loss_stop_breached: "Daily loss stop breached",
@@ -5846,6 +5847,7 @@ const PAPER_BLOCKER_WARNINGS = new Set([
   "day_trade_held_overnight",
   "day_trade_missing_flat_policy",
   "day_trade_requires_intraday_bars",
+  "diagnostics_deferred_fast_scan",
   "drawdown_too_high",
   "event_strategy_requires_label",
   "historical_daily_loss_stop_breached",

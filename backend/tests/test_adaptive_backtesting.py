@@ -81,6 +81,44 @@ def test_adaptive_search_returns_ranked_trials_with_cost_warnings():
     assert best.backtest.cost_to_gross_ratio >= 0
 
 
+def test_fast_diagnostic_limit_defers_non_leading_trials():
+    market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
+    profile = public_ig_cost_profile(market)
+    bars = _trend_bars(180)
+
+    result = run_adaptive_search(
+        bars,
+        "TEST",
+        "5min",
+        profile,
+        AdaptiveSearchConfig(
+            preset="quick",
+            trading_style="intraday_only",
+            search_budget=9,
+            diagnostic_limit=3,
+            seed=3,
+        ),
+    )
+
+    completed = [
+        evaluation
+        for evaluation in result.evaluations
+        if evaluation.candidate.parameters["search_audit"]["fast_scan_diagnostics"] == "completed"
+    ]
+    deferred = [
+        evaluation
+        for evaluation in result.evaluations
+        if evaluation.candidate.parameters["search_audit"]["fast_scan_diagnostics"] == "deferred"
+    ]
+
+    assert len(result.evaluations) == 9
+    assert len(completed) == 3
+    assert len(deferred) == 6
+    assert all("diagnostics_deferred_fast_scan" not in evaluation.warnings for evaluation in completed)
+    assert all("diagnostics_deferred_fast_scan" in evaluation.warnings for evaluation in deferred)
+    assert all(evaluation.promotion_tier == "reject" for evaluation in deferred)
+
+
 def test_day_trading_signals_force_flat_before_next_session():
     bars = [
         OHLCBar("TEST", datetime(2026, 1, 5, 9), 100, 101, 99, 100),
