@@ -161,9 +161,77 @@ MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
             "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
         ],
     },
+    "liquid_us_midcap_trend_pullback": {
+        "id": "liquid_us_midcap_trend_pullback",
+        "label": "Liquid US midcap trend pullback",
+        "market_type": "share",
+        "country": "US",
+        "behaviour": "Liquid US mid-cap shares in a trend-up or orderly pullback regime.",
+        "template_goal": "Find reusable intraday/no-overnight US pullback rules with FX, spread, margin, and IG catalogue gates explicit.",
+        "strategy_families": ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": 54,
+            "regime_scan_budget_per_regime": 12,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 3.0,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Make Tradeable / Repair Remaining must clear IG, cost, stop, margin, OOS, fold, FX, and regime blockers.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+    "liquid_us_midcap_breakout": {
+        "id": "liquid_us_midcap_breakout",
+        "label": "Liquid US midcap breakout",
+        "market_type": "share",
+        "country": "US",
+        "behaviour": "Liquid US mid-cap shares with volatility expansion, range breaks, or opening continuation.",
+        "template_goal": "Find intraday US breakout templates that survive realistic spread, slippage, FX, and small-account margin checks.",
+        "strategy_families": ["breakout", "volatility_expansion", "intraday_trend"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": 54,
+            "regime_scan_budget_per_regime": 12,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 3.25,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Breakout candidates must prove net OOS profit after spread/slippage/FX and avoid one-session dependence.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
     "liquid_us_midcap_intraday": {
         "id": "liquid_us_midcap_intraday",
-        "label": "Liquid US midcap intraday",
+        "label": "Liquid US midcap multi-setup",
         "market_type": "share",
         "country": "US",
         "behaviour": "Liquid US mid-cap shares with intraday continuation, pullback, or reversal setups.",
@@ -2157,15 +2225,38 @@ def _midcap_template_design(design_id: str) -> dict[str, object]:
     return _template_design_payload(design)
 
 
+def _midcap_design_country_code(country: object) -> str:
+    _exchange, country_code = country_exchange_hint(str(country or ""))
+    if country_code == "GB":
+        return "UK"
+    return country_code or str(country or "").strip().upper()
+
+
+def _validate_midcap_design_country(design: dict[str, object], country: str) -> str:
+    requested_country = str(country or design.get("country") or "UK")
+    design_country = _midcap_design_country_code(design.get("country"))
+    requested_country_code = _midcap_design_country_code(requested_country)
+    if design_country and requested_country_code and design_country != requested_country_code:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{design.get('label')} is a {design_country} template design. "
+                f"Switch the market universe to {design_country} or choose a {requested_country_code} template design."
+            ),
+        )
+    return requested_country
+
+
 async def _run_midcap_template_pipeline(
     payload: MidcapTemplatePipelinePayload,
     background_tasks: BackgroundTasks,
     api_token: str,
 ) -> dict[str, object]:
     design = _midcap_template_design(payload.design_id)
+    requested_country = _validate_midcap_design_country(design, payload.country)
     product_mode = _normalize_product_mode(payload.product_mode)
     discovery = await discover_midcap_markets(
-        country=payload.country or str(design.get("country") or "UK"),
+        country=requested_country,
         product_mode=product_mode,
         limit=payload.limit,
         min_market_cap=payload.min_market_cap,
@@ -2335,7 +2426,7 @@ def _midcap_template_research_payload(
             "schema": "midcap_template_pipeline_v1",
             "design_id": design.get("id"),
             "design_label": design.get("label"),
-            "country": payload.country,
+            "country": _validate_midcap_design_country(design, payload.country),
             "product_mode": product_mode,
             "selected_market_ids": market_ids,
             "auto_install": payload.auto_install,

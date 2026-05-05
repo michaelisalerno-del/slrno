@@ -101,6 +101,17 @@ const MULTI_MARKET_TOTAL_TRIAL_CAPS = { quick: 96, balanced: 216, deep: 480 };
 const MULTI_MARKET_MIN_TRIALS_PER_MARKET = { quick: 6, balanced: 9, deep: 12 };
 const DAY_TRADING_FAMILIES = ["intraday_trend", "breakout", "liquidity_sweep_reversal", "mean_reversion", "volatility_expansion", "scalping"];
 
+function normalizeDesignCountry(value) {
+  const country = String(value || "").trim().toUpperCase();
+  if (country === "GB" || country === "UK" || country === "UNITED KINGDOM") return "UK";
+  if (country === "USA" || country === "US" || country === "UNITED STATES") return "US";
+  return country;
+}
+
+function designMatchesCountry(design, country) {
+  return normalizeDesignCountry(design?.country) === normalizeDesignCountry(country);
+}
+
 const STYLE_OPTIONS = [
   { id: "find_anything_robust", label: "Find anything robust" },
   { id: "everyday_long", label: "Everyday long" },
@@ -3725,32 +3736,48 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
 
 function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesigns = [], pipeline, pipelineState, onSearch, onInstall, onRunPipeline }) {
   const candidates = result?.candidates ?? [];
-  const selectedDesign = templateDesigns.find((design) => design.id === search.design_id) ?? templateDesigns[0];
+  const compatibleDesigns = templateDesigns.filter((design) => designMatchesCountry(design, search.country));
+  const designOptions = compatibleDesigns.length > 0 ? compatibleDesigns : templateDesigns;
+  const selectedDesign = designOptions.find((design) => design.id === search.design_id) ?? designOptions[0];
   const sourceIssues = result?.source_errors ?? pipeline?.discovery?.source_errors ?? [];
+  React.useEffect(() => {
+    if (!selectedDesign?.id || search.design_id === selectedDesign.id) return;
+    setSearch((current) => (
+      current.design_id === selectedDesign.id
+        ? current
+        : { ...current, design_id: selectedDesign.id }
+    ));
+  }, [selectedDesign?.id, search.design_id, setSearch]);
+  const updateCountry = (country) => {
+    const currentDesign = templateDesigns.find((design) => design.id === search.design_id);
+    const nextDesign = currentDesign && designMatchesCountry(currentDesign, country)
+      ? currentDesign
+      : templateDesigns.find((design) => designMatchesCountry(design, country));
+    setSearch({ ...search, country, design_id: nextDesign?.id ?? search.design_id });
+  };
   return (
     <Panel icon={<Search />} title="Eligible Midcap Finder">
       <form className="compact midcap-search" onSubmit={onSearch}>
-        {templateDesigns.length > 0 && (
+        <label>Market universe</label>
+        <select value={search.country} onChange={(event) => updateCountry(event.target.value)}>
+          <option value="UK">UK shares</option>
+          <option value="US">US shares</option>
+        </select>
+        {designOptions.length > 0 && (
           <>
             <label>Template design</label>
             <select
-              value={search.design_id}
+              value={selectedDesign?.id ?? ""}
               onChange={(event) => {
-                const nextDesign = templateDesigns.find((design) => design.id === event.target.value);
-                setSearch({ ...search, design_id: event.target.value, country: nextDesign?.country ?? search.country });
+                setSearch({ ...search, design_id: event.target.value });
               }}
             >
-              {templateDesigns.map((design) => (
+              {designOptions.map((design) => (
                 <option value={design.id} key={design.id}>{design.label}</option>
               ))}
             </select>
           </>
         )}
-        <label>Country</label>
-        <select value={search.country} onChange={(event) => setSearch({ ...search, country: event.target.value })}>
-          <option value="UK">UK shares</option>
-          <option value="US">US shares</option>
-        </select>
         <label>Account role</label>
         <select value={search.product_mode} onChange={(event) => setSearch({ ...search, product_mode: event.target.value })}>
           <option value="spread_bet">Spread bet</option>

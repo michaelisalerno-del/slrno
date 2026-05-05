@@ -13,6 +13,26 @@ from app.providers.base import OHLCBar
 from app.research_store import ResearchStore
 
 
+def test_midcap_template_designs_are_country_specific():
+    designs = main.day_trading_template_designs()["designs"]
+    us_ids = {design["id"] for design in designs if design["country"] == "US"}
+    uk_ids = {design["id"] for design in designs if design["country"] == "UK"}
+
+    assert "liquid_uk_midcap_breakout" in uk_ids
+    assert "liquid_us_midcap_breakout" in us_ids
+    assert "liquid_us_midcap_trend_pullback" in us_ids
+
+
+def test_midcap_template_pipeline_rejects_design_country_mismatch():
+    design = main._midcap_template_design("liquid_uk_midcap_breakout")
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        main._validate_midcap_design_country(design, "US")
+
+    assert exc_info.value.status_code == 400
+    assert "UK template design" in str(exc_info.value.detail)
+
+
 def test_daily_template_scanner_builds_and_stores_queue_from_frozen_templates(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     market = MarketMapping(
