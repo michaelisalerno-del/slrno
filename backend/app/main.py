@@ -116,6 +116,60 @@ GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS = {
     "day_trade_missing_flat_policy",
     "day_trade_requires_intraday_bars",
 }
+MANUAL_TRADER_PLAYBOOKS: dict[str, dict[str, object]] = {
+    "opening_range_breakout": {
+        "id": "opening_range_breakout",
+        "label": "Opening range breakout",
+        "description": "Trade only when the frozen signal also breaks the first 30-minute range with VWAP and volume behind it.",
+        "families": ["breakout", "volatility_expansion"],
+        "min_relative_volume": 0.9,
+        "max_spread_bps": 65.0,
+        "min_opening_break_bps": 2.0,
+        "min_trend_bps": 0.0,
+        "require_vwap_alignment": True,
+    },
+    "vwap_trend_pullback": {
+        "id": "vwap_trend_pullback",
+        "label": "VWAP trend pullback",
+        "description": "Trade with the session trend when price has reclaimed or held VWAP and today has enough participation.",
+        "families": ["intraday_trend", "mean_reversion"],
+        "min_relative_volume": 0.75,
+        "max_spread_bps": 65.0,
+        "min_trend_bps": 8.0,
+        "max_vwap_distance_against_bps": 12.0,
+        "require_vwap_alignment": True,
+    },
+    "failed_breakout_reversal": {
+        "id": "failed_breakout_reversal",
+        "label": "Failed breakout reversal",
+        "description": "Trade a frozen reversal only after the session has rejected one side of the opening range and moved back through VWAP.",
+        "families": ["liquidity_sweep_reversal"],
+        "min_relative_volume": 0.8,
+        "max_spread_bps": 70.0,
+        "min_sweep_bps": 1.0,
+        "require_vwap_alignment": True,
+    },
+    "high_relative_volume_trend": {
+        "id": "high_relative_volume_trend",
+        "label": "High relative-volume trend",
+        "description": "Allow the frozen signal only when current volume is meaningfully ahead of normal and price is moving with VWAP.",
+        "families": ["volatility_expansion", "scalping"],
+        "min_relative_volume": 1.1,
+        "max_spread_bps": 60.0,
+        "min_trend_bps": 10.0,
+        "require_vwap_alignment": True,
+    },
+    "frozen_signal_confirmation": {
+        "id": "frozen_signal_confirmation",
+        "label": "Frozen signal confirmation",
+        "description": "Fallback manual gate for frozen templates: fresh same-day bars, acceptable spread, some volume, and no obvious tape conflict.",
+        "families": [],
+        "min_relative_volume": 0.5,
+        "max_spread_bps": 75.0,
+        "max_vwap_distance_against_bps": 25.0,
+        "require_vwap_alignment": False,
+    },
+}
 MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
     "liquid_uk_midcap_trend_pullback": {
         "id": "liquid_uk_midcap_trend_pullback",
@@ -777,6 +831,8 @@ def day_trading_factory_summary(
     latest_daily_queue = latest_scan.get("daily_paper_queue", []) if isinstance(latest_scan, dict) else []
     latest_review_signals = latest_scan.get("review_signals", []) if isinstance(latest_scan, dict) else []
     latest_unsuitable = latest_scan.get("unsuitable", []) if isinstance(latest_scan, dict) else []
+    latest_config = latest_scan.get("config", {}) if isinstance(latest_scan, dict) and isinstance(latest_scan.get("config"), dict) else {}
+    latest_no_setup = latest_config.get("no_setup_sample", []) if isinstance(latest_config.get("no_setup_sample"), list) else []
     return {
         "schema": "day_trading_template_factory_v2",
         "mode": "manual",
@@ -797,11 +853,14 @@ def day_trading_factory_summary(
             "eligible_review_signals": len(latest_review_signals),
             "daily_paper_queue": len(latest_daily_queue),
             "unsuitable": len(latest_unsuitable) if latest_scan else len(unsuitable),
+            "no_setup": len(latest_no_setup),
+            "today_filter_blockers": len(latest_config.get("today_filter_blocker_counts", {})) if isinstance(latest_config.get("today_filter_blocker_counts"), dict) else 0,
             "overnight_or_swing_templates": len(overnight_templates),
         },
         "daily_paper_queue": latest_daily_queue,
         "review_signals": latest_review_signals,
         "unsuitable": (latest_unsuitable if latest_scan else unsuitable)[:review_limit],
+        "no_setup_sample": latest_no_setup[:review_limit],
         "template_ready_without_scan": paper_queue,
         "latest_scan": latest_scan,
         "template_library": {
@@ -809,11 +868,12 @@ def day_trading_factory_summary(
             "needs_freeze_validation": [_template_queue_payload(template) for template in non_frozen_day_templates[:review_limit]],
             "overnight_or_swing_templates": [_template_queue_payload(template) for template in overnight_templates[:review_limit]],
         },
+        "manual_playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
         "discovery_leads_not_live": sorted(discovery_leads, key=_day_trading_signal_rank, reverse=True)[:review_limit],
         "next_actions": [
             "Use Discovery mode to find or repair ideas, then save and Freeze validate them.",
             "Keep only active frozen intraday/no-overnight templates in the daily queue.",
-            "At market open, match those frozen templates to eligible stocks/indices and keep only the best few paper previews.",
+            "At market open, match frozen templates to today's tape: relative volume, VWAP, opening range, spread, and broker-safe capital fit.",
             "After close, review expected versus actual; do not change live/paper rules without another validation cycle.",
         ],
     }
@@ -850,6 +910,7 @@ def day_trading_template_designs() -> dict[str, object]:
     return {
         "schema": "day_trading_template_designs_v1",
         "designs": [_template_design_payload(design) for design in MIDCAP_TEMPLATE_DESIGNS.values()],
+        "manual_playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
         "policy": {
             "daily_mode_source": "active_frozen_template_library_only",
             "strategy_generation_allowed_in_daily_mode": False,
@@ -857,6 +918,25 @@ def day_trading_template_designs() -> dict[str, object]:
             "live_ordering_enabled": False,
             "order_placement": "disabled",
         },
+    }
+
+
+@app.get("/day-trading/manual-playbooks")
+def day_trading_manual_playbooks() -> dict[str, object]:
+    return {
+        "schema": "manual_trader_playbooks_v1",
+        "daily_mode_source": "active_frozen_template_library_only",
+        "strategy_generation_allowed": False,
+        "playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
+        "today_filters": [
+            "same-day 5-minute bars",
+            "relative volume versus recent sessions",
+            "opening range break or rejection",
+            "VWAP alignment",
+            "session trend",
+            "current spread/slippage and broker-safe preview",
+            "IG minimum stake, stop, margin, and £3k capital fit",
+        ],
     }
 
 
@@ -2729,6 +2809,24 @@ def _template_design_payload(design: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _manual_playbook_payload(playbook: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(playbook.get("id") or ""),
+        "label": str(playbook.get("label") or ""),
+        "description": str(playbook.get("description") or ""),
+        "families": list(playbook.get("families") or []),
+        "today_filters": {
+            "min_relative_volume": _safe_number(playbook.get("min_relative_volume")),
+            "max_spread_bps": _safe_number(playbook.get("max_spread_bps")),
+            "min_opening_break_bps": _safe_number(playbook.get("min_opening_break_bps")),
+            "min_trend_bps": _safe_number(playbook.get("min_trend_bps")),
+            "min_sweep_bps": _safe_number(playbook.get("min_sweep_bps")),
+            "max_vwap_distance_against_bps": _safe_number(playbook.get("max_vwap_distance_against_bps")),
+            "require_vwap_alignment": bool(playbook.get("require_vwap_alignment")),
+        },
+    }
+
+
 def _midcap_template_design(design_id: str) -> dict[str, object]:
     key = str(design_id or "").strip()
     design = MIDCAP_TEMPLATE_DESIGNS.get(key)
@@ -3053,6 +3151,8 @@ async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_
     scanned_pairs = 0
     seen_pairs: set[tuple[int, str]] = set()
     market_statuses: list[dict[str, object]] = []
+    playbook_counts: dict[str, int] = {}
+    tape_blocker_counts: dict[str, int] = {}
     for template in templates:
         for market in _scanner_markets_for_template(template, selected_markets, payload.max_markets):
             pair_key = (int(template.get("id") or 0), market.market_id)
@@ -3070,6 +3170,13 @@ async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_
                 product_mode,
                 bars_cache,
             )
+            playbook = row.get("manual_playbook") if isinstance(row.get("manual_playbook"), dict) else {}
+            playbook_id = str(playbook.get("id") or "unknown")
+            playbook_counts[playbook_id] = playbook_counts.get(playbook_id, 0) + 1
+            for blocker in row.get("today_filter_blockers") or []:
+                key = str(blocker or "")
+                if key:
+                    tape_blocker_counts[key] = tape_blocker_counts.get(key, 0) + 1
             market_statuses.append(
                 {
                     "template_id": template.get("id"),
@@ -3102,6 +3209,9 @@ async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_
         "template_count": len(templates),
         "scanned_template_market_pairs": scanned_pairs,
         "no_setup_count": len(no_setup),
+        "manual_playbook_counts": playbook_counts,
+        "today_filter_blocker_counts": tape_blocker_counts,
+        "no_setup_sample": no_setup[: min(10, payload.review_limit)],
         "market_statuses": market_statuses,
         "strategy_generation_allowed": False,
     }
@@ -3135,11 +3245,14 @@ async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_
             "review_signals": len(review_signals),
             "unsuitable": len(unsuitable),
             "no_setup": len(no_setup),
+            "manual_playbooks": len([key for key, count in playbook_counts.items() if count > 0]),
+            "today_filter_blockers": len(tape_blocker_counts),
         },
         "daily_paper_queue": daily_paper_queue,
         "review_signals": review_signals,
         "unsuitable": unsuitable[: payload.review_limit],
         "no_setup_sample": no_setup[: min(10, payload.review_limit)],
+        "manual_playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
         "latest_scan": saved,
     }
 
@@ -3232,6 +3345,7 @@ async def _evaluate_daily_template_match(
         return {**base, "status": "unsuitable", "unsuitable": True, "bar_count": len(typed_bars), "unsuitable_reason": f"Frozen template application failed: {_public_error(exc)}"}
     latest_bar = typed_bars[-1]
     if signal_result.current_signal == 0:
+        tape_gate = _manual_setup_gate(template, market, typed_bars, trading_date, 0, profile_payload)
         return {
             **base,
             "status": "no_setup_today",
@@ -3241,9 +3355,44 @@ async def _evaluate_daily_template_match(
             "current_regime": signal_result.current_regime,
             "target_regime": signal_result.target_regime,
             "regime_allowed": signal_result.regime_allowed,
+            "manual_playbook": tape_gate["manual_playbook"],
+            "today_tape": tape_gate["today_tape"],
+            "today_filter_checks": tape_gate["checks"],
+            "today_filter_blockers": tape_gate["blockers"],
+            "signal_explainer": _daily_signal_explainer(
+                template,
+                market,
+                signal_result,
+                tape_gate,
+                "Frozen rules did not produce an active setup on the latest 5min bar.",
+            ),
             "no_setup_reason": "Frozen rules did not produce an active setup on the latest 5min bar.",
         }
     side = "BUY" if signal_result.current_signal > 0 else "SELL"
+    tape_gate = _manual_setup_gate(template, market, typed_bars, trading_date, signal_result.current_signal, profile_payload)
+    if not tape_gate["passed"]:
+        reason = _today_filter_rejection_reason(tape_gate)
+        return {
+            **base,
+            "status": "no_setup_today",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "latest_bar": _bar_payload(latest_bar),
+            "current_regime": signal_result.current_regime,
+            "target_regime": signal_result.target_regime,
+            "regime_allowed": signal_result.regime_allowed,
+            "side": side,
+            "signal": signal_result.current_signal,
+            "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
+            "signal_age_bars": signal_result.signal_age_bars,
+            "manual_playbook": tape_gate["manual_playbook"],
+            "today_tape": tape_gate["today_tape"],
+            "today_filter_checks": tape_gate["checks"],
+            "today_filter_blockers": tape_gate["blockers"],
+            "manual_setup_score": tape_gate["score"],
+            "signal_explainer": _daily_signal_explainer(template, market, signal_result, tape_gate, reason),
+            "no_setup_reason": reason,
+        }
     stop, limit = _daily_scanner_stop_limit(float(latest_bar.close), side, signal_result.parameters)
     stake = _safe_number(signal_result.parameters.get("position_size")) or 1.0
     preview = broker_order_preview(
@@ -3270,6 +3419,12 @@ async def _evaluate_daily_template_match(
             "target_regime": signal_result.target_regime,
             "side": side,
             "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
+            "manual_playbook": tape_gate["manual_playbook"],
+            "today_tape": tape_gate["today_tape"],
+            "today_filter_checks": tape_gate["checks"],
+            "today_filter_blockers": tape_gate["blockers"],
+            "manual_setup_score": tape_gate["score"],
+            "signal_explainer": _daily_signal_explainer(template, market, signal_result, tape_gate, "Broker preview blocked the setup for this account."),
             "broker_preview": preview,
             "rule_violations": rule_violations,
             "unsuitable_reason": _unsuitable_reason(rule_violations, {"violations": rule_violations}) if terminal else f"Broker preview failed: {', '.join(rule_violations)}.",
@@ -3293,6 +3448,12 @@ async def _evaluate_daily_template_match(
         "signal": signal_result.current_signal,
         "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
         "signal_age_bars": signal_result.signal_age_bars,
+        "manual_playbook": tape_gate["manual_playbook"],
+        "today_tape": tape_gate["today_tape"],
+        "today_filter_checks": tape_gate["checks"],
+        "today_filter_blockers": tape_gate["blockers"],
+        "manual_setup_score": tape_gate["score"],
+        "signal_explainer": _daily_signal_explainer(template, market, signal_result, tape_gate, "Frozen template fired and today's tape filters passed."),
         "broker_preview": preview,
         "rule_violations": [],
         "paper_readiness_score": search_audit.get("paper_readiness_score", template.get("robustness_score", 0)),
@@ -3311,6 +3472,7 @@ def _daily_scan_base_payload(
     interval: str,
     product_mode: str,
 ) -> dict[str, object]:
+    playbook = _manual_playbook_for_template(template)
     return {
         "source_type": "daily_frozen_template_scan",
         "strategy_generation_allowed": False,
@@ -3333,6 +3495,7 @@ def _daily_scan_base_payload(
         "readiness_status": template.get("readiness_status"),
         "robustness_score": template.get("robustness_score", 0),
         "warnings": _template_warning_codes(template),
+        "manual_playbook": _manual_playbook_payload(playbook),
         "unsuitable": False,
         "setup_detected": False,
         "paper_ready": False,
@@ -3365,18 +3528,404 @@ def _daily_signal_state(previous_signal: int, current_signal: int) -> str:
     return "reversal"
 
 
+def _manual_setup_gate(
+    template: dict[str, object],
+    market: MarketMapping,
+    bars: list[object],
+    trading_date: date,
+    signal: int,
+    profile_payload: dict[str, object],
+) -> dict[str, object]:
+    playbook = _manual_playbook_for_template(template)
+    tape = _today_tape_snapshot(bars, trading_date)
+    side = "BUY" if signal > 0 else "SELL" if signal < 0 else "FLAT"
+    checks: list[dict[str, object]] = []
+
+    def add_check(code: str, passed: bool, detail: str, value: object = None, threshold: object = None) -> None:
+        checks.append({"code": code, "passed": bool(passed), "detail": detail, "value": value, "threshold": threshold})
+
+    if not tape.get("has_session_bars"):
+        add_check("no_same_day_bars", False, "No same-day 5-minute bars are available for the scanner date.")
+    elif str(tape.get("active_session_date") or "") != trading_date.isoformat():
+        add_check(
+            "stale_intraday_bars",
+            False,
+            f"Latest intraday bars are from {tape.get('active_session_date')}, not {trading_date.isoformat()}.",
+            tape.get("active_session_date"),
+            trading_date.isoformat(),
+        )
+    else:
+        add_check("same_day_bars", True, "Latest 5-minute bars are from the scanner date.", tape.get("active_session_date"), trading_date.isoformat())
+
+    spread_bps = _safe_number(profile_payload.get("spread_bps"), profile_payload.get("estimated_spread_bps"))
+    max_spread = _safe_number(playbook.get("max_spread_bps")) or 75.0
+    add_check(
+        "spread_within_playbook",
+        spread_bps <= max_spread,
+        f"Spread {round(spread_bps, 2)} bps must be at or below {round(max_spread, 2)} bps for this playbook.",
+        round(spread_bps, 4),
+        round(max_spread, 4),
+    )
+
+    relative_volume = _safe_number(tape.get("relative_volume"))
+    min_relative_volume = _safe_number(playbook.get("min_relative_volume")) or 0.5
+    add_check(
+        "relative_volume",
+        relative_volume >= min_relative_volume,
+        f"Relative volume {round(relative_volume, 2)}x must be at least {round(min_relative_volume, 2)}x.",
+        round(relative_volume, 4),
+        round(min_relative_volume, 4),
+    )
+
+    if signal == 0:
+        add_check("frozen_signal_active", False, "Frozen template did not fire on the latest bar.")
+    else:
+        add_check("frozen_signal_active", True, f"Frozen template produced a {side} signal.")
+
+    playbook_id = str(playbook.get("id") or "")
+    if playbook_id == "opening_range_breakout":
+        _add_opening_range_breakout_checks(checks, tape, side, playbook)
+    elif playbook_id == "vwap_trend_pullback":
+        _add_vwap_trend_checks(checks, tape, side, playbook)
+    elif playbook_id == "failed_breakout_reversal":
+        _add_failed_breakout_reversal_checks(checks, tape, side, playbook)
+    elif playbook_id == "high_relative_volume_trend":
+        _add_high_relative_volume_trend_checks(checks, tape, side, playbook)
+    else:
+        _add_frozen_signal_confirmation_checks(checks, tape, side, playbook)
+
+    blockers = [str(check["code"]) for check in checks if not check.get("passed")]
+    return {
+        "passed": not blockers,
+        "score": _manual_setup_score(checks, tape),
+        "manual_playbook": _manual_playbook_payload(playbook),
+        "today_tape": tape,
+        "checks": checks,
+        "blockers": blockers,
+        "market_id": market.market_id,
+    }
+
+
+def _add_opening_range_breakout_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    min_break = _safe_number(playbook.get("min_opening_break_bps"))
+    break_bps = _safe_number(tape.get("opening_range_break_bps"))
+    trend_bps = _safe_number(tape.get("session_trend_bps"))
+    if side == "SELL":
+        passed_break = break_bps <= -min_break
+        passed_trend = trend_bps <= -_safe_number(playbook.get("min_trend_bps"))
+        vwap_passed = _safe_number(tape.get("distance_from_vwap_bps")) <= 0
+    else:
+        passed_break = break_bps >= min_break
+        passed_trend = trend_bps >= _safe_number(playbook.get("min_trend_bps"))
+        vwap_passed = _safe_number(tape.get("distance_from_vwap_bps")) >= 0
+    _append_gate_check(checks, "opening_range_break", passed_break, "Price must break the first 30-minute range in the trade direction.", round(break_bps, 4), round(min_break, 4))
+    _append_gate_check(checks, "session_trend_alignment", passed_trend, "Session trend must point in the trade direction.", round(trend_bps, 4), round(_safe_number(playbook.get("min_trend_bps")), 4))
+    _append_gate_check(checks, "vwap_alignment", vwap_passed, "Price must be on the correct side of VWAP.", round(_safe_number(tape.get("distance_from_vwap_bps")), 4), 0)
+
+
+def _add_vwap_trend_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    trend_bps = _safe_number(tape.get("session_trend_bps"))
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    min_trend = _safe_number(playbook.get("min_trend_bps"))
+    max_against = _safe_number(playbook.get("max_vwap_distance_against_bps")) or 12.0
+    if side == "SELL":
+        trend_passed = trend_bps <= -min_trend
+        vwap_passed = distance_bps <= max_against
+    else:
+        trend_passed = trend_bps >= min_trend
+        vwap_passed = distance_bps >= -max_against
+    _append_gate_check(checks, "session_trend_alignment", trend_passed, "Session trend must support the frozen signal.", round(trend_bps, 4), round(min_trend, 4))
+    _append_gate_check(checks, "vwap_reclaim_or_hold", vwap_passed, "Price must be near or on the correct side of VWAP.", round(distance_bps, 4), round(max_against, 4))
+
+
+def _add_failed_breakout_reversal_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    sweep_bps = _safe_number(playbook.get("min_sweep_bps")) or 1.0
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    low_sweep = _safe_number(tape.get("session_low_vs_opening_low_bps")) <= -sweep_bps
+    high_sweep = _safe_number(tape.get("session_high_vs_opening_high_bps")) >= sweep_bps
+    if side == "SELL":
+        sweep_passed = high_sweep
+        vwap_passed = distance_bps <= 0
+    else:
+        sweep_passed = low_sweep
+        vwap_passed = distance_bps >= 0
+    _append_gate_check(checks, "opening_range_sweep", sweep_passed, "Session must reject one side of the opening range before the reversal fires.", True if sweep_passed else False, True)
+    _append_gate_check(checks, "vwap_reversal_confirmation", vwap_passed, "Reversal must reclaim or lose VWAP in the trade direction.", round(distance_bps, 4), 0)
+
+
+def _add_high_relative_volume_trend_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    trend_bps = _safe_number(tape.get("session_trend_bps"))
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    min_trend = _safe_number(playbook.get("min_trend_bps"))
+    if side == "SELL":
+        trend_passed = trend_bps <= -min_trend
+        vwap_passed = distance_bps <= 0
+    else:
+        trend_passed = trend_bps >= min_trend
+        vwap_passed = distance_bps >= 0
+    _append_gate_check(checks, "high_volume_trend_alignment", trend_passed, "High-volume setups must move in the trade direction.", round(trend_bps, 4), round(min_trend, 4))
+    _append_gate_check(checks, "vwap_alignment", vwap_passed, "Price must be on the correct side of VWAP.", round(distance_bps, 4), 0)
+
+
+def _add_frozen_signal_confirmation_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    if side == "FLAT":
+        return
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    max_against = _safe_number(playbook.get("max_vwap_distance_against_bps")) or 25.0
+    if side == "SELL":
+        passed = distance_bps <= max_against
+    else:
+        passed = distance_bps >= -max_against
+    _append_gate_check(checks, "no_obvious_vwap_conflict", passed, "Fallback playbook rejects only obvious VWAP conflicts.", round(distance_bps, 4), round(max_against, 4))
+
+
+def _append_gate_check(
+    checks: list[dict[str, object]],
+    code: str,
+    passed: bool,
+    detail: str,
+    value: object = None,
+    threshold: object = None,
+) -> None:
+    checks.append({"code": code, "passed": bool(passed), "detail": detail, "value": value, "threshold": threshold})
+
+
+def _manual_setup_score(checks: list[dict[str, object]], tape: dict[str, object]) -> float:
+    if not checks:
+        return 0.0
+    pass_rate = sum(1 for check in checks if check.get("passed")) / len(checks)
+    relative_volume = min(2.0, max(0.0, _safe_number(tape.get("relative_volume")))) / 2.0
+    vwap_strength = min(1.0, abs(_safe_number(tape.get("distance_from_vwap_bps"))) / 80.0)
+    break_strength = min(1.0, abs(_safe_number(tape.get("opening_range_break_bps"))) / 80.0)
+    return round(100 * (0.62 * pass_rate + 0.18 * relative_volume + 0.10 * vwap_strength + 0.10 * break_strength), 4)
+
+
+def _today_filter_rejection_reason(tape_gate: dict[str, object]) -> str:
+    playbook = tape_gate.get("manual_playbook") if isinstance(tape_gate.get("manual_playbook"), dict) else {}
+    blockers = [readable for readable in (_today_filter_blocker_label(code) for code in tape_gate.get("blockers") or []) if readable]
+    if not blockers:
+        return "Today's tape filters did not confirm the frozen setup."
+    return f"{playbook.get('label') or 'Manual playbook'} blocked this setup: {', '.join(blockers[:3])}."
+
+
+def _today_filter_blocker_label(code: object) -> str:
+    labels = {
+        "no_same_day_bars": "no same-day bars",
+        "stale_intraday_bars": "stale intraday bars",
+        "spread_within_playbook": "spread too wide",
+        "relative_volume": "relative volume too low",
+        "frozen_signal_active": "frozen signal inactive",
+        "opening_range_break": "opening range not broken",
+        "session_trend_alignment": "session trend disagrees",
+        "vwap_alignment": "VWAP disagrees",
+        "vwap_reclaim_or_hold": "VWAP not reclaimed/held",
+        "opening_range_sweep": "no opening range rejection",
+        "vwap_reversal_confirmation": "VWAP did not confirm reversal",
+        "high_volume_trend_alignment": "trend not strong enough",
+        "no_obvious_vwap_conflict": "obvious VWAP conflict",
+    }
+    return labels.get(str(code or ""), str(code or "").replace("_", " "))
+
+
+def _daily_signal_explainer(
+    template: dict[str, object],
+    market: MarketMapping,
+    signal_result: object,
+    tape_gate: dict[str, object],
+    headline: str,
+) -> dict[str, object]:
+    playbook = tape_gate.get("manual_playbook") if isinstance(tape_gate.get("manual_playbook"), dict) else {}
+    tape = tape_gate.get("today_tape") if isinstance(tape_gate.get("today_tape"), dict) else {}
+    passed = [check for check in tape_gate.get("checks", []) if isinstance(check, dict) and check.get("passed")]
+    failed = [check for check in tape_gate.get("checks", []) if isinstance(check, dict) and not check.get("passed")]
+    side = "BUY" if getattr(signal_result, "current_signal", 0) > 0 else "SELL" if getattr(signal_result, "current_signal", 0) < 0 else "FLAT"
+    return {
+        "headline": headline,
+        "playbook": playbook.get("label") or "",
+        "market": market.market_id,
+        "template": template.get("name"),
+        "side": side,
+        "why_it_passed": [str(check.get("detail") or check.get("code")) for check in passed[:5]],
+        "why_it_failed": [str(check.get("detail") or check.get("code")) for check in failed[:5]],
+        "today_context": [
+            f"Relative volume {round(_safe_number(tape.get('relative_volume')), 2)}x",
+            f"VWAP distance {round(_safe_number(tape.get('distance_from_vwap_bps')), 1)} bps",
+            f"Opening range break {round(_safe_number(tape.get('opening_range_break_bps')), 1)} bps",
+            f"Session trend {round(_safe_number(tape.get('session_trend_bps')), 1)} bps",
+        ],
+        "rule_change_allowed": False,
+    }
+
+
+def _today_tape_snapshot(bars: list[object], trading_date: date) -> dict[str, object]:
+    dated_bars = sorted(
+        [bar for bar in bars if _bar_session_date(bar) is not None],
+        key=lambda item: getattr(item, "timestamp", None),
+    )
+    if not dated_bars:
+        return {"schema": "today_tape_snapshot_v1", "has_session_bars": False, "requested_date": trading_date.isoformat()}
+    sessions: dict[date, list[object]] = {}
+    for bar in dated_bars:
+        session_date = _bar_session_date(bar)
+        if session_date is None:
+            continue
+        sessions.setdefault(session_date, []).append(bar)
+    active_date = trading_date if trading_date in sessions else max((day for day in sessions if day <= trading_date), default=max(sessions))
+    session_bars = sessions.get(active_date, [])
+    if not session_bars:
+        return {"schema": "today_tape_snapshot_v1", "has_session_bars": False, "requested_date": trading_date.isoformat()}
+    previous_dates = sorted(day for day in sessions if day < active_date)
+    previous_date = previous_dates[-1] if previous_dates else None
+    previous_close = _safe_number(getattr(sessions[previous_date][-1], "close", None)) if previous_date is not None else 0.0
+    opening_count = min(6, len(session_bars))
+    opening_bars = session_bars[:opening_count]
+    opening_high = max(_safe_number(getattr(bar, "high", None), getattr(bar, "close", None)) for bar in opening_bars)
+    opening_low = min(_safe_number(getattr(bar, "low", None), getattr(bar, "close", None)) for bar in opening_bars)
+    session_high = max(_safe_number(getattr(bar, "high", None), getattr(bar, "close", None)) for bar in session_bars)
+    session_low = min(_safe_number(getattr(bar, "low", None), getattr(bar, "close", None)) for bar in session_bars)
+    first_bar = session_bars[0]
+    latest_bar = session_bars[-1]
+    first_open = _safe_number(getattr(first_bar, "open", None), getattr(first_bar, "close", None))
+    latest_close = _safe_number(getattr(latest_bar, "close", None))
+    vwap = _session_vwap(session_bars)
+    relative_volume, relative_volume_source = _relative_session_volume(sessions, active_date, len(session_bars))
+    opening_break_bps = 0.0
+    if latest_close > opening_high and opening_high > 0:
+        opening_break_bps = ((latest_close / opening_high) - 1.0) * 10_000
+    elif latest_close < opening_low and opening_low > 0:
+        opening_break_bps = -((opening_low / latest_close) - 1.0) * 10_000
+    return {
+        "schema": "today_tape_snapshot_v1",
+        "requested_date": trading_date.isoformat(),
+        "active_session_date": active_date.isoformat(),
+        "has_session_bars": bool(session_bars),
+        "bar_count": len(session_bars),
+        "opening_range_bars": opening_count,
+        "opening_high": round(opening_high, 8),
+        "opening_low": round(opening_low, 8),
+        "session_high": round(session_high, 8),
+        "session_low": round(session_low, 8),
+        "latest_close": round(latest_close, 8),
+        "vwap": round(vwap, 8),
+        "distance_from_vwap_bps": round(((latest_close / vwap) - 1.0) * 10_000, 4) if vwap > 0 else 0.0,
+        "opening_range_break_bps": round(opening_break_bps, 4),
+        "session_trend_bps": round(((latest_close / first_open) - 1.0) * 10_000, 4) if first_open > 0 else 0.0,
+        "gap_bps": round(((first_open / previous_close) - 1.0) * 10_000, 4) if previous_close > 0 else 0.0,
+        "relative_volume": round(relative_volume, 4),
+        "relative_volume_source": relative_volume_source,
+        "session_volume": round(sum(_safe_number(getattr(bar, "volume", None)) for bar in session_bars), 4),
+        "session_high_vs_opening_high_bps": round(((session_high / opening_high) - 1.0) * 10_000, 4) if opening_high > 0 else 0.0,
+        "session_low_vs_opening_low_bps": round(((session_low / opening_low) - 1.0) * 10_000, 4) if opening_low > 0 else 0.0,
+        "latest_bar": _bar_payload(latest_bar),
+    }
+
+
+def _bar_session_date(bar: object) -> date | None:
+    timestamp = getattr(bar, "timestamp", None)
+    if timestamp is None or not hasattr(timestamp, "date"):
+        return None
+    return timestamp.date()
+
+
+def _session_vwap(bars: list[object]) -> float:
+    weighted = 0.0
+    volume_total = 0.0
+    for bar in bars:
+        volume = _safe_number(getattr(bar, "volume", None))
+        high = _safe_number(getattr(bar, "high", None), getattr(bar, "close", None))
+        low = _safe_number(getattr(bar, "low", None), getattr(bar, "close", None))
+        close = _safe_number(getattr(bar, "close", None))
+        typical = (high + low + close) / 3.0 if high and low and close else close
+        weighted += typical * max(0.0, volume)
+        volume_total += max(0.0, volume)
+    if volume_total <= 0:
+        closes = [_safe_number(getattr(bar, "close", None)) for bar in bars]
+        return sum(closes) / max(1, len(closes))
+    return weighted / volume_total
+
+
+def _relative_session_volume(sessions: dict[date, list[object]], active_date: date, active_count: int) -> tuple[float, str]:
+    active_bars = sessions.get(active_date, [])
+    active_volume = sum(_safe_number(getattr(bar, "volume", None)) for bar in active_bars)
+    comparison: list[float] = []
+    for day in sorted(day for day in sessions if day < active_date)[-8:]:
+        bars = sessions[day][:active_count]
+        if bars:
+            comparison.append(sum(_safe_number(getattr(bar, "volume", None)) for bar in bars))
+    if not comparison:
+        return 1.0, "fallback_no_prior_sessions"
+    average = sum(comparison) / max(1, len(comparison))
+    if average <= 0:
+        return 1.0, "fallback_zero_prior_volume"
+    return active_volume / average, f"{len(comparison)} prior sessions"
+
+
+def _manual_playbook_for_template(template: dict[str, object]) -> dict[str, object]:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    requested = str(
+        parameters.get("manual_playbook")
+        or parameters.get("setup_playbook")
+        or source_template.get("manual_playbook")
+        or source_template.get("setup_playbook")
+        or ""
+    ).strip()
+    if requested in MANUAL_TRADER_PLAYBOOKS:
+        return MANUAL_TRADER_PLAYBOOKS[requested]
+    family = str(template.get("strategy_family") or source_template.get("family") or parameters.get("family") or "").strip()
+    name = str(template.get("name") or source_template.get("name") or "").lower()
+    if family == "liquidity_sweep_reversal" or "failed" in name or "reversal" in name or "sweep" in name:
+        return MANUAL_TRADER_PLAYBOOKS["failed_breakout_reversal"]
+    if family in {"breakout"} or "breakout" in name or "opening range" in name:
+        return MANUAL_TRADER_PLAYBOOKS["opening_range_breakout"]
+    if family in {"volatility_expansion", "scalping"} or "relative volume" in name or "momentum" in name:
+        return MANUAL_TRADER_PLAYBOOKS["high_relative_volume_trend"]
+    if family in {"intraday_trend", "mean_reversion"} or "pullback" in name or "vwap" in name or "trend" in name:
+        return MANUAL_TRADER_PLAYBOOKS["vwap_trend_pullback"]
+    return MANUAL_TRADER_PLAYBOOKS["frozen_signal_confirmation"]
+
+
 def _daily_scan_signal_rank(signal: dict[str, object]) -> tuple[float, ...]:
     state_rank = {"new_entry": 3, "reversal": 2, "active_hold": 1}.get(str(signal.get("signal_state") or ""), 0)
     preview = signal.get("broker_preview") if isinstance(signal.get("broker_preview"), dict) else {}
     margin = _safe_number(preview.get("estimated_margin"))
     account_size = _safe_number(preview.get("account_size")) or WORKING_ACCOUNT_SIZE_GBP
     margin_headroom = 1.0 - min(1.0, margin / max(1.0, account_size * 0.35))
+    tape = signal.get("today_tape") if isinstance(signal.get("today_tape"), dict) else {}
     return (
         state_rank,
+        _safe_number(signal.get("manual_setup_score")),
+        _safe_number(tape.get("relative_volume")),
         _safe_number(signal.get("paper_readiness_score")),
         _safe_number(signal.get("oos_net_profit")),
         _safe_number(signal.get("robustness_score")),
         margin_headroom,
+        abs(_safe_number(tape.get("opening_range_break_bps"))),
         -_safe_number(signal.get("cost_to_gross_ratio")),
         -_safe_number(signal.get("signal_age_bars")),
     )

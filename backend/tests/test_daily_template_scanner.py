@@ -156,6 +156,10 @@ def test_daily_template_scanner_builds_and_stores_queue_from_frozen_templates(tm
     assert result["counts"]["daily_paper_queue"] == 1
     assert result["daily_paper_queue"][0]["source_type"] == "daily_frozen_template_scan"
     assert result["daily_paper_queue"][0]["side"] == "BUY"
+    assert result["daily_paper_queue"][0]["manual_playbook"]["id"] == "vwap_trend_pullback"
+    assert result["daily_paper_queue"][0]["today_tape"]["relative_volume"] == 1.0
+    assert result["daily_paper_queue"][0]["manual_setup_score"] > 0
+    assert result["daily_paper_queue"][0]["signal_explainer"]["rule_change_allowed"] is False
     assert result["daily_paper_queue"][0]["broker_preview"]["order_placement"] == "disabled"
 
     latest = store.latest_day_trading_scan()
@@ -169,6 +173,34 @@ def test_daily_template_scanner_builds_and_stores_queue_from_frozen_templates(tm
     )
     assert reviewed["status"] == "reviewed"
     assert reviewed["after_close_results"]["notes"] == "matched expected direction"
+
+
+def test_manual_playbook_blocks_stale_intraday_bars():
+    template = {
+        "id": 1,
+        "name": "UK opening range breakout",
+        "market_id": "ABC",
+        "strategy_family": "breakout",
+        "interval": "5min",
+        "source_template": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+            "parameters": {"lookback": 6, "threshold_bps": 4, "position_size": 1},
+        },
+    }
+    market = MarketMapping("ABC", "ABC plc", "share", "ABC.LSE", "IX.D.ABC.DAILY.IP", True, "", "ABC", "ABC", "5min", 20, 5, 250)
+    base = datetime(2026, 5, 1, 8, 0)
+    bars = [
+        OHLCBar("ABC.LSE", base + timedelta(minutes=5 * index), 100 + index, 101 + index, 99 + index, 100 + index, 100_000)
+        for index in range(12)
+    ]
+
+    gate = main._manual_setup_gate(template, market, bars, datetime(2026, 5, 4).date(), 1, {"spread_bps": 20})
+
+    assert gate["passed"] is False
+    assert "stale_intraday_bars" in gate["blockers"]
+    assert gate["manual_playbook"]["id"] == "opening_range_breakout"
 
 
 def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_path, monkeypatch):

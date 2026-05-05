@@ -756,6 +756,8 @@ function App() {
         daily_paper_queue: result.daily_paper_queue ?? [],
         review_signals: result.review_signals ?? [],
         unsuitable: result.unsuitable ?? [],
+        no_setup_sample: result.no_setup_sample ?? [],
+        manual_playbooks: result.manual_playbooks ?? current?.manual_playbooks ?? [],
         latest_scan: result.latest_scan ?? null,
         counts: { ...(current?.counts ?? {}), ...(result.counts ?? {}) },
       }));
@@ -2350,13 +2352,15 @@ function DailyPaperView({ summary, dayFactory, dailyScannerState, productMode, a
   const dailyQueue = dayFactory?.daily_paper_queue ?? [];
   const reviewSignals = dayFactory?.review_signals ?? [];
   const unsuitableSignals = dayFactory?.unsuitable ?? [];
+  const noSetupSignals = dayFactory?.no_setup_sample ?? dayFactory?.latest_scan?.config?.no_setup_sample ?? [];
+  const manualPlaybooks = dayFactory?.manual_playbooks ?? [];
   const latestScan = dayFactory?.latest_scan;
   return (
     <section className="lab-shell">
       <div className="lab-header">
         <div>
           <h2><LineChart size={20} /> Daily Paper</h2>
-          <p>Market-open scans use active frozen intraday templates only. No parameter search, no live orders.</p>
+          <p>Market-open scans use active frozen intraday templates plus today-specific tape gates. No parameter search, no live orders.</p>
         </div>
         <div className="button-row">
           <button type="button" onClick={onRunDailyScanner} disabled={dailyScannerState?.status === "running"}>
@@ -2370,14 +2374,22 @@ function DailyPaperView({ summary, dayFactory, dailyScannerState, productMode, a
         <Metric label="Frozen day templates" value={counts.frozen_day_templates ?? 0} />
         <Metric label="Paper queue" value={counts.daily_paper_queue ?? dailyQueue.length} />
         <Metric label="Review signals" value={counts.eligible_review_signals ?? reviewSignals.length} />
+        <Metric label="Tape blockers" value={counts.today_filter_blockers ?? 0} />
         <Metric label="Order mode" value="disabled" />
       </div>
       <div className="status-list daily-status">
         <div className="status compact-status">
-          <strong>Daily mode source · frozen templates only</strong>
-          <span>Discovery leads stay blocked until Make tradeable, Save template, and Freeze validate are complete.</span>
+          <strong>Manual trader gates · frozen rules only</strong>
+          <span>Discovery leads stay blocked until Make tradeable, Save template, and Freeze validate are complete. Daily mode then checks relative volume, VWAP, opening range, spread, and account fit before paper preview.</span>
           <small>{productMode === "cfd" ? "CFD account selection is available for catalogue checks, but CFD-specific cost validation still needs a dedicated model." : "Spread bet mode uses the current IG-style spread-bet cost model."}</small>
         </div>
+        {manualPlaybooks.length > 0 && (
+          <div className="status compact-status">
+            <strong>Setup playbooks</strong>
+            <span>{manualPlaybooks.slice(0, 5).map((playbook) => playbook.label).join(" · ")}</span>
+            <small>These are confirmation gates around frozen templates, not new strategy generation.</small>
+          </div>
+        )}
         {dailyScannerState?.detail && (
           <div className="status compact-status">
             <strong>Scanner · {dailyScannerState.status}</strong>
@@ -2406,8 +2418,8 @@ function DailyPaperView({ summary, dayFactory, dailyScannerState, productMode, a
             {reviewSignals.slice(0, 10).map((lead) => (
               <div className="status compact-status" key={`${lead.id}-${lead.market_id}-daily-review`}>
                 <strong>{lead.market_id} · {lead.strategy_name}</strong>
-                <span>{strategyFamilyLabel(lead.strategy_family)} · OOS {formatMoney(lead.oos_net_profit)} · trades {lead.trade_count}</span>
-                <small>{lead.target_regime ? `${regimeLabel(lead.target_regime)} only · ` : ""}Preview only</small>
+                <span>{shortPlaybookLabel(lead.manual_playbook) || strategyFamilyLabel(lead.strategy_family)} · OOS {formatMoney(lead.oos_net_profit)} · RVol {formatRatio(lead.today_tape?.relative_volume ?? 0)}</span>
+                <small>{lead.signal_explainer?.headline ?? `${lead.target_regime ? `${regimeLabel(lead.target_regime)} only · ` : ""}Preview only`}</small>
               </div>
             ))}
             {reviewSignals.length === 0 && <span className="muted">The review queue fills after frozen templates match today's eligible markets.</span>}
@@ -2424,6 +2436,19 @@ function DailyPaperView({ summary, dayFactory, dailyScannerState, productMode, a
               </div>
             ))}
             {unsuitableSignals.length === 0 && <span className="muted">No terminal account-fit blockers in the latest queue.</span>}
+          </div>
+        </section>
+        <section className="lab-section">
+          <h3>No Setup Today</h3>
+          <div className="status-list">
+            {noSetupSignals.slice(0, 8).map((lead) => (
+              <div className="status compact-status" key={`${lead.template_id}-${lead.market_id}-daily-no-setup`}>
+                <strong>{lead.market_id} · {lead.strategy_name}</strong>
+                <span>{lead.no_setup_reason || lead.signal_explainer?.headline || "Today-specific filters did not confirm the setup."}</span>
+                <small>{shortPlaybookLabel(lead.manual_playbook)} · RVol {formatRatio(lead.today_tape?.relative_volume ?? 0)} · VWAP {round(lead.today_tape?.distance_from_vwap_bps ?? 0)} bps</small>
+              </div>
+            ))}
+            {noSetupSignals.length === 0 && <span className="muted">Frozen templates that do not fire today will appear here after a scan.</span>}
           </div>
         </section>
         <section className="lab-section span-2">
@@ -3261,9 +3286,14 @@ function DayTradingQueueCard({ lead }) {
         <Metric label="Side" value={lead.side ?? "-"} />
         <Metric label="Regime" value={regimeLabel(lead.current_regime)} />
         <Metric label="Setup" value={readableSnake(lead.signal_state)} />
+        <Metric label="Playbook" value={shortPlaybookLabel(lead.manual_playbook) || "-"} />
+        <Metric label="RVol" value={formatRatio(lead.today_tape?.relative_volume ?? 0)} />
+        <Metric label="VWAP" value={`${round(lead.today_tape?.distance_from_vwap_bps ?? 0)} bps`} />
+        <Metric label="Manual score" value={round(lead.manual_setup_score)} />
         <Metric label="OOS" value={formatMoney(lead.oos_net_profit)} />
         <Metric label="Order mode" value="Preview" />
       </div>
+      {lead.signal_explainer?.headline && <small>{lead.signal_explainer.headline}</small>}
       <div className="warning-row">
         <WarningChips warnings={lead.warnings} limit={5} empty="Gate clear" />
       </div>
@@ -6074,6 +6104,17 @@ function formatLargeNumber(value) {
 function formatRatio(value) {
   const number = Number(value ?? 0);
   return `${number.toFixed(2)}x`;
+}
+
+function shortPlaybookLabel(playbook = {}) {
+  const label = String(playbook?.label ?? "");
+  return {
+    "Opening range breakout": "OR breakout",
+    "VWAP trend pullback": "VWAP pullback",
+    "Failed breakout reversal": "Failed break",
+    "High relative-volume trend": "High RVol",
+    "Frozen signal confirmation": "Signal confirm",
+  }[label] ?? label;
 }
 
 function percent(value) {
