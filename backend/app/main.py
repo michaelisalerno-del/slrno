@@ -1052,8 +1052,10 @@ async def discover_midcap_markets(
     eodhd_api_token = settings.get_secret("eodhd", "api_token")
     if eodhd_api_token:
         provider = EODHDProvider(eodhd_api_token)
+        per_exchange_row_target = max(limit, 40)
         for exchange in [item for item in exchanges if item]:
             try:
+                exchange_row_count = 0
                 for offset in range(0, 1000, 100):
                     page = await provider.stock_screener(
                         exchange=exchange,
@@ -1063,14 +1065,18 @@ async def discover_midcap_markets(
                         limit=100,
                         offset=offset,
                     )
-                    rows.extend(_eodhd_midcap_rows(page, criteria, country_hint))
-                    if len(rows) >= limit or len(page) < 100:
+                    filtered_rows = _eodhd_midcap_rows(page, criteria, country_hint)
+                    rows.extend(filtered_rows)
+                    exchange_row_count += len(filtered_rows)
+                    if exchange_row_count >= per_exchange_row_target or len(page) < 100:
                         break
             except Exception as exc:
                 eodhd_error = _public_error(exc)
                 source_errors.append({"provider": "eodhd", "operation": "stock_screener", "detail": eodhd_error})
                 if rows:
                     break
+            if country_hint != "US" and len(rows) >= limit:
+                break
     fmp_api_key = settings.get_secret("fmp", "api_key")
     if not rows and fmp_api_key:
         source = "fmp_company_screener"

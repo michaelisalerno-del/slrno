@@ -257,3 +257,51 @@ def test_midcap_endpoint_prefers_eodhd_screener_when_available(tmp_path, monkeyp
     assert result["candidate_count"] == 1
     assert result["eligible_count"] == 1
     assert result["candidates"][0]["eodhd_symbol"] == "MKS.LSE"
+
+
+def test_midcap_endpoint_checks_all_us_exchanges_before_ranking(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("eodhd", "api_token", "eodhd-token")
+    monkeypatch.setattr(main, "settings", store)
+    calls: list[str] = []
+
+    class FakeEODHDProvider:
+        def __init__(self, api_token: str) -> None:
+            self.api_token = api_token
+
+        async def stock_screener(self, **kwargs):
+            exchange = str(kwargs.get("exchange") or "")
+            calls.append(exchange)
+            return [
+                {
+                    "code": f"{exchange[:3]}A",
+                    "name": f"{exchange} Test Software",
+                    "exchange": exchange,
+                    "currency_symbol": "$",
+                    "market_capitalization": 5_000_000_000,
+                    "adjusted_close": 25.0,
+                    "avgvol_200d": 1_000_000,
+                    "earnings_share": 1.0,
+                }
+            ]
+
+    monkeypatch.setattr(main, "EODHDProvider", FakeEODHDProvider)
+
+    result = asyncio.run(
+        main.discover_midcap_markets(
+            country="US",
+            product_mode="cfd",
+            limit=1,
+            min_market_cap=250_000_000,
+            max_market_cap=10_000_000_000,
+            min_volume=100_000,
+            max_spread_bps=60,
+            account_size=3000,
+            verify_ig=False,
+            require_ig_catalogue=False,
+        )
+    )
+
+    assert result["data_source"] == "eodhd_stock_screener"
+    assert {"NASDAQ", "NYSE", "AMEX"}.issubset(set(calls))
+    assert result["candidate_count"] == 1

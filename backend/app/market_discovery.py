@@ -15,6 +15,17 @@ DEFAULT_MAX_SPREAD_BPS = 60.0
 DEFAULT_STAKE_PROBE = 1.0
 DISCOVERED_SHARE_DEFAULT_TIMEFRAME = "5min"
 DISCOVERED_SHARE_MIN_BACKTEST_BARS = 750
+SPECULATIVE_SHARE_TERMS = (
+    "biotechnology",
+    "biopharmaceutical",
+    "blockchain",
+    "cannabis",
+    "crypto",
+    "cryptocurrency",
+    "mining inc",
+    "pharmaceutical",
+    "therapeutics",
+)
 
 COUNTRY_EXCHANGE_HINTS = {
     "uk": ("LSE", "GB"),
@@ -212,7 +223,9 @@ def _candidate_from_row(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, 
         warnings.append("cfd_cost_model_not_yet_enabled")
     if source.startswith("built_in"):
         warnings.append("starter_universe_not_live_constituents")
-    score = _score_candidate(market_cap, price, volume, spread_bps, estimated_margin, criteria)
+    quality_penalty, quality_warnings = _quality_penalty(row, criteria, price)
+    warnings.extend(quality_warnings)
+    score = max(0.0, _score_candidate(market_cap, price, volume, spread_bps, estimated_margin, criteria) - quality_penalty)
     return MidcapDiscoveryCandidate(
         market_id=market_id,
         name=name,
@@ -283,8 +296,46 @@ def _score_candidate(
     return liquidity_score + cap_score + cost_score + margin_score + price_score
 
 
+def _quality_penalty(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, price: float) -> tuple[float, list[str]]:
+    warnings: list[str] = []
+    penalty = 0.0
+    _exchange, country_code = country_exchange_hint(criteria.country)
+    text = _normal_key(" ".join(str(row.get(key) or "") for key in ("name", "Name", "companyName", "industry", "sector")))
+    if any(term.replace(" ", "_") in text for term in SPECULATIVE_SHARE_TERMS):
+        warnings.append("speculative_share_profile")
+        penalty += 22.0
+    earnings = _optional_float(row.get("earnings_share"), row.get("eps"), row.get("epsTTM"))
+    dividend_yield = _optional_float(row.get("dividend_yield"), row.get("lastDiv"), row.get("dividendYield"))
+    if earnings is not None and earnings < 0:
+        warnings.append("negative_earnings_share")
+        penalty += 10.0
+    if country_code == "US" and (earnings is not None and earnings <= 0) and (dividend_yield is None or dividend_yield <= 0):
+        warnings.append("no_profit_or_dividend_anchor")
+        penalty += 6.0
+    one_day_move = abs(_float(row.get("refund_1d_p"), row.get("change_p"), row.get("changesPercentage")))
+    five_day_move = abs(_float(row.get("refund_5d_p")))
+    if one_day_move >= 8.0 or five_day_move >= 15.0:
+        warnings.append("high_recent_move")
+        penalty += 10.0
+    if country_code == "US" and 0 < price < 10.0:
+        warnings.append("low_priced_us_share")
+        penalty += 8.0
+    return penalty, warnings
+
+
 def _normal_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _optional_float(*values: object) -> float | None:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _float(*values: object) -> float:
