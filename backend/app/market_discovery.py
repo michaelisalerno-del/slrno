@@ -109,7 +109,7 @@ class MidcapDiscoveryCandidate:
             warnings = (*warnings, "ig_availability_unconfirmed")
             if "ig_market_not_found" not in blockers:
                 blockers = (*blockers, "ig_market_not_found")
-        return replace(self, ig_status=status, ig_epic=epic, ig_name=name, blockers=blockers, eligible=not blockers)
+        return replace(self, ig_status=status, ig_epic=epic, ig_name=name, blockers=blockers, warnings=warnings, eligible=not blockers)
 
     def with_ig_blocker(self, status: str, blocker: str, warning: str = "") -> "MidcapDiscoveryCandidate":
         blockers = self.blockers if blocker in self.blockers else (*self.blockers, blocker)

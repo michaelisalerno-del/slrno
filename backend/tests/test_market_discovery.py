@@ -108,6 +108,7 @@ def test_midcap_discovery_ig_match_controls_eligibility_after_verification():
     assert missing.eligible is False
     assert "ig_market_not_found" in missing.blockers
     assert matched.eligible is True
+    assert "ig_availability_not_checked" not in matched.warnings
     assert matched.market_mapping().ig_epic == "KA.D.MKS.DAILY.IP"
 
 

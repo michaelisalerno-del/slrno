@@ -136,6 +136,29 @@ def test_select_ig_market_candidate_requires_share_catalogue_type_for_shares():
     assert select_ig_market_candidate(market, [{"epic": "IX.D.MKS.IP", "name": "Marks and Spencer", "type": "INDICES"}]) is None
 
 
+def test_select_ig_market_candidate_rejects_unrelated_share_ticker_collision():
+    market = MarketMapping("LMP", "LondonMetric Property Plc", "share", "LMP.LSE", "")
+
+    selected = select_ig_market_candidate(
+        market,
+        [{"epic": "UB.D.LMPXUS.DAILY.IP", "name": "LMP Automotive Holdings Inc", "type": "SHARES"}],
+    )
+
+    assert selected is None
+
+
+def test_select_ig_market_candidate_accepts_share_name_token_match():
+    market = MarketMapping("GGP", "Greatland Resources Limited", "share", "GGP.LSE", "")
+
+    selected = select_ig_market_candidate(
+        market,
+        [{"epic": "KC.D.GGPLN.DAILY.IP", "name": "Greatland Resources Ltd", "type": "SHARES"}],
+    )
+
+    assert selected is not None
+    assert selected["epic"] == "KC.D.GGPLN.DAILY.IP"
+
+
 def test_profile_from_ig_market_stores_reference_midpoint():
     market = MarketMapping("NAS100", "Nasdaq 100", "index", "NDX.INDX", "IX.D.NASDAQ.IFMM.IP")
 
