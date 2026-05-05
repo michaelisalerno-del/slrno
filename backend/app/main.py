@@ -1808,6 +1808,7 @@ def get_research_run(run_id: int) -> dict[str, object]:
     run = research_store.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Research run not found")
+    run = _compact_research_run(run)
     return {
         **run,
         "trials": [_trial_with_capital(trial) for trial in research_store.list_trials(run_id, limit=25)],
@@ -1816,6 +1817,31 @@ def get_research_run(run_id: int) -> dict[str, object]:
         "regime_picks": research_store.list_regime_picks(run_id),
         "bar_snapshots": research_store.list_bar_snapshots(run_id, include_payload=False),
     }
+
+
+def _compact_research_run(run: dict[str, object]) -> dict[str, object]:
+    compacted = dict(run)
+    config = compacted.get("config")
+    if isinstance(config, dict):
+        compacted["config"] = _compact_research_config(config)
+    return compacted
+
+
+def _compact_research_config(config: dict[str, object]) -> dict[str, object]:
+    compacted = dict(config)
+    statuses = compacted.get("market_statuses")
+    if isinstance(statuses, list):
+        compacted["market_statuses"] = [_compact_market_status(status) for status in statuses if isinstance(status, dict)]
+    return compacted
+
+
+def _compact_market_status(status: dict[str, object]) -> dict[str, object]:
+    compacted = dict(status)
+    bar_regime = compacted.get("bar_regime")
+    if isinstance(bar_regime, dict):
+        keys = ("schema", "bar_count", "current_regime", "regime_counts", "start", "end")
+        compacted["bar_regime"] = {key: bar_regime[key] for key in keys if key in bar_regime}
+    return compacted
 
 
 @app.get("/research/runs/{run_id}/trials")

@@ -1538,6 +1538,7 @@ def _compact_audit(audit: dict[str, object]) -> dict[str, object]:
     backtest = audit.get("backtest")
     if isinstance(backtest, dict):
         backtest = _normalized_backtest_payload(backtest, parameters)
+        backtest = _compact_backtest(backtest)
         audit["backtest"] = backtest
         warnings = _readiness_augmented_warnings(backtest, audit.get("warnings") or [], parameters)
         readiness = promotion_readiness(backtest, warnings, parameters)
@@ -1609,7 +1610,7 @@ def _compact_candidate(candidate: dict[str, object]) -> dict[str, object]:
 
 
 def _compact_backtest(backtest: dict[str, object]) -> dict[str, object]:
-    for key in ("equity_curve", "drawdown_curve", "daily_pnl_curve"):
+    for key in ("equity_curve", "drawdown_curve", "daily_pnl_curve", "compounded_projection_daily_pnl_curve"):
         values = list(backtest.get(key) or [])
         if len(values) > 120:
             backtest[key] = _sample_values(values, 120)
