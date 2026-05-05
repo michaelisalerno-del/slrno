@@ -966,11 +966,55 @@ button.ghost {
   margin-bottom: 12px;
 }
 
+.midcap-actions {
+  grid-column: span 2;
+  align-items: stretch;
+}
+
+.midcap-actions button {
+  flex: 1 1 180px;
+}
+
 .discovery-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.pipeline-steps {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.pipeline-step {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #e1e7ee;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.pipeline-step > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pipeline-step span {
+  color: #0b4f6c;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.pipeline-step small {
+  color: #5f6875;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .midcap-list {
@@ -1470,7 +1514,8 @@ th {
 
   .span-2,
   .compact button,
-  .compact .check {
+  .compact .check,
+  .midcap-actions {
     grid-column: auto;
   }
 

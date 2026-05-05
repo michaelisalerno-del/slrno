@@ -498,8 +498,8 @@ function App() {
   async function runMidcapTemplatePipeline() {
     const accountSize = optionalNumber(midcapSearch.account_size) ?? WORKING_ACCOUNT_SIZE;
     const maxMarkets = optionalNumber(midcapSearch.max_markets) ?? 6;
-    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps and starting the template-design run..." });
-    setMessage("Midcap template builder: discovering, installing, syncing costs, and launching the run...");
+    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps, starting the no-overnight design run, then showing the repair/freeze gates..." });
+    setMessage("Midcap template pipeline: discovering, installing, syncing costs, and launching the design run...");
     try {
       const result = await startMidcapTemplatePipeline({
         design_id: midcapSearch.design_id,
@@ -535,11 +535,11 @@ function App() {
       setMidcapPipelineState({
         status: result.status ?? "started",
         detail: result.research_run_id
-          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"}.`
+          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"}; repair and freeze gates are attached to the result.`
           : `No run started. ${result.discovery?.eligible_count ?? 0} eligible midcap candidate${result.discovery?.eligible_count === 1 ? "" : "s"} found.`,
       });
       setMessage(result.research_run_id
-        ? `Midcap template builder started run ${result.research_run_id}.`
+        ? `Midcap template pipeline started run ${result.research_run_id}.`
         : "Midcap template builder did not find enough eligible markets to start a run.");
       await loadModule("backtests").catch(() => undefined);
       if (result.research_run_id) {
@@ -3773,25 +3773,40 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
           <input type="checkbox" checked readOnly />
           IG catalogue required
         </label>
-        <button type="submit" disabled={loading}><Search size={16} /> {loading ? "Searching..." : "Find midcaps"}</button>
+        <div className="button-row midcap-actions">
+          <button type="button" onClick={onRunPipeline} disabled={pipelineState?.status === "running"}>
+            <ShieldCheck size={16} /> {pipelineState?.status === "running" ? "Building..." : "Start guided pipeline"}
+          </button>
+          <button type="submit" className="ghost" disabled={loading || pipelineState?.status === "running"}>
+            <Search size={16} /> {loading ? "Previewing..." : "Preview candidates"}
+          </button>
+        </div>
       </form>
       {selectedDesign && (
         <div className="status compact-status">
           <strong>{selectedDesign.label}</strong>
           <span>{selectedDesign.behaviour}</span>
-          <small>{(selectedDesign.strategy_families ?? []).map(strategyFamilyLabel).join(" / ")} · {normalizeInterval(selectedDesign.run_defaults?.interval ?? "5min")} · no overnight</small>
+          <small>{(selectedDesign.strategy_families ?? []).map(strategyFamilyLabel).join(" / ")} · {normalizeInterval(selectedDesign.run_defaults?.interval ?? "5min")} · no overnight · guided discovery, repair and freeze gates</small>
         </div>
       )}
-      <div className="button-row">
-        <button type="button" onClick={onRunPipeline} disabled={pipelineState?.status === "running"}>
-          <ShieldCheck size={16} /> {pipelineState?.status === "running" ? "Starting run..." : "Build templates from midcaps"}
-        </button>
-      </div>
       {pipelineState?.detail && (
         <div className="status compact-status">
-          <strong>Template builder · {pipelineState.status}</strong>
+          <strong>Guided template build · {pipelineState.status}</strong>
           <span>{pipelineState.detail}</span>
-          {pipeline?.research_run_id && <small>Research run {pipeline.research_run_id} · use Make tradeable, save, then Freeze validate winners.</small>}
+          {pipeline?.research_run_id && <small>Research run {pipeline.research_run_id} · winners must pass repair and freeze gates before entering daily paper scanning.</small>}
+        </div>
+      )}
+      {pipeline?.promotion_pipeline?.length > 0 && (
+        <div className="pipeline-steps">
+          {pipeline.promotion_pipeline.map((step) => (
+            <div className="pipeline-step" key={step.step}>
+              <div>
+                <strong>{readableSnake(step.step)}</strong>
+                <span>{readableSnake(step.status)}</span>
+              </div>
+              <small>{step.detail}</small>
+            </div>
+          ))}
         </div>
       )}
       {pipeline?.selected_markets?.length > 0 && (
