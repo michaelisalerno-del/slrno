@@ -212,3 +212,48 @@ def test_midcap_endpoint_blocks_candidates_until_ig_catalogue_is_checked(tmp_pat
     assert result["eligible_count"] == 0
     assert result["ig_status"] == "ig_required_not_checked"
     assert "ig_catalogue_not_checked" in result["candidates"][0]["blockers"]
+
+
+def test_midcap_endpoint_prefers_eodhd_screener_when_available(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("eodhd", "api_token", "eodhd-token")
+    monkeypatch.setattr(main, "settings", store)
+
+    class FakeEODHDProvider:
+        def __init__(self, api_token: str) -> None:
+            self.api_token = api_token
+
+        async def stock_screener(self, **kwargs):
+            return [
+                {
+                    "code": "MKS",
+                    "name": "Marks and Spencer Group",
+                    "exchange": "LSE",
+                    "currency_symbol": "GBp",
+                    "market_capitalization": 6_500_000_000,
+                    "adjusted_close": 323.95,
+                    "avgvol_200d": 2_000_000,
+                }
+            ]
+
+    monkeypatch.setattr(main, "EODHDProvider", FakeEODHDProvider)
+
+    result = asyncio.run(
+        main.discover_midcap_markets(
+            country="UK",
+            product_mode="spread_bet",
+            limit=3,
+            min_market_cap=250_000_000,
+            max_market_cap=10_000_000_000,
+            min_volume=100_000,
+            max_spread_bps=60,
+            account_size=3000,
+            verify_ig=False,
+            require_ig_catalogue=False,
+        )
+    )
+
+    assert result["data_source"] == "eodhd_stock_screener"
+    assert result["candidate_count"] == 1
+    assert result["eligible_count"] == 1
+    assert result["candidates"][0]["eodhd_symbol"] == "MKS.LSE"

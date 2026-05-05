@@ -33,6 +33,33 @@ def test_midcap_discovery_builds_installable_uk_share_mapping():
     assert mapping.min_backtest_bars == 750
 
 
+def test_midcap_discovery_accepts_eodhd_screener_rows():
+    candidates = build_midcap_candidates(
+        [
+            {
+                "code": "MKS",
+                "name": "Marks and Spencer Group",
+                "exchange": "LSE",
+                "currency_symbol": "GBp",
+                "market_capitalization": 6_500_000_000,
+                "adjusted_close": 323.95,
+                "avgvol_200d": 2_000_000,
+            }
+        ],
+        MidcapDiscoveryCriteria(country="UK", account_size=3000),
+        "eodhd_stock_screener",
+    )
+
+    candidate = candidates[0]
+
+    assert candidate.eligible is True
+    assert candidate.market_id == "MKS"
+    assert candidate.eodhd_symbol == "MKS.LSE"
+    assert candidate.exchange == "LSE"
+    assert candidate.currency == "GBp"
+    assert "starter_universe_not_live_constituents" not in candidate.warnings
+
+
 def test_midcap_discovery_blocks_expensive_us_share_for_small_account_probe_stake():
     candidates = build_midcap_candidates(
         [

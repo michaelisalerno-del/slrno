@@ -153,8 +153,11 @@ def build_midcap_candidates(rows: list[dict[str, Any]], criteria: MidcapDiscover
 
 
 def _candidate_from_row(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, source: str) -> MidcapDiscoveryCandidate | None:
-    symbol = str(row.get("symbol") or row.get("ticker") or "").strip()
-    name = str(row.get("companyName") or row.get("company_name") or row.get("name") or symbol).strip()
+    symbol = str(row.get("symbol") or row.get("ticker") or row.get("code") or row.get("Code") or "").strip()
+    exchange = str(row.get("exchangeShortName") or row.get("exchange") or row.get("Exchange") or "").strip()
+    if symbol and "." not in symbol and exchange:
+        symbol = f"{symbol}.{exchange}"
+    name = str(row.get("companyName") or row.get("company_name") or row.get("name") or row.get("Name") or symbol).strip()
     if not symbol or not name:
         return None
     market_id = _market_id_from_symbol(symbol)
@@ -179,9 +182,9 @@ def _candidate_from_row(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, 
     share_model = share_spread_bet_model(market)
     if share_model is None:
         return None
-    market_cap = _float(row.get("marketCap"), row.get("market_cap"), row.get("mktCap"))
-    price = _float(row.get("price"), row.get("lastSale"), row.get("last"))
-    volume = _float(row.get("volume"), row.get("avgVolume"), row.get("averageVolume"))
+    market_cap = _float(row.get("marketCap"), row.get("market_cap"), row.get("mktCap"), row.get("market_capitalization"))
+    price = _float(row.get("price"), row.get("lastSale"), row.get("last"), row.get("adjusted_close"), row.get("close"))
+    volume = _float(row.get("volume"), row.get("avgVolume"), row.get("averageVolume"), row.get("avgvol_200d"), row.get("avgvol_1d"))
     spread_bps = max(market.spread_bps, share_model.dealing_spread_bps)
     slippage_bps = max(market.slippage_bps, share_model.slippage_bps)
     margin_percent = share_model.margin_percent
@@ -216,9 +219,9 @@ def _candidate_from_row(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, 
         symbol=symbol,
         fmp_symbol=symbol,
         eodhd_symbol=eodhd_symbol,
-        exchange=str(row.get("exchangeShortName") or row.get("exchange") or ""),
+        exchange=exchange,
         country=str(row.get("country") or country_exchange_hint(criteria.country)[1]),
-        currency=str(row.get("currency") or ""),
+        currency=str(row.get("currency") or row.get("currency_symbol") or ""),
         market_cap=round(market_cap, 2),
         price=round(price, 6),
         volume=round(volume, 2),
@@ -286,8 +289,10 @@ def _normal_key(value: str) -> str:
 
 def _float(*values: object) -> float:
     for value in values:
+        if value in (None, ""):
+            continue
         try:
-            return float(value or 0.0)
+            return float(value)
         except (TypeError, ValueError):
             continue
     return 0.0

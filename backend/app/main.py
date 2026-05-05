@@ -974,14 +974,39 @@ async def discover_midcap_markets(
         max_spread_bps=max_spread_bps,
         account_size=account_size,
     )
-    source = "fmp_company_screener"
+    source = "eodhd_stock_screener"
     rows: list[dict[str, object]] = []
+    source_errors: list[dict[str, str]] = []
+    eodhd_error = ""
     fmp_error = ""
-    fmp_api_key = settings.get_secret("fmp", "api_key")
     exchange_hint, country_hint = country_exchange_hint(country)
-    if fmp_api_key:
+    exchanges = ["NASDAQ", "NYSE", "AMEX"] if country_hint == "US" else [exchange_hint]
+    eodhd_api_token = settings.get_secret("eodhd", "api_token")
+    if eodhd_api_token:
+        provider = EODHDProvider(eodhd_api_token)
+        for exchange in [item for item in exchanges if item]:
+            try:
+                for offset in range(0, 1000, 100):
+                    page = await provider.stock_screener(
+                        exchange=exchange,
+                        market_cap_more_than=min_market_cap,
+                        market_cap_lower_than=max_market_cap,
+                        min_volume=min_volume,
+                        limit=100,
+                        offset=offset,
+                    )
+                    rows.extend(_eodhd_midcap_rows(page, criteria, country_hint))
+                    if len(rows) >= limit or len(page) < 100:
+                        break
+            except Exception as exc:
+                eodhd_error = _public_error(exc)
+                source_errors.append({"provider": "eodhd", "operation": "stock_screener", "detail": eodhd_error})
+                if rows:
+                    break
+    fmp_api_key = settings.get_secret("fmp", "api_key")
+    if not rows and fmp_api_key:
+        source = "fmp_company_screener"
         provider = FMPProvider(fmp_api_key)
-        exchanges = ["NASDAQ", "NYSE", "AMEX"] if country_hint == "US" else [exchange_hint]
         for exchange in exchanges:
             try:
                 rows.extend(
@@ -996,17 +1021,19 @@ async def discover_midcap_markets(
                 )
             except Exception as exc:
                 fmp_error = _public_error(exc)
+                source_errors.append({"provider": "fmp", "operation": "company_screener", "detail": fmp_error})
                 if rows:
                     break
     if not rows:
         rows = fallback_midcap_rows(country)
-        source = "built_in_uk_midcap_starter" if not fmp_error else "built_in_fallback_after_fmp_error"
+        source = "built_in_uk_midcap_starter" if not source_errors else "built_in_fallback_after_provider_error"
         if fmp_api_key and rows:
             try:
                 rows = await _enrich_midcap_fallback_rows_with_fmp_quotes(FMPProvider(fmp_api_key), rows)
                 source = "built_in_midcap_starter_with_fmp_quotes"
             except Exception as exc:
                 fmp_error = f"{fmp_error}; FMP batch quote fallback failed: {_public_error(exc)}" if fmp_error else _public_error(exc)
+                source_errors.append({"provider": "fmp", "operation": "batch_quote_fallback", "detail": _public_error(exc)})
     candidates = build_midcap_candidates(rows, criteria, source)[:limit]
     ig_status = "not_checked"
     if require_ig_catalogue and not verify_ig:
@@ -1028,20 +1055,28 @@ async def discover_midcap_markets(
         else:
             candidates = await _verify_midcap_candidates_with_ig(provider, candidates)
             ig_status = "checked"
+    candidate_payloads = [candidate.as_dict() for candidate in candidates]
     return {
         "schema": "midcap_discovery_v1",
         "country": country,
         "product_mode": criteria.product_mode,
         "account_size": criteria.account_size,
         "data_source": source,
+        "eodhd_error": eodhd_error,
         "fmp_error": fmp_error,
+        "source_errors": source_errors,
         "ig_status": ig_status,
         "ig_catalogue_required": require_ig_catalogue,
         "criteria": criteria.as_dict(),
+        "candidate_count": len(candidates),
         "eligible_count": sum(1 for candidate in candidates if candidate.eligible),
-        "candidates": [candidate.as_dict() for candidate in candidates],
+        "blocked_count": sum(1 for candidate in candidates if not candidate.eligible),
+        "blocker_counts": _candidate_issue_counts(candidate_payloads, "blockers"),
+        "warning_counts": _candidate_issue_counts(candidate_payloads, "warnings"),
+        "candidates": candidate_payloads,
         "screening_pipeline": [
-            "FMP company-screener when your plan allows it.",
+            "EODHD stock screener for market cap, volume, and exchange filters.",
+            "FMP company-screener only as a secondary fallback.",
             "FMP batch-quote enrichment for the starter universe when the screener is unavailable.",
             "IG /markets search catalogue match as the hard eligibility gate.",
             "Installed markets still need IG cost sync and normal paper-readiness checks before promotion.",
@@ -2241,9 +2276,14 @@ async def _run_midcap_template_pipeline(
             "schema": discovery.get("schema"),
             "country": discovery.get("country"),
             "data_source": discovery.get("data_source"),
+            "eodhd_error": discovery.get("eodhd_error"),
             "fmp_error": discovery.get("fmp_error"),
+            "source_errors": discovery.get("source_errors", []),
             "ig_status": discovery.get("ig_status"),
+            "candidate_count": discovery.get("candidate_count", 0),
             "eligible_count": discovery.get("eligible_count", 0),
+            "blocked_count": discovery.get("blocked_count", 0),
+            "blocker_counts": discovery.get("blocker_counts", {}),
             "criteria": discovery.get("criteria", {}),
         },
         "selected_markets": installed_markets,
@@ -3391,6 +3431,48 @@ def _ig_provider_blocker(product_mode: str | None = None) -> tuple[str, str]:
     if not _account_id_for_product_mode(mode):
         return f"ig_{mode}_demo_account_required", "ig_demo_account_role_required"
     return "ig_credentials_required", "ig_catalogue_required"
+
+
+def _candidate_issue_counts(candidates: list[dict[str, object]], field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        for value in list(candidate.get(field) or []):
+            key = str(value or "").strip()
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _eodhd_midcap_rows(rows: list[dict[str, object]], criteria: MidcapDiscoveryCriteria, country_hint: str) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for row in rows:
+        code = str(row.get("code") or row.get("Code") or row.get("symbol") or "").strip()
+        if not code or not code[0].isalpha():
+            continue
+        market_cap = _safe_number(row.get("market_capitalization"), row.get("marketCap"), row.get("market_cap"))
+        price = _safe_number(row.get("adjusted_close"), row.get("price"), row.get("close"))
+        volume = _safe_number(row.get("avgvol_200d"), row.get("avgvol_1d"), row.get("volume"))
+        if market_cap < criteria.min_market_cap or market_cap > criteria.max_market_cap:
+            continue
+        if price <= 0 or volume < criteria.min_volume:
+            continue
+        if country_hint == "GB":
+            currency = str(row.get("currency_symbol") or row.get("currency") or "").strip().lower()
+            if currency not in {"p", "gbp", "gbx", "£"}:
+                continue
+            if _eodhd_row_looks_like_fund(row):
+                continue
+        if country_hint == "US":
+            currency = str(row.get("currency_symbol") or row.get("currency") or "").strip().lower()
+            if currency and currency not in {"$", "usd"}:
+                continue
+        output.append(row)
+    return output
+
+
+def _eodhd_row_looks_like_fund(row: dict[str, object]) -> bool:
+    text = " ".join(str(row.get(key) or "") for key in ("name", "Name", "industry", "sector")).lower()
+    return any(term in text for term in (" etf", "ucits", " etn", " etc", "investment trust", "fund", "physical "))
 
 
 def _public_error(exc: Exception) -> str:

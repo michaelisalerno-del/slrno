@@ -3726,6 +3726,7 @@ function CandidateCard({ candidate, onRefineTemplate, onRefineFurther, onMakeTra
 function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesigns = [], pipeline, pipelineState, onSearch, onInstall, onRunPipeline }) {
   const candidates = result?.candidates ?? [];
   const selectedDesign = templateDesigns.find((design) => design.id === search.design_id) ?? templateDesigns[0];
+  const sourceIssues = result?.source_errors ?? pipeline?.discovery?.source_errors ?? [];
   return (
     <Panel icon={<Search />} title="Eligible Midcap Finder">
       <form className="compact midcap-search" onSubmit={onSearch}>
@@ -3813,14 +3814,23 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
         <div className="discovery-summary">
           <Metric label="Run ID" value={pipeline.research_run_id ?? "-"} />
           <Metric label="Markets" value={pipeline.selected_markets.length} />
+          <Metric label="Universe" value={pipeline.discovery?.candidate_count ?? "-"} />
           <Metric label="Cost sync" value={pipeline.cost_sync?.status ?? "n/a"} />
         </div>
       )}
       {result && (
         <div className="discovery-summary">
+          <Metric label="Universe" value={result.candidate_count ?? candidates.length} />
           <Metric label="Eligible" value={result.eligible_count ?? 0} />
+          <Metric label="Blocked" value={result.blocked_count ?? 0} />
           <Metric label="Source" value={result.data_source ?? "n/a"} />
           <Metric label="IG catalogue" value={result.ig_status ?? "n/a"} />
+        </div>
+      )}
+      {sourceIssues.length > 0 && (
+        <div className="status compact-status">
+          <strong>Discovery source fallback</strong>
+          <span>{sourceIssues.map((issue) => `${issue.provider}: ${issue.detail}`).join(" · ")}</span>
         </div>
       )}
       {result?.ig_status === "ig_not_configured" && (
