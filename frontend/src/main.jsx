@@ -509,8 +509,8 @@ function App() {
   async function runMidcapTemplatePipeline() {
     const accountSize = optionalNumber(midcapSearch.account_size) ?? WORKING_ACCOUNT_SIZE;
     const maxMarkets = optionalNumber(midcapSearch.max_markets) ?? 3;
-    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps, then running a fast 2 vCPU no-overnight design pass with repair/freeze gates..." });
-    setMessage("Midcap template pipeline: quick guided scan, IG costs, then no-overnight design run...");
+    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps, running a fast no-overnight design pass, then auto-freezing the best eligible lead..." });
+    setMessage("Midcap template pipeline: quick guided scan, IG costs, design run, then automatic freeze validation...");
     try {
       const result = await startMidcapTemplatePipeline({
         design_id: midcapSearch.design_id,
@@ -546,7 +546,7 @@ function App() {
       setMidcapPipelineState({
         status: result.status ?? "started",
         detail: result.research_run_id
-          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; repair and freeze gates are attached to the result.`
+          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; Auto Freeze will save and validate the best eligible lead when it finishes.`
           : `No run started. ${result.discovery?.eligible_count ?? 0} eligible midcap candidate${result.discovery?.eligible_count === 1 ? "" : "s"} found.`,
       });
       setMessage(result.research_run_id
@@ -2699,6 +2699,7 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
   const trials = runDetail?.trials ?? [];
   const marketStatuses = runDetail?.config?.market_statuses ?? [];
   const marketFailures = runDetail?.config?.market_failures ?? [];
+  const autoFreeze = runDetail?.config?.pipeline?.auto_freeze;
   const [trialTierFilter, setTrialTierFilter] = React.useState("active");
   const [trialScanFilter, setTrialScanFilter] = React.useState("all");
   const [trialMarketView, setTrialMarketView] = React.useState("overall");
@@ -2843,6 +2844,25 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
               </div>
             ))}
             {marketStatuses.length === 0 && runDetail?.error && <span className="muted">{runDetail.error}</span>}
+          </div>
+        </section>
+      )}
+      {autoFreeze && (
+        <section className="lab-section span-2">
+          <h3>Auto Freeze</h3>
+          <div className="status-list">
+            <div className="status compact-status">
+              <strong>{readableSnake(autoFreeze.status ?? "waiting")}</strong>
+              <span>{autoFreeze.detail ?? autoFreeze.reason ?? "Waiting for the guided design run to finish."}</span>
+              {(autoFreeze.template_id || autoFreeze.freeze_run_id) && (
+                <small>
+                  {autoFreeze.template_id ? `Template ${autoFreeze.template_id}` : ""}
+                  {autoFreeze.template_id && autoFreeze.freeze_run_id ? " · " : ""}
+                  {autoFreeze.freeze_run_id ? `Freeze run ${autoFreeze.freeze_run_id}` : ""}
+                </small>
+              )}
+              {autoFreeze.error && <small>{autoFreeze.error}</small>}
+            </div>
           </div>
         </section>
       )}
@@ -3821,7 +3841,7 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
         <div className="status compact-status">
           <strong>Guided template build · {pipelineState.status}</strong>
           <span>{pipelineState.detail}</span>
-          {pipeline?.research_run_id && <small>Research run {pipeline.research_run_id} · winners must pass repair and freeze gates before entering daily paper scanning.</small>}
+          {pipeline?.research_run_id && <small>Research run {pipeline.research_run_id} · Auto Freeze saves one exact template and starts frozen validation after the run finishes.</small>}
         </div>
       )}
       {pipeline?.promotion_pipeline?.length > 0 && (

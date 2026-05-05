@@ -10,7 +10,14 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .adaptive_research import SEARCH_PRESETS, AdaptiveSearchConfig, apply_frozen_template_rules, available_research_engines, run_adaptive_search
+from .adaptive_research import (
+    FROZEN_PARAMETER_KEYS,
+    SEARCH_PRESETS,
+    AdaptiveSearchConfig,
+    apply_frozen_template_rules,
+    available_research_engines,
+    run_adaptive_search,
+)
 from .bar_patterns import analyze_market_regimes
 from .broker_preview import broker_order_preview
 from .capital import (
@@ -98,6 +105,17 @@ TWO_VCPU_MIDCAP_MARKET_CAP = 3
 TWO_VCPU_MIDCAP_SEARCH_BUDGET = 36
 TWO_VCPU_MIDCAP_REGIME_BUDGET = 6
 TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT = 18
+GUIDED_AUTO_FREEZE_TRIAL_LIMIT = 250
+GUIDED_AUTO_FREEZE_MIN_TRADES = 5
+GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS = {
+    "diagnostics_deferred_fast_scan",
+    "ig_minimum_margin_too_large_for_account",
+    "ig_minimum_risk_too_large_for_account",
+    "day_trade_forbidden_overnight_family",
+    "day_trade_held_overnight",
+    "day_trade_missing_flat_policy",
+    "day_trade_requires_intraday_bars",
+}
 MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
     "liquid_uk_midcap_trend_pullback": {
         "id": "liquid_uk_midcap_trend_pullback",
@@ -1667,11 +1685,37 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
     if saved_trials == 0:
         error = _market_failure_summary(market_failures) or "No valid trials were produced for the selected markets"
         research_store.update_run_status(run_id, "error", error)
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "skipped",
+                "reason": "no_trials",
+                "detail": "The guided design run produced no trials to freeze.",
+            },
+        )
         return
-    if market_failures:
-        research_store.update_run_status(run_id, "finished_with_warnings", _market_failure_summary(market_failures))
-        return
-    research_store.update_run_status(run_id, "finished")
+    final_status = "finished_with_warnings" if market_failures else "finished"
+    final_error = _market_failure_summary(market_failures) if market_failures else ""
+    research_store.update_run_status(run_id, final_status, final_error)
+    try:
+        await _maybe_auto_freeze_guided_pipeline(run_id, payload, api_token, selected_markets, market_statuses, market_failures)
+    except Exception as exc:
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "error",
+                "detail": "The design run finished, but automatic freeze validation could not be started.",
+                "error": _public_error(exc),
+            },
+        )
 
 
 @app.get("/research/runs")
@@ -1842,6 +1886,432 @@ def _is_frozen_validation_payload(payload: ResearchRunPayload) -> bool:
     source_template = payload.source_template if isinstance(payload.source_template, dict) else {}
     parameters = source_template.get("parameters")
     return payload.repair_mode == "frozen_validation" and isinstance(parameters, dict) and bool(parameters)
+
+
+def _is_guided_midcap_design_payload(payload: ResearchRunPayload) -> bool:
+    pipeline = payload.pipeline if isinstance(payload.pipeline, dict) else {}
+    return (
+        payload.repair_mode == "standard"
+        and str(pipeline.get("schema") or "") == "midcap_template_pipeline_v1"
+        and bool(pipeline.get("auto_freeze", {}).get("enabled", False) if isinstance(pipeline.get("auto_freeze"), dict) else False)
+    )
+
+
+async def _maybe_auto_freeze_guided_pipeline(
+    run_id: int,
+    payload: ResearchRunPayload,
+    api_token: str,
+    selected_markets: list[MarketMapping],
+    market_statuses: list[dict[str, object]],
+    market_failures: list[dict[str, object]],
+) -> None:
+    if not _is_guided_midcap_design_payload(payload):
+        return
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": "selecting",
+            "detail": "Selecting the best non-deferred intraday lead to save and freeze validate.",
+        },
+    )
+    trials = research_store.list_trials(run_id, limit=GUIDED_AUTO_FREEZE_TRIAL_LIMIT)
+    selected_trial, skip_summary = _select_guided_auto_freeze_trial(trials)
+    if selected_trial is None:
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "skipped",
+                "reason": "no_freezeable_trial",
+                "detail": "No design result was safe to freeze automatically.",
+                "trial_count": len(trials),
+                "skip_summary": skip_summary,
+            },
+        )
+        return
+
+    source_template = _guided_auto_freeze_source_template(selected_trial)
+    if not source_template.get("parameters"):
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "skipped",
+                "reason": "missing_frozen_parameters",
+                "detail": "The selected design result did not expose exact frozen parameters.",
+                "source_trial_id": selected_trial.get("id"),
+            },
+        )
+        return
+
+    saved_template = research_store.save_template(
+        _guided_auto_freeze_template_payload(
+            selected_trial,
+            payload,
+            source_template,
+            source_kind="guided_pipeline_auto_saved_source",
+        )
+    )
+    freeze_payload = _guided_auto_freeze_validation_payload(payload, selected_trial, source_template, saved_template)
+    freeze_markets = _selected_markets(freeze_payload.market_ids or [freeze_payload.market_id])
+    freeze_run_id = research_store.create_run(
+        market_id=freeze_markets[0].market_id,
+        data_source="eodhd_with_ig_cost_model",
+        status="running",
+        config=_research_run_config(freeze_payload, freeze_markets),
+    )
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": "running_freeze_validation",
+            "detail": "Saved the best eligible lead as a frozen template and started a no-search validation run.",
+            "source_trial_id": selected_trial.get("id"),
+            "template_id": saved_template.get("id"),
+            "template_name": saved_template.get("name"),
+            "freeze_run_id": freeze_run_id,
+        },
+    )
+    try:
+        await _execute_research_run(freeze_run_id, freeze_payload, api_token)
+    except Exception as exc:
+        research_store.update_run_status(freeze_run_id, "error", _public_error(exc))
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "error",
+                "detail": "Frozen validation failed before it could produce evidence.",
+                "source_trial_id": selected_trial.get("id"),
+                "template_id": saved_template.get("id"),
+                "freeze_run_id": freeze_run_id,
+                "error": _public_error(exc),
+            },
+        )
+        return
+
+    freeze_run = research_store.get_run(freeze_run_id)
+    validation_trial = _best_guided_freeze_validation_trial(freeze_run_id)
+    validation_status = str(freeze_run.get("status") if freeze_run else "unknown")
+    readiness_status = ""
+    if validation_trial is not None:
+        readiness = validation_trial.get("promotion_readiness") if isinstance(validation_trial.get("promotion_readiness"), dict) else {}
+        readiness_status = str(readiness.get("status") or validation_trial.get("readiness_status") or "blocked")
+        saved_template = research_store.save_template(
+            _guided_auto_freeze_template_payload(
+                selected_trial,
+                payload,
+                source_template,
+                source_kind="guided_pipeline_auto_freeze_validated",
+                validation_trial=validation_trial,
+                validation_run_id=freeze_run_id,
+            )
+        )
+    status = "freeze_validated_ready" if readiness_status == "ready_for_paper" else "freeze_validated_blocked"
+    if validation_trial is None:
+        status = "freeze_validation_error" if validation_status == "error" else "freeze_validation_finished_without_trial"
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": status,
+            "detail": _guided_auto_freeze_completion_detail(status, readiness_status),
+            "source_trial_id": selected_trial.get("id"),
+            "template_id": saved_template.get("id"),
+            "template_name": saved_template.get("name"),
+            "freeze_run_id": freeze_run_id,
+            "freeze_run_status": validation_status,
+            "validation_trial_id": validation_trial.get("id") if validation_trial else None,
+            "readiness_status": readiness_status,
+        },
+    )
+
+
+def _record_guided_auto_freeze_status(
+    run_id: int,
+    payload: ResearchRunPayload,
+    selected_markets: list[MarketMapping],
+    market_statuses: list[dict[str, object]],
+    market_failures: list[dict[str, object]],
+    auto_freeze: dict[str, object],
+) -> None:
+    if not _is_guided_midcap_design_payload(payload):
+        return
+    pipeline = dict(payload.pipeline if isinstance(payload.pipeline, dict) else {})
+    existing = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    pipeline["auto_freeze"] = {
+        **existing,
+        "enabled": True,
+        "policy": "save_best_non_deferred_intraday_lead_then_one_trial_frozen_validation",
+        "strategy_generation_allowed": False,
+        **auto_freeze,
+    }
+    payload.pipeline = pipeline
+    research_store.update_run_config(
+        run_id,
+        _research_run_config(payload, selected_markets, market_statuses=market_statuses, market_failures=market_failures),
+    )
+
+
+def _select_guided_auto_freeze_trial(trials: list[dict[str, object]]) -> tuple[dict[str, object] | None, dict[str, int]]:
+    skip_counts: dict[str, int] = {}
+    ranked = sorted(trials, key=_guided_auto_freeze_trial_rank, reverse=True)
+    for trial in ranked:
+        rejection = _guided_auto_freeze_rejection(trial)
+        if rejection:
+            skip_counts[rejection] = skip_counts.get(rejection, 0) + 1
+            continue
+        return trial, skip_counts
+    return None, skip_counts
+
+
+def _guided_auto_freeze_rejection(trial: dict[str, object]) -> str:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    readiness = trial.get("promotion_readiness") if isinstance(trial.get("promotion_readiness"), dict) else {}
+    warnings = set(str(item) for item in (trial.get("warnings") or []) if item)
+    warnings.update(str(item) for item in (readiness.get("blockers") or []) if item)
+    warnings.update(str(item) for item in (readiness.get("validation_warnings") or []) if item)
+    if warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS:
+        return sorted(warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS)[0]
+    if not str(parameters.get("market_id") or trial.get("market_id") or "").strip():
+        return "missing_market_id"
+    if not _freezeable_parameter_subset(parameters):
+        return "missing_frozen_parameters"
+    if not bool(parameters.get("day_trading_mode")):
+        return "not_day_trading"
+    if not bool(parameters.get("force_flat_before_close")) or not bool(parameters.get("no_overnight")):
+        return "missing_intraday_flat_contract"
+    if int(_safe_number(backtest.get("trade_count"))) < GUIDED_AUTO_FREEZE_MIN_TRADES:
+        return "too_few_trades_to_freeze"
+    if _safe_number(backtest.get("net_profit")) <= 0 and _safe_number(backtest.get("test_profit")) <= 0:
+        return "negative_net_and_oos_profit"
+    return ""
+
+
+def _guided_auto_freeze_trial_rank(trial: dict[str, object]) -> tuple[float, ...]:
+    tier_rank = {
+        "validated_candidate": 5,
+        "paper_candidate": 4,
+        "research_candidate": 3,
+        "incubator": 2,
+        "watchlist": 1,
+        "reject": 0,
+    }.get(str(trial.get("promotion_tier") or "reject"), 0)
+    readiness = trial.get("promotion_readiness") if isinstance(trial.get("promotion_readiness"), dict) else {}
+    readiness_rank = {"ready_for_paper": 3, "needs_ig_validation": 2, "blocked": 1}.get(str(readiness.get("status") or "blocked"), 0)
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    return (
+        float(tier_rank),
+        float(readiness_rank),
+        1.0 if _guided_auto_freeze_rejection(trial) == "" else 0.0,
+        _safe_number(evidence.get("oos_net_profit"), backtest.get("test_profit")),
+        _safe_number(parameters.get("stress_net_profit")),
+        _safe_number(backtest.get("net_profit")),
+        _safe_number(trial.get("robustness_score")),
+        _safe_number(backtest.get("net_cost_ratio")),
+        -_safe_number(backtest.get("max_drawdown")),
+        -_safe_number(trial.get("id")),
+    )
+
+
+def _freezeable_parameter_subset(parameters: dict[str, object]) -> dict[str, object]:
+    return {
+        str(key): value
+        for key, value in parameters.items()
+        if str(key) in FROZEN_PARAMETER_KEYS and value not in (None, "")
+    }
+
+
+def _guided_auto_freeze_source_template(trial: dict[str, object]) -> dict[str, object]:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    market_id = str(trial.get("market_id") or parameters.get("market_id") or "").strip()
+    family = str(trial.get("strategy_family") or parameters.get("family") or "").strip()
+    interval = str(parameters.get("timeframe") or parameters.get("interval") or "5min").strip()
+    target_regime = str(parameters.get("target_regime") or pattern.get("target_regime") or "").strip()
+    return {
+        "name": str(trial.get("strategy_name") or f"{market_id} {family}").strip(),
+        "source_id": trial.get("id"),
+        "market_id": market_id,
+        "family": family,
+        "style": str(parameters.get("style") or trial.get("style") or "intraday_only"),
+        "interval": interval,
+        "target_regime": target_regime,
+        "repair_attempt_count": _safe_int((parameters.get("search_audit") or {}).get("repair_attempt_count"))
+        if isinstance(parameters.get("search_audit"), dict)
+        else 0,
+        "holding_period": "intraday",
+        "force_flat_before_close": True,
+        "no_overnight": True,
+        "parameters": _freezeable_parameter_subset(parameters),
+    }
+
+
+def _guided_auto_freeze_template_payload(
+    source_trial: dict[str, object],
+    parent_payload: ResearchRunPayload,
+    source_template: dict[str, object],
+    *,
+    source_kind: str,
+    validation_trial: dict[str, object] | None = None,
+    validation_run_id: int | None = None,
+) -> dict[str, object]:
+    evidence_trial = validation_trial or source_trial
+    parameters = evidence_trial.get("parameters") if isinstance(evidence_trial.get("parameters"), dict) else {}
+    backtest = evidence_trial.get("backtest") if isinstance(evidence_trial.get("backtest"), dict) else {}
+    readiness = evidence_trial.get("promotion_readiness") if isinstance(evidence_trial.get("promotion_readiness"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    capital_source = _trial_with_capital(evidence_trial)
+    validated = validation_run_id is not None
+    stored_readiness = dict(readiness)
+    if not validated:
+        stored_readiness["status"] = "blocked"
+        blockers = list(stored_readiness.get("blockers") or [])
+        if "pending_frozen_validation" not in blockers:
+            blockers.append("pending_frozen_validation")
+        stored_readiness["blockers"] = blockers
+    validation: dict[str, object] = {}
+    if validation_run_id is not None:
+        validation = {
+            "run_id": validation_run_id,
+            "trial_id": evidence_trial.get("id"),
+            "repair_mode": "frozen_validation",
+            "parameter_hunting": False,
+        }
+    return {
+        "name": source_template.get("name") or source_trial.get("strategy_name") or "Guided frozen template",
+        "market_id": source_template.get("market_id") or parameters.get("market_id") or source_trial.get("market_id") or parent_payload.market_id,
+        "interval": source_template.get("interval") or parameters.get("timeframe") or parent_payload.interval or "5min",
+        "strategy_family": source_template.get("family") or parameters.get("family") or evidence_trial.get("strategy_family") or "",
+        "style": source_template.get("style") or parameters.get("style") or parent_payload.trading_style,
+        "target_regime": source_template.get("target_regime") or parameters.get("target_regime") or pattern.get("target_regime") or "",
+        "status": "active" if validated else "paused",
+        "source_run_id": source_trial.get("run_id"),
+        "source_trial_id": source_trial.get("id"),
+        "source_candidate_id": None,
+        "source_kind": source_kind,
+        "promotion_tier": evidence_trial.get("promotion_tier") if validated else "research_candidate",
+        "readiness_status": stored_readiness.get("status") or "blocked",
+        "robustness_score": _safe_number(evidence_trial.get("robustness_score")),
+        "testing_account_size": parent_payload.account_size,
+        "payload": {
+            "source_template": source_template,
+            "parameters": parameters,
+            "backtest": backtest,
+            "pattern": pattern,
+            "evidence": evidence,
+            "readiness": stored_readiness,
+            "warnings": list(evidence_trial.get("warnings") or []) + ([] if validated else ["pending_frozen_validation"]),
+            "search_audit": search_audit,
+            "capital_scenarios": capital_source.get("capital_scenarios", []),
+            "source_kind": source_kind,
+            "validation": validation,
+            "pipeline": {
+                "schema": "guided_midcap_auto_freeze_template_v1",
+                "parent_run_id": source_trial.get("run_id"),
+                "validation_run_id": validation_run_id,
+                "strategy_generation_allowed": False,
+            },
+        },
+    }
+
+
+def _guided_auto_freeze_validation_payload(
+    parent_payload: ResearchRunPayload,
+    source_trial: dict[str, object],
+    source_template: dict[str, object],
+    saved_template: dict[str, object],
+) -> ResearchRunPayload:
+    market_id = str(source_template.get("market_id") or source_trial.get("market_id") or parent_payload.market_id)
+    family = str(source_template.get("family") or source_trial.get("strategy_family") or "")
+    target_regime = str(source_template.get("target_regime") or "")
+    return ResearchRunPayload(
+        market_id=market_id,
+        market_ids=[market_id],
+        start=_guided_auto_freeze_validation_start(parent_payload.start, source_template),
+        end=parent_payload.end,
+        interval=str(source_template.get("interval") or parent_payload.interval or "5min"),
+        engine=parent_payload.engine,
+        search_preset="balanced",
+        trading_style=str(source_template.get("style") or parent_payload.trading_style or "intraday_only"),
+        objective="profit_first",
+        search_budget=1,
+        risk_profile=parent_payload.risk_profile,
+        strategy_families=[family] if family else [],
+        product_mode=parent_payload.product_mode,
+        cost_stress_multiplier=max(2.5, parent_payload.cost_stress_multiplier),
+        include_regime_scans=False,
+        regime_scan_budget_per_regime=None,
+        diagnostic_limit=None,
+        include_market_context=False,
+        target_regime=target_regime or None,
+        excluded_months=[],
+        repair_mode="frozen_validation",
+        account_size=parent_payload.account_size,
+        source_template=source_template,
+        pipeline={
+            "schema": "guided_midcap_auto_freeze_validation_v1",
+            "parent_run_id": source_trial.get("run_id"),
+            "source_trial_id": source_trial.get("id"),
+            "template_id": saved_template.get("id"),
+            "daily_mode_source": "active_frozen_template_library_only",
+            "strategy_generation_allowed": False,
+        },
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        paper_queue_limit=parent_payload.paper_queue_limit,
+        review_queue_limit=parent_payload.review_queue_limit,
+    )
+
+
+def _guided_auto_freeze_validation_start(current_start: str, source_template: dict[str, object]) -> str:
+    family = str(source_template.get("family") or "")
+    interval = str(source_template.get("interval") or "")
+    target = "2020-01-01" if interval == "1day" or family in {"calendar_turnaround_tuesday", "month_end_seasonality", "everyday_long"} else "2024-01-01"
+    current = str(current_start or "").strip()
+    return current if current and current < target else target
+
+
+def _best_guided_freeze_validation_trial(run_id: int) -> dict[str, object] | None:
+    trials = research_store.list_trials(run_id, limit=5)
+    if not trials:
+        return None
+    return sorted(trials, key=_guided_auto_freeze_trial_rank, reverse=True)[0]
+
+
+def _guided_auto_freeze_completion_detail(status: str, readiness_status: str) -> str:
+    if status == "freeze_validated_ready":
+        return "Frozen validation passed; the template can be considered for daily paper scans."
+    if status == "freeze_validated_blocked":
+        readiness = readiness_status or "blocked"
+        return f"Frozen validation finished, but readiness is {readiness}; keep it out of daily paper until repaired."
+    if status == "freeze_validation_error":
+        return "Frozen validation could not produce a validation trial; the saved template remains paused."
+    return "Frozen validation finished, but no validation trial was saved."
 
 
 def _preset_budget(search_preset: str) -> int:
@@ -2029,27 +2499,7 @@ def _compact_source_template(source_template: dict[str, object]) -> dict[str, ob
         "parameters": {
             str(key): value
             for key, value in parameters.items()
-            if key
-            in {
-                "confidence_quantile",
-                "direction",
-                "false_breakout_filter",
-                "lookback",
-                "max_hold_bars",
-                "min_hold_bars",
-                "min_trade_spacing",
-                "month_end_window",
-                "month_start_window",
-                "position_size",
-                "previous_day_filter",
-                "regime_filter",
-                "stop_loss_bps",
-                "take_profit_bps",
-                "threshold_bps",
-                "volatility_multiplier",
-                "weekday",
-                "z_threshold",
-            }
+            if str(key) in FROZEN_PARAMETER_KEYS
         },
     }
 
@@ -2478,12 +2928,17 @@ async def _run_midcap_template_pipeline(
         "cost_sync": cost_sync,
         "research_run_id": research_run_id,
         "research_run_payload": run_payload.model_dump() if run_payload is not None else None,
+        "auto_freeze_policy": {
+            "enabled": bool(research_run_id),
+            "max_freeze_runs": 1,
+            "selection": "best non-deferred intraday lead that is not terminally oversized",
+            "validation": "one frozen-validation run with search_budget=1 and no parameter hunting",
+        },
         "promotion_pipeline": _midcap_template_promotion_pipeline(status, research_run_id, str(cost_sync.get("status") or "skipped")),
         "next_actions": [
-            "Open the research run when it finishes and inspect Best Discovery Leads.",
-            "Use Make tradeable or Repair remaining on promising leads; terminal oversized markets should be skipped.",
-            "Save only repaired candidates that remain intraday/no-overnight.",
-            "Run Freeze validate before a template can enter the Daily Template Scanner.",
+            "Open the research run after it finishes to see the Auto Freeze status.",
+            "If Auto Freeze is blocked, use Make tradeable or Repair remaining on the best non-terminal lead.",
+            "Daily paper mode still uses only active frozen templates; rejected discovery leads will not fire.",
         ],
     }
 
@@ -2533,7 +2988,14 @@ def _midcap_template_research_payload(
             "cost_sync_status": cost_sync.get("status"),
             "server_profile": "guided_midcap_2vcpu_profile_v1",
             "diagnostic_limit_per_market": TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
-            "promotion_required": ["make_tradeable_or_repair_remaining", "save_template", "freeze_validate"],
+            "auto_freeze": {
+                "enabled": True,
+                "status": "waiting_for_design_run",
+                "policy": "save_best_non_deferred_intraday_lead_then_one_trial_frozen_validation",
+                "max_freeze_runs": 1,
+                "strategy_generation_allowed": False,
+            },
+            "promotion_required": ["auto_save_best_freezeable_lead", "freeze_validate_exact_rules", "manual_repair_if_blocked"],
             "daily_mode_source": "active_frozen_template_library_only",
         },
         day_trading_mode=True,
@@ -2562,14 +3024,14 @@ def _midcap_template_promotion_pipeline(status: str, research_run_id: int | None
             "run_id": research_run_id,
         },
         {
-            "step": "make_tradeable_or_repair_remaining",
-            "status": "requires_finished_run",
-            "detail": "Use existing blocker-specific repair so oversized candidates are skipped and promising ones are retested.",
+            "step": "auto_save_best_freezeable_lead",
+            "status": "waiting_for_finished_run" if research_run_id is not None else "waiting",
+            "detail": "When the design run finishes, the backend saves the best non-deferred intraday lead as frozen rules.",
         },
         {
-            "step": "save_and_freeze_validate",
-            "status": "requires_tradeable_candidate",
-            "detail": "Only exact frozen rules that pass validation may enter the daily paper scanner.",
+            "step": "auto_freeze_validate_exact_rules",
+            "status": "waiting_for_saved_template" if research_run_id is not None else "waiting",
+            "detail": "Launches one no-search frozen-validation run; failed or blocked templates stay out of daily paper.",
         },
     ]
 

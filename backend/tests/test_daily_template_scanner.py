@@ -262,6 +262,7 @@ def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_pat
     assert result["selected_markets"][0]["market_id"] == "ABC"
     assert installed["ABC"].default_timeframe == "5min"
     assert result["research_run_id"] is not None
+    assert result["auto_freeze_policy"]["enabled"] is True
     assert len(background_tasks.tasks) == 1
 
     run = store.get_run(result["research_run_id"])
@@ -275,4 +276,49 @@ def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_pat
     assert run["config"]["pipeline"]["design_id"] == "liquid_uk_midcap_trend_pullback"
     assert run["config"]["pipeline"]["server_profile"] == "guided_midcap_2vcpu_profile_v1"
     assert run["config"]["pipeline"]["daily_mode_source"] == "active_frozen_template_library_only"
+    assert run["config"]["pipeline"]["auto_freeze"]["enabled"] is True
+    assert run["config"]["pipeline"]["auto_freeze"]["status"] == "waiting_for_design_run"
     assert run["config"]["strategy_families"] == ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"]
+
+
+def test_guided_auto_freeze_selects_best_freezeable_intraday_trial():
+    deferred = {
+        "id": 1,
+        "strategy_name": "deferred",
+        "market_id": "ABC",
+        "promotion_tier": "research_candidate",
+        "robustness_score": 90,
+        "warnings": ["diagnostics_deferred_fast_scan"],
+        "promotion_readiness": {"status": "blocked", "blockers": ["diagnostics_deferred_fast_scan"], "validation_warnings": []},
+        "parameters": {
+            "market_id": "ABC",
+            "timeframe": "5min",
+            "family": "intraday_trend",
+            "style": "intraday_only",
+            "day_trading_mode": True,
+            "force_flat_before_close": True,
+            "no_overnight": True,
+            "lookback": 12,
+            "threshold_bps": 10,
+            "position_size": 1,
+        },
+        "backtest": {"trade_count": 30, "net_profit": 200, "test_profit": 80, "net_cost_ratio": 0.6, "max_drawdown": 120},
+    }
+    freezeable = {
+        **deferred,
+        "id": 2,
+        "strategy_name": "freezeable",
+        "robustness_score": 52,
+        "warnings": ["multiple_testing_haircut"],
+        "promotion_readiness": {"status": "blocked", "blockers": ["multiple_testing_haircut"], "validation_warnings": []},
+    }
+
+    selected, skipped = main._select_guided_auto_freeze_trial([deferred, freezeable])
+
+    assert selected["id"] == 2
+    assert skipped["diagnostics_deferred_fast_scan"] == 1
+    source_template = main._guided_auto_freeze_source_template(selected)
+    assert source_template["holding_period"] == "intraday"
+    assert source_template["force_flat_before_close"] is True
+    assert source_template["no_overnight"] is True
+    assert source_template["parameters"] == {"lookback": 12, "position_size": 1, "threshold_bps": 10}
