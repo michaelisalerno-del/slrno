@@ -52,6 +52,7 @@ from .providers.eodhd import EODHDProvider
 from .providers.fmp import FMPProvider
 from .providers.fred import FREDProvider
 from .providers.ig import IGDemoProvider
+from .promotion_readiness import PRICE_VALIDATED_COST_CONFIDENCES
 from .research_critic import ResearchCritic
 from .research_lab import ResearchStack
 from .research_store import ResearchStore
@@ -1239,11 +1240,12 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
     product_mode = None if payload.product_mode == "default" else _normalize_product_mode(payload.product_mode)
     provider = _ig_provider_from_settings(product_mode)
     account_currency = "GBP"
+    provider_warning = ""
     if provider is not None:
         try:
             account_currency = (await provider.account_status()).currency or "GBP"
-        except Exception:
-            provider = None
+        except Exception as exc:
+            provider_warning = f"IG account status check failed, using GBP account currency fallback before EPIC price validation: {_public_error(exc)}"
     profiles: list[dict[str, object]] = []
     for market in selected:
         profile = public_ig_cost_profile(market, account_currency)
@@ -1263,16 +1265,53 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
                     if recent_price is not None:
                         profile = profile_from_ig_market(resolved_market, market_details, account_currency, recent_price=recent_price)
                 if resolution_note:
-                    payload = profile.as_dict()
-                    payload["notes"] = list(payload.get("notes", [])) + [resolution_note]
-                    profile = IGCostProfile(**{key: value for key, value in payload.items() if key in IGCostProfile.__dataclass_fields__})
+                    profile = _cost_profile_with_notes(profile, [resolution_note])
             except Exception as exc:
-                fallback = profile.as_dict()
-                fallback["notes"] = list(fallback.get("notes", [])) + [f"IG sync failed: {_public_error(exc)}"]
-                profile = IGCostProfile(**{key: value for key, value in fallback.items() if key in IGCostProfile.__dataclass_fields__})
+                sync_error = _public_error(exc)
+                recent_price = await _recent_ig_price_snapshot(provider, resolved_market)
+                if recent_price is not None:
+                    profile = profile_from_ig_market(
+                        resolved_market,
+                        {
+                            "instrument": {
+                                "epic": resolved_market.ig_epic,
+                                "name": resolved_market.ig_name or resolved_market.name,
+                                "type": resolved_market.asset_class,
+                            },
+                            "snapshot": {},
+                            "dealingRules": {},
+                        },
+                        account_currency,
+                        recent_price=recent_price,
+                    )
+                    profile = _cost_profile_with_notes(
+                        profile,
+                        [f"IG market detail sync failed ({sync_error}), but recent IG /prices history validated the EPIC reference price."],
+                    )
+                else:
+                    profile = _cost_profile_with_notes(profile, [f"IG sync failed: {sync_error}"])
+        if provider_warning:
+            profile = _cost_profile_with_notes(profile, [provider_warning])
         research_store.save_cost_profile(profile)
         profiles.append(profile.as_dict())
-    return {"status": "synced", "profile_count": len(profiles), "profiles": profiles}
+    price_validated_count = sum(1 for profile in profiles if str(profile.get("confidence") or "") in PRICE_VALIDATED_COST_CONFIDENCES)
+    status = "synced" if price_validated_count == len(profiles) else "synced_needs_price_validation"
+    return {
+        "status": status,
+        "profile_count": len(profiles),
+        "price_validated_count": price_validated_count,
+        "profiles": profiles,
+    }
+
+
+def _cost_profile_with_notes(profile: IGCostProfile, notes: list[str]) -> IGCostProfile:
+    payload = profile.as_dict()
+    existing_notes = list(payload.get("notes", []))
+    for note in notes:
+        if note and note not in existing_notes:
+            existing_notes.append(note)
+    payload["notes"] = existing_notes
+    return IGCostProfile(**{key: value for key, value in payload.items() if key in IGCostProfile.__dataclass_fields__})
 
 
 async def _resolve_ig_market(provider: IGDemoProvider, market: MarketMapping) -> tuple[MarketMapping, str] | None:
@@ -2316,6 +2355,7 @@ async def _run_midcap_template_pipeline(
             cost_sync = {
                 "status": cost_sync_result.get("status", "synced"),
                 "profile_count": cost_sync_result.get("profile_count", 0),
+                "price_validated_count": cost_sync_result.get("price_validated_count", 0),
                 "profiles": [
                     {
                         "market_id": profile.get("market_id"),

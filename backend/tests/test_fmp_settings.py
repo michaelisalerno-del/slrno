@@ -189,6 +189,79 @@ def test_recent_ig_price_snapshot_tries_daily_for_share_epics():
     assert calls == ["MINUTE_5", "DAY"]
 
 
+def test_sync_ig_costs_still_uses_recent_price_when_account_status_fails(monkeypatch):
+    market = MarketMapping(
+        "PEGA",
+        "Pegasystems Inc",
+        "share",
+        "PEGA.US",
+        "UC.D.PEGAUS.CASH.IP",
+        True,
+        "discovered-pega",
+        "Pegasystems Inc",
+        "PEGA,Pegasystems Inc",
+        "5min",
+        15.0,
+        7.5,
+        750,
+    )
+    saved_profiles: list[dict[str, object]] = []
+
+    class FakeSettings:
+        def get_secret(self, provider: str, key: str) -> str | None:
+            values = {
+                ("ig", "api_key"): "demo-api",
+                ("ig", "username"): "demo-user",
+                ("ig", "password"): "demo-pass",
+                ("ig_accounts", "cfd_account_id"): "CFD98765",
+            }
+            return values.get((provider, key))
+
+    class FakeMarkets:
+        def get(self, market_id: str):
+            return market if market_id == "PEGA" else None
+
+    class FakeStore:
+        def save_cost_profile(self, profile) -> None:
+            saved_profiles.append(profile.as_dict())
+
+    class FakeIGProvider:
+        def __init__(self, api_key: str, username: str, password: str, account_id: str = "") -> None:
+            self.account_id = account_id
+
+        async def account_status(self):
+            raise RuntimeError("accounts endpoint unavailable")
+
+        async def market_details(self, epic: str) -> dict[str, object]:
+            return {
+                "instrument": {"epic": epic, "name": "Pegasystems Inc", "type": "SHARES"},
+                "snapshot": {"marketStatus": "CLOSED"},
+                "dealingRules": {"minDealSize": {"value": 1}},
+            }
+
+        async def recent_price_snapshot(
+            self,
+            epic: str,
+            resolution: str = "MINUTE_5",
+            max_points: int = 10,
+        ) -> dict[str, object] | None:
+            return {"reference_price": 36.79, "snapshot_time": "2026-05-05T20:00:00", "resolution": resolution}
+
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "research_store", FakeStore())
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    result = asyncio.run(main.sync_ig_market_costs(main.IGCostSyncPayload(market_ids=["PEGA"], product_mode="cfd")))
+
+    assert result["status"] == "synced"
+    assert result["price_validated_count"] == 1
+    assert result["profiles"][0]["confidence"] == "ig_recent_epic_reference_profile"
+    assert result["profiles"][0]["validation_status"] == "ig_price_validated"
+    assert "account status check failed" in " ".join(result["profiles"][0]["notes"])
+    assert saved_profiles[0]["confidence"] == "ig_recent_epic_reference_profile"
+
+
 def test_midcap_endpoint_blocks_candidates_until_ig_catalogue_is_checked(tmp_path, monkeypatch):
     store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
     monkeypatch.setattr(main, "settings", store)
