@@ -548,7 +548,7 @@ function App() {
         detail: result.research_run_id
           ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; Auto Freeze will save and validate the best eligible lead when it finishes.`
           : result.cost_sync?.ig_rate_limited
-          ? "No run started because IG rate-limited the price validation calls. Let the API cool down, then start again."
+          ? "No run started because IG refused price validation for the unvalidated shortlist. Cached price-validated profiles were reused where available; let the IG API cool down before trying another fresh shortlist."
           : result.status === "blocked_price_validation"
           ? "No run started because IG did not return price-validated cost profiles for the shortlisted markets. Wait for the IG API cooldown or refresh credentials, then start again."
           : `No run started. ${result.discovery?.eligible_count ?? 0} eligible midcap candidate${result.discovery?.eligible_count === 1 ? "" : "s"} found.`,
@@ -556,7 +556,7 @@ function App() {
       setMessage(result.research_run_id
         ? `Midcap template pipeline started run ${result.research_run_id}.`
         : result.cost_sync?.ig_rate_limited
-        ? "IG rate limit hit during price validation; the builder stopped before spending CPU."
+        ? "IG price-validation cooldown hit; no cached price-ready midcaps were available for a run."
         : result.status === "blocked_price_validation"
         ? "Midcap template builder stopped before running because IG price validation is missing."
         : "Midcap template builder did not find enough eligible markets to start a run.");
