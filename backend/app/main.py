@@ -1379,9 +1379,26 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
             provider_warning = f"IG account status check failed, using GBP account currency fallback before EPIC price validation: {status_error}"
     profiles: list[dict[str, object]] = []
     for market in selected:
+        stored_profile = _cost_profile_payload_for_market(market)
+        if _is_price_validated_cost_profile(stored_profile):
+            profiles.append(_cost_profile_reuse_payload(stored_profile, provider_warning))
+            continue
         profile = public_ig_cost_profile(market, account_currency)
         resolved_market = market
         resolution_note = ""
+        should_save_profile = True
+        if price_validation_rate_limited:
+            profile = _cost_profile_with_notes(
+                profile,
+                ["Skipped IG price validation because IG already rate-limited an earlier market in this sync. Retry after the IG API allowance cools down."],
+            )
+            should_save_profile = stored_profile is None
+            if provider_warning:
+                profile = _cost_profile_with_notes(profile, [provider_warning])
+            if should_save_profile:
+                research_store.save_cost_profile(profile)
+            profiles.append(profile.as_dict())
+            continue
         if provider is not None and not resolved_market.ig_epic:
             resolved = await _resolve_ig_market(provider, resolved_market)
             if resolved is not None:
@@ -1437,7 +1454,8 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
                         )
         if provider_warning:
             profile = _cost_profile_with_notes(profile, [provider_warning])
-        research_store.save_cost_profile(profile)
+        if should_save_profile:
+            research_store.save_cost_profile(profile)
         profiles.append(profile.as_dict())
     price_validated_count = sum(1 for profile in profiles if str(profile.get("confidence") or "") in PRICE_VALIDATED_COST_CONFIDENCES)
     ig_rate_limited = price_validation_rate_limited and price_validated_count == 0
@@ -1467,6 +1485,22 @@ def _cost_profile_with_notes(profile: IGCostProfile, notes: list[str]) -> IGCost
             existing_notes.append(note)
     payload["notes"] = existing_notes
     return IGCostProfile(**{key: value for key, value in payload.items() if key in IGCostProfile.__dataclass_fields__})
+
+
+def _is_price_validated_cost_profile(profile: dict[str, object] | None) -> bool:
+    return bool(profile) and str((profile or {}).get("confidence") or "") in PRICE_VALIDATED_COST_CONFIDENCES
+
+
+def _cost_profile_reuse_payload(profile: dict[str, object] | None, provider_warning: str = "") -> dict[str, object]:
+    payload = dict(profile or {})
+    notes = list(payload.get("notes") or [])
+    reuse_note = "Reused an existing IG price-validated cost profile to conserve IG API allowance."
+    if reuse_note not in notes:
+        notes.append(reuse_note)
+    if provider_warning and provider_warning not in notes:
+        notes.append(provider_warning)
+    payload["notes"] = notes
+    return payload
 
 
 def _looks_like_ig_rate_limit(text: str) -> bool:
@@ -1529,8 +1563,11 @@ async def _recent_ig_price_snapshot(
         try:
             snapshot = await provider.recent_price_snapshot(market.ig_epic, resolution=resolution)
         except Exception as exc:
+            error = _public_error(exc)
             if errors is not None:
-                errors.append(_public_error(exc))
+                errors.append(error)
+            if _looks_like_ig_rate_limit(error):
+                break
             continue
         if snapshot is not None:
             return snapshot
@@ -3055,6 +3092,8 @@ async def _run_midcap_template_pipeline(
                 "profile_count": cost_sync_result.get("profile_count", 0),
                 "price_validated_count": cost_sync_result.get("price_validated_count", 0),
                 "ig_rate_limited": cost_sync_result.get("ig_rate_limited", False),
+                "price_validation_rate_limited": cost_sync_result.get("price_validation_rate_limited", False),
+                "account_status_rate_limited": cost_sync_result.get("account_status_rate_limited", False),
                 "profiles": [
                     {
                         "market_id": profile.get("market_id"),
