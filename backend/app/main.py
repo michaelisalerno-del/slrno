@@ -502,6 +502,7 @@ class MidcapTemplatePipelinePayload(BaseModel):
     design_id: str = "liquid_uk_midcap_trend_pullback"
     country: str = "UK"
     product_mode: str = "spread_bet"
+    broker_validation_mode: str = "research_first"
     account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
     limit: int = Field(default=TWO_VCPU_MIDCAP_DISCOVERY_LIMIT, ge=1, le=120)
     max_markets: int = Field(default=TWO_VCPU_MIDCAP_MARKET_CAP, ge=1, le=20)
@@ -3022,6 +3023,13 @@ def _midcap_pipeline_server_profile(
     }
 
 
+def _midcap_broker_validation_mode(value: str) -> str:
+    normalized = str(value or "research_first").strip().lower()
+    if normalized in {"validate_before_research", "strict_ig_first", "ig_first"}:
+        return "validate_before_research"
+    return "research_first"
+
+
 async def _run_midcap_template_pipeline(
     payload: MidcapTemplatePipelinePayload,
     background_tasks: BackgroundTasks,
@@ -3030,6 +3038,8 @@ async def _run_midcap_template_pipeline(
     design = _midcap_template_design(payload.design_id)
     requested_country = _validate_midcap_design_country(design, payload.country)
     product_mode = _normalize_product_mode(payload.product_mode)
+    broker_validation_mode = _midcap_broker_validation_mode(payload.broker_validation_mode)
+    research_first = broker_validation_mode == "research_first"
     run_market_cap = _midcap_pipeline_market_cap(payload.max_markets)
     discovery_limit = _midcap_pipeline_discovery_limit(payload.limit, run_market_cap)
     discovery = await discover_midcap_markets(
@@ -3041,8 +3051,8 @@ async def _run_midcap_template_pipeline(
         min_volume=payload.min_volume,
         max_spread_bps=payload.max_spread_bps,
         account_size=payload.account_size,
-        verify_ig=True,
-        require_ig_catalogue=True,
+        verify_ig=not research_first,
+        require_ig_catalogue=not research_first,
     )
     candidates = list(discovery.get("candidates") or [])
     eligible = [
@@ -3050,7 +3060,7 @@ async def _run_midcap_template_pipeline(
         for candidate in candidates
         if isinstance(candidate, dict)
         and candidate.get("eligible")
-        and candidate.get("ig_status") == "ig_matched"
+        and (research_first or candidate.get("ig_status") == "ig_matched")
         and isinstance(candidate.get("market_mapping"), dict)
     ]
     eligible = sorted(eligible, key=lambda item: (_safe_number(item.get("score")), _safe_number(item.get("volume"))), reverse=True)
@@ -3080,9 +3090,22 @@ async def _run_midcap_template_pipeline(
                 "market_mapping": _market_response(mapping),
             }
         )
-    cost_sync: dict[str, object] = {"status": "skipped", "profile_count": 0, "price_validated_count": 0, "ig_rate_limited": False}
-    run_ready_market_ids = list(selected_market_ids)
-    if payload.auto_sync_costs and selected_market_ids:
+    existing_validated_market_ids = _price_validated_market_ids_from_store(selected_market_ids)
+    cost_sync: dict[str, object] = {
+        "status": "deferred_research_first" if research_first and selected_market_ids else "skipped",
+        "profile_count": 0,
+        "price_validated_count": len(existing_validated_market_ids),
+        "ig_rate_limited": False,
+        "broker_validation_mode": broker_validation_mode,
+        "note": (
+            "Guided research-first mode does not call IG during discovery. It reuses cached price-validated profiles and leaves new markets research-only until finalist validation."
+            if research_first and selected_market_ids
+            else ""
+        ),
+    }
+    run_ready_market_ids = [market_id for market_id in selected_market_ids if market_id in existing_validated_market_ids]
+    research_market_ids = list(selected_market_ids)
+    if payload.auto_sync_costs and selected_market_ids and not research_first:
         try:
             cost_sync_result = await sync_ig_market_costs(
                 IGCostSyncPayload(market_ids=selected_market_ids, product_mode=product_mode, skip_account_status=True)
@@ -3111,21 +3134,24 @@ async def _run_midcap_template_pipeline(
             }
             validated_market_ids = _price_validated_cost_profile_market_ids(cost_sync_result)
             run_ready_market_ids = [market_id for market_id in selected_market_ids if market_id in validated_market_ids]
+            research_market_ids = list(run_ready_market_ids)
         except HTTPException as exc:
             cost_sync = {"status": "error", "profile_count": 0, "error": str(exc.detail)}
             run_ready_market_ids = []
+            research_market_ids = []
         except Exception as exc:
             cost_sync = {"status": "error", "profile_count": 0, "error": _public_error(exc)}
             run_ready_market_ids = []
+            research_market_ids = []
     research_run_id: int | None = None
     run_payload: ResearchRunPayload | None = None
-    if payload.auto_start_run and run_ready_market_ids:
-        run_payload = _midcap_template_research_payload(payload, design, run_ready_market_ids, product_mode, cost_sync)
-        selected_markets = _selected_markets(run_ready_market_ids)
+    if payload.auto_start_run and research_market_ids:
+        run_payload = _midcap_template_research_payload(payload, design, research_market_ids, product_mode, cost_sync, run_ready_market_ids)
+        selected_markets = _selected_markets(research_market_ids)
         run_market_id = selected_markets[0].market_id if len(selected_markets) == 1 else "MULTI"
         research_run_id = research_store.create_run(
             market_id=run_market_id,
-            data_source="eodhd_with_ig_cost_model",
+            data_source="eodhd_with_ig_cost_model" if run_ready_market_ids else "eodhd_research_first_public_cost_model",
             status="running",
             config=_research_run_config(run_payload, selected_markets),
         )
@@ -3144,9 +3170,11 @@ async def _run_midcap_template_pipeline(
     ][:8]
     status = (
         "running"
+        if research_run_id is not None and run_ready_market_ids
+        else "running_research_only"
         if research_run_id is not None
         else "blocked_price_validation"
-        if selected_market_ids and payload.auto_sync_costs and not run_ready_market_ids
+        if selected_market_ids and payload.auto_sync_costs and not run_ready_market_ids and not research_first
         else "ready_without_run"
         if selected_market_ids
         else "blocked_no_eligible_midcaps"
@@ -3159,6 +3187,8 @@ async def _run_midcap_template_pipeline(
         "product_mode": product_mode,
         "strategy_generation_allowed_in_daily_mode": False,
         "design_mode": "research_discovery_only",
+        "broker_validation_mode": broker_validation_mode,
+        "research_cost_mode": "public_proxy_until_ig_finalist_validation" if research_first else "ig_price_validated_before_research",
         "server_profile": _midcap_pipeline_server_profile(payload.max_markets, payload.limit, run_market_cap, discovery_limit),
         "live_ordering_enabled": False,
         "order_placement": "disabled",
@@ -3177,20 +3207,22 @@ async def _run_midcap_template_pipeline(
             "criteria": discovery.get("criteria", {}),
         },
         "selected_markets": installed_markets,
+        "research_market_ids": research_market_ids,
         "run_ready_market_ids": run_ready_market_ids,
         "rejected_candidates": rejected,
         "cost_sync": cost_sync,
         "research_run_id": research_run_id,
         "research_run_payload": run_payload.model_dump() if run_payload is not None else None,
         "auto_freeze_policy": {
-            "enabled": bool(research_run_id),
+            "enabled": bool(research_run_id and run_ready_market_ids),
             "max_freeze_runs": 1,
             "selection": "best IG-price-validated intraday lead with positive OOS, robust costs, and no fragile-evidence blockers",
             "validation": "one frozen-validation run with search_budget=1 and no parameter hunting",
+            "blocked_reason": "" if run_ready_market_ids else "research_only_until_top_candidates_are_ig_price_validated",
         },
         "promotion_pipeline": _midcap_template_promotion_pipeline(status, research_run_id, str(cost_sync.get("status") or "skipped")),
         "next_actions": [
-            "Open the research run after it finishes to see the Auto Freeze status." if research_run_id else "Fix IG price validation before running template discovery.",
+            "Open the research run after it finishes, then IG-validate only the top finalists before Make tradeable/Freeze." if research_run_id and not run_ready_market_ids else "Open the research run after it finishes to see the Auto Freeze status." if research_run_id else "Loosen the watchlist filters or choose a different design.",
             "If Auto Freeze is blocked, use Make tradeable or Repair remaining on the best non-terminal lead.",
             "Daily paper mode still uses only active frozen templates; rejected discovery leads will not fire.",
         ],
@@ -3209,14 +3241,27 @@ def _price_validated_cost_profile_market_ids(cost_sync_result: dict[str, object]
     return output
 
 
+def _price_validated_market_ids_from_store(market_ids: list[str]) -> set[str]:
+    output: set[str] = set()
+    for market_id in market_ids:
+        profile = _cost_profile_payload_for_market_id(market_id)
+        if _is_price_validated_cost_profile(profile):
+            output.add(market_id)
+    return output
+
+
 def _midcap_template_research_payload(
     payload: MidcapTemplatePipelinePayload,
     design: dict[str, object],
     market_ids: list[str],
     product_mode: str,
     cost_sync: dict[str, object],
+    broker_validated_market_ids: list[str] | None = None,
 ) -> ResearchRunPayload:
     defaults = design.get("run_defaults") if isinstance(design.get("run_defaults"), dict) else {}
+    validated_ids = list(broker_validated_market_ids or [])
+    auto_freeze_enabled = bool(validated_ids)
+    broker_validation_mode = _midcap_broker_validation_mode(payload.broker_validation_mode)
     return ResearchRunPayload(
         market_id=market_ids[0],
         market_ids=market_ids,
@@ -3247,7 +3292,10 @@ def _midcap_template_research_payload(
             "design_label": design.get("label"),
             "country": _validate_midcap_design_country(design, payload.country),
             "product_mode": product_mode,
+            "broker_validation_mode": broker_validation_mode,
+            "research_cost_mode": "public_proxy_until_ig_finalist_validation" if broker_validation_mode == "research_first" else "ig_price_validated_before_research",
             "selected_market_ids": market_ids,
+            "broker_validated_market_ids": validated_ids,
             "auto_install": payload.auto_install,
             "auto_sync_costs": payload.auto_sync_costs,
             "auto_start_run": payload.auto_start_run,
@@ -3255,11 +3303,12 @@ def _midcap_template_research_payload(
             "server_profile": "guided_midcap_2vcpu_profile_v1",
             "diagnostic_limit_per_market": TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
             "auto_freeze": {
-                "enabled": True,
-                "status": "waiting_for_design_run",
+                "enabled": auto_freeze_enabled,
+                "status": "waiting_for_design_run" if auto_freeze_enabled else "research_only_awaiting_ig_finalist_validation",
                 "policy": "save_best_oos_positive_ig_validated_intraday_lead_then_one_trial_frozen_validation",
                 "max_freeze_runs": 1,
                 "strategy_generation_allowed": False,
+                "blocked_reason": "" if auto_freeze_enabled else "No shortlisted market has a cached IG price-validated cost profile yet.",
             },
             "promotion_required": ["auto_save_best_freezeable_lead", "freeze_validate_exact_rules", "manual_repair_if_blocked"],
             "daily_mode_source": "active_frozen_template_library_only",
@@ -3274,31 +3323,38 @@ def _midcap_template_research_payload(
 def _midcap_template_promotion_pipeline(status: str, research_run_id: int | None, cost_sync_status: str) -> list[dict[str, object]]:
     no_eligible = status == "blocked_no_eligible_midcaps"
     price_blocked = status == "blocked_price_validation"
+    research_only = status == "running_research_only"
+    run_started = research_run_id is not None
     return [
         {
             "step": "discover_ig_midcaps",
             "status": "completed" if not no_eligible else "blocked",
-            "detail": "Provider midcap universe filtered through liquidity, turnover, account-fit, and selected IG demo account checks.",
+            "detail": "Provider midcap universe filtered through liquidity, turnover, and account-fit checks; guided research-first mode does not spend IG calls here.",
         },
         {
             "step": "sync_ig_costs",
             "status": "blocked" if no_eligible or price_blocked else cost_sync_status,
-            "detail": "Requires IG price-validated spread, slippage, minimum deal size, margin, and stop-distance assumptions before running.",
+            "detail": "Reuses cached IG price-validated cost profiles. Fresh IG validation is deferred until only the top finalists need broker checks.",
         },
         {
             "step": "run_intraday_design_search",
-            "status": "running" if research_run_id is not None else "blocked" if no_eligible or price_blocked else "waiting",
-            "detail": "Runs the selected behaviour design on 5-minute bars with no overnight holding.",
+            "status": "running_research_only" if research_only else "running" if run_started else "blocked" if no_eligible or price_blocked else "waiting",
+            "detail": "Runs the selected behaviour design on 5-minute bars with no overnight holding; unvalidated markets remain research-only.",
             "run_id": research_run_id,
         },
         {
+            "step": "ig_validate_finalists",
+            "status": "waiting_for_research_leads" if research_only else "completed" if run_started else "waiting",
+            "detail": "After research ranks the shortlist, validate only the best 1-3 finalists with IG EPIC, recent price, min size, margin, and stop-distance checks.",
+        },
+        {
             "step": "auto_save_best_freezeable_lead",
-            "status": "waiting_for_finished_run" if research_run_id is not None else "waiting",
+            "status": "blocked_until_ig_validation" if research_only else "waiting_for_finished_run" if run_started else "waiting",
             "detail": "When the design run finishes, the backend only saves leads with positive OOS, robust costs, and no fragile-evidence blockers.",
         },
         {
             "step": "auto_freeze_validate_exact_rules",
-            "status": "waiting_for_saved_template" if research_run_id is not None else "waiting",
+            "status": "blocked_until_ig_validation" if research_only else "waiting_for_saved_template" if run_started else "waiting",
             "detail": "Launches one no-search frozen-validation run; failed or blocked templates stay out of daily paper.",
         },
     ]

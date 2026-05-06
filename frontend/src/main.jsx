@@ -509,8 +509,8 @@ function App() {
   async function runMidcapTemplatePipeline() {
     const accountSize = optionalNumber(midcapSearch.account_size) ?? WORKING_ACCOUNT_SIZE;
     const maxMarkets = optionalNumber(midcapSearch.max_markets) ?? 3;
-    setMidcapPipelineState({ status: "running", detail: "Finding liquid IG-eligible midcaps, validating live/recent IG prices, then only running clean markets..." });
-    setMessage("Midcap template pipeline: watchlist quality gates, IG price validation, design run, then strict freeze validation...");
+    setMidcapPipelineState({ status: "running", detail: "Finding liquid midcaps with EODHD/FMP first, then running research without spending IG calls. IG validation is reserved for the top finalists." });
+    setMessage("Midcap template pipeline: research-first watchlist, conservative costs, then IG-validate only finalists before paper/freeze.");
     try {
       const result = await startMidcapTemplatePipeline({
         design_id: midcapSearch.design_id,
@@ -523,6 +523,7 @@ function App() {
         max_market_cap: optionalNumber(midcapSearch.max_market_cap) ?? 10000000000,
         min_volume: optionalNumber(midcapSearch.min_volume) ?? 100000,
         max_spread_bps: optionalNumber(midcapSearch.max_spread_bps) ?? 60,
+        broker_validation_mode: "research_first",
         auto_install: true,
         auto_sync_costs: true,
         auto_start_run: true,
@@ -546,7 +547,9 @@ function App() {
       setMidcapPipelineState({
         status: result.status ?? "started",
         detail: result.research_run_id
-          ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; Auto Freeze will save and validate the best eligible lead when it finishes.`
+          ? result.status === "running_research_only"
+            ? `Run ${result.research_run_id} started in research-only mode for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"}. IG broker validation is deferred until the best finalists are worth checking.`
+            : `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; Auto Freeze will save and validate the best eligible lead when it finishes.`
           : result.cost_sync?.ig_rate_limited
           ? "No run started because IG refused price validation for the unvalidated shortlist. Cached price-validated profiles were reused where available; let the IG API cool down before trying another fresh shortlist."
           : result.status === "blocked_price_validation"
@@ -554,7 +557,9 @@ function App() {
           : `No run started. ${result.discovery?.eligible_count ?? 0} eligible midcap candidate${result.discovery?.eligible_count === 1 ? "" : "s"} found.`,
       });
       setMessage(result.research_run_id
-        ? `Midcap template pipeline started run ${result.research_run_id}.`
+        ? result.status === "running_research_only"
+          ? `Research-first midcap run ${result.research_run_id} started. Paper/freeze stays locked until top finalists pass IG validation.`
+          : `Midcap template pipeline started run ${result.research_run_id}.`
         : result.cost_sync?.ig_rate_limited
         ? "IG price-validation cooldown hit; no cached price-ready midcaps were available for a run."
         : result.status === "blocked_price_validation"
@@ -3872,7 +3877,7 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
         <div className="status compact-status">
           <strong>{selectedDesign.label}</strong>
           <span>{selectedDesign.behaviour}</span>
-          <small>{(selectedDesign.strategy_families ?? []).map(strategyFamilyLabel).join(" / ")} · {normalizeInterval(selectedDesign.run_defaults?.interval ?? "5min")} · {selectedDesign.run_defaults?.search_budget ?? 36} pilot trials/market · no overnight · guided discovery, repair and freeze gates</small>
+          <small>{(selectedDesign.strategy_families ?? []).map(strategyFamilyLabel).join(" / ")} · {normalizeInterval(selectedDesign.run_defaults?.interval ?? "5min")} · {selectedDesign.run_defaults?.search_budget ?? 36} pilot trials/market · no overnight · research first, IG-validate finalists</small>
         </div>
       )}
       {pipelineState?.detail && (
@@ -3899,7 +3904,8 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
         <div className="discovery-summary">
           <Metric label="Run ID" value={pipeline.research_run_id ?? "-"} />
           <Metric label="Shortlist" value={pipeline.selected_markets.length} />
-          <Metric label="Price-ready" value={pipeline.run_ready_market_ids?.length ?? 0} />
+          <Metric label="IG-ready" value={pipeline.run_ready_market_ids?.length ?? 0} />
+          <Metric label="Mode" value={readableSnake(pipeline.broker_validation_mode ?? "research_first")} />
           <Metric label="Universe" value={pipeline.discovery?.candidate_count ?? "-"} />
           <Metric label="Cost sync" value={pipeline.cost_sync?.status ?? "n/a"} />
         </div>

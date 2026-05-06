@@ -286,6 +286,7 @@ def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_pat
             main.MidcapTemplatePipelinePayload(
                 design_id="liquid_uk_midcap_trend_pullback",
                 country="UK",
+                broker_validation_mode="validate_before_research",
                 account_size=3000.0,
                 max_markets=4,
             ),
@@ -312,13 +313,15 @@ def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_pat
     assert run["config"]["include_market_context"] is False
     assert run["config"]["pipeline"]["design_id"] == "liquid_uk_midcap_trend_pullback"
     assert run["config"]["pipeline"]["server_profile"] == "guided_midcap_2vcpu_profile_v1"
+    assert run["config"]["pipeline"]["broker_validation_mode"] == "validate_before_research"
+    assert run["config"]["pipeline"]["broker_validated_market_ids"] == ["ABC"]
     assert run["config"]["pipeline"]["daily_mode_source"] == "active_frozen_template_library_only"
     assert run["config"]["pipeline"]["auto_freeze"]["enabled"] is True
     assert run["config"]["pipeline"]["auto_freeze"]["status"] == "waiting_for_design_run"
     assert run["config"]["strategy_families"] == ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"]
 
 
-def test_midcap_template_pipeline_waits_for_ig_price_validation(tmp_path, monkeypatch):
+def test_midcap_template_pipeline_runs_research_first_without_ig_price_validation(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     installed = {}
 
@@ -344,6 +347,8 @@ def test_midcap_template_pipeline_waits_for_ig_price_validation(tmp_path, monkey
             self.tasks.append((func, args))
 
     async def fake_discover_midcaps(**kwargs):
+        assert kwargs["verify_ig"] is False
+        assert kwargs["require_ig_catalogue"] is False
         return {
             "schema": "midcap_discovery_v1",
             "country": kwargs["country"],
@@ -382,12 +387,7 @@ def test_midcap_template_pipeline_waits_for_ig_price_validation(tmp_path, monkey
         }
 
     async def fake_sync_costs(payload):
-        return {
-            "status": "synced_needs_price_validation",
-            "profile_count": len(payload.market_ids),
-            "price_validated_count": 0,
-            "profiles": [{"market_id": "ABC", "confidence": "ig_public_spread_baseline", "validation_status": "needs_ig_price_validation"}],
-        }
+        raise AssertionError("research-first guided mode should not call IG price validation before research")
 
     monkeypatch.setattr(main, "research_store", store)
     monkeypatch.setattr(main, "markets", FakeMarkets())
@@ -407,11 +407,23 @@ def test_midcap_template_pipeline_waits_for_ig_price_validation(tmp_path, monkey
         )
     )
 
-    assert result["status"] == "blocked_price_validation"
-    assert result["research_run_id"] is None
+    assert result["status"] == "running_research_only"
+    assert result["research_run_id"] is not None
     assert result["run_ready_market_ids"] == []
+    assert result["research_market_ids"] == ["ABC"]
     assert result["selected_markets"][0]["market_id"] == "ABC"
-    assert len(background_tasks.tasks) == 0
+    assert result["cost_sync"]["status"] == "deferred_research_first"
+    assert result["auto_freeze_policy"]["enabled"] is False
+    assert result["auto_freeze_policy"]["blocked_reason"] == "research_only_until_top_candidates_are_ig_price_validated"
+    assert len(background_tasks.tasks) == 1
+
+    run = store.get_run(result["research_run_id"])
+    assert run is not None
+    assert run["config"]["pipeline"]["broker_validation_mode"] == "research_first"
+    assert run["config"]["pipeline"]["research_cost_mode"] == "public_proxy_until_ig_finalist_validation"
+    assert run["config"]["pipeline"]["broker_validated_market_ids"] == []
+    assert run["config"]["pipeline"]["auto_freeze"]["enabled"] is False
+    assert run["config"]["pipeline"]["auto_freeze"]["status"] == "research_only_awaiting_ig_finalist_validation"
 
 
 def test_guided_auto_freeze_selects_best_freezeable_intraday_trial():
