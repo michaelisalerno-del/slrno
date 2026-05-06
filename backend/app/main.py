@@ -469,6 +469,7 @@ class StrategyTemplateStatusPayload(BaseModel):
 class IGCostSyncPayload(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
     product_mode: str = "default"
+    skip_account_status: bool = False
 
 
 class BrokerOrderPreviewPayload(BaseModel):
@@ -1367,11 +1368,15 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
     provider = _ig_provider_from_settings(product_mode)
     account_currency = "GBP"
     provider_warning = ""
-    if provider is not None:
+    account_status_rate_limited = False
+    price_validation_rate_limited = False
+    if provider is not None and not payload.skip_account_status:
         try:
             account_currency = (await provider.account_status()).currency or "GBP"
         except Exception as exc:
-            provider_warning = f"IG account status check failed, using GBP account currency fallback before EPIC price validation: {_public_error(exc)}"
+            status_error = _public_error(exc)
+            account_status_rate_limited = _looks_like_ig_rate_limit(status_error)
+            provider_warning = f"IG account status check failed, using GBP account currency fallback before EPIC price validation: {status_error}"
     profiles: list[dict[str, object]] = []
     for market in selected:
         profile = public_ig_cost_profile(market, account_currency)
@@ -1387,14 +1392,22 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
                 market_details = await provider.market_details(resolved_market.ig_epic)
                 profile = profile_from_ig_market(resolved_market, market_details, account_currency)
                 if profile.confidence == "ig_live_epic_rules_no_spread":
-                    recent_price = await _recent_ig_price_snapshot(provider, resolved_market)
+                    price_errors: list[str] = []
+                    recent_price = await _recent_ig_price_snapshot(provider, resolved_market, price_errors)
                     if recent_price is not None:
                         profile = profile_from_ig_market(resolved_market, market_details, account_currency, recent_price=recent_price)
+                    elif any(_looks_like_ig_rate_limit(error) for error in price_errors):
+                        price_validation_rate_limited = True
+                        profile = _cost_profile_with_notes(
+                            profile,
+                            ["IG /prices history validation was rate-limited, so this EPIC still needs price validation before research."],
+                        )
                 if resolution_note:
                     profile = _cost_profile_with_notes(profile, [resolution_note])
             except Exception as exc:
                 sync_error = _public_error(exc)
-                recent_price = await _recent_ig_price_snapshot(provider, resolved_market)
+                price_errors: list[str] = []
+                recent_price = await _recent_ig_price_snapshot(provider, resolved_market, price_errors)
                 if recent_price is not None:
                     profile = profile_from_ig_market(
                         resolved_market,
@@ -1416,12 +1429,18 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
                     )
                 else:
                     profile = _cost_profile_with_notes(profile, [f"IG sync failed: {sync_error}"])
+                    if _looks_like_ig_rate_limit(sync_error) or any(_looks_like_ig_rate_limit(error) for error in price_errors):
+                        price_validation_rate_limited = True
+                        profile = _cost_profile_with_notes(
+                            profile,
+                            ["IG price validation was rate-limited; retry after the IG API allowance cools down."],
+                        )
         if provider_warning:
             profile = _cost_profile_with_notes(profile, [provider_warning])
         research_store.save_cost_profile(profile)
         profiles.append(profile.as_dict())
     price_validated_count = sum(1 for profile in profiles if str(profile.get("confidence") or "") in PRICE_VALIDATED_COST_CONFIDENCES)
-    ig_rate_limited = any(_looks_like_ig_rate_limit(" ".join(str(note) for note in profile.get("notes") or [])) for profile in profiles)
+    ig_rate_limited = price_validation_rate_limited and price_validated_count == 0
     status = (
         "synced"
         if price_validated_count == len(profiles)
@@ -1434,6 +1453,8 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
         "profile_count": len(profiles),
         "price_validated_count": price_validated_count,
         "ig_rate_limited": ig_rate_limited,
+        "price_validation_rate_limited": price_validation_rate_limited,
+        "account_status_rate_limited": account_status_rate_limited,
         "profiles": profiles,
     }
 
@@ -1496,14 +1517,20 @@ async def _resolve_ig_market(provider: IGDemoProvider, market: MarketMapping) ->
     return None
 
 
-async def _recent_ig_price_snapshot(provider: IGDemoProvider, market: MarketMapping) -> dict[str, object] | None:
+async def _recent_ig_price_snapshot(
+    provider: IGDemoProvider,
+    market: MarketMapping,
+    errors: list[str] | None = None,
+) -> dict[str, object] | None:
     resolutions = ("MINUTE_5", "MINUTE", "HOUR", "DAY")
     if market.asset_class == "share" or ".DAILY." in market.ig_epic.upper():
         resolutions = ("MINUTE_5", "DAY", "HOUR", "MINUTE")
     for resolution in resolutions:
         try:
             snapshot = await provider.recent_price_snapshot(market.ig_epic, resolution=resolution)
-        except Exception:
+        except Exception as exc:
+            if errors is not None:
+                errors.append(_public_error(exc))
             continue
         if snapshot is not None:
             return snapshot
@@ -3020,7 +3047,9 @@ async def _run_midcap_template_pipeline(
     run_ready_market_ids = list(selected_market_ids)
     if payload.auto_sync_costs and selected_market_ids:
         try:
-            cost_sync_result = await sync_ig_market_costs(IGCostSyncPayload(market_ids=selected_market_ids, product_mode=product_mode))
+            cost_sync_result = await sync_ig_market_costs(
+                IGCostSyncPayload(market_ids=selected_market_ids, product_mode=product_mode, skip_account_status=True)
+            )
             cost_sync = {
                 "status": cost_sync_result.get("status", "synced"),
                 "profile_count": cost_sync_result.get("profile_count", 0),
