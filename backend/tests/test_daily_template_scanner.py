@@ -33,6 +33,22 @@ def test_midcap_template_pipeline_rejects_design_country_mismatch():
     assert "UK template design" in str(exc_info.value.detail)
 
 
+def _daily_preflight_bars(symbol="ABC.LSE", *, active=True):
+    base = datetime(2026, 1, 1)
+    bars = []
+    for index in range(60):
+        if active:
+            close = 100 + index * 0.55
+            high = close * 1.022
+            low = close * 0.978
+        else:
+            close = 100.0
+            high = 100.12
+            low = 99.88
+        bars.append(OHLCBar(symbol, base + timedelta(days=index), close, high, low, close, 100_000))
+    return bars
+
+
 def test_daily_template_scanner_builds_and_stores_queue_from_frozen_templates(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     market = MarketMapping(
@@ -346,6 +362,14 @@ def test_midcap_template_pipeline_runs_research_first_without_ig_price_validatio
         def add_task(self, func, *args):
             self.tasks.append((func, args))
 
+    class FakeEODHDProvider:
+        def __init__(self, api_token):
+            self.api_token = api_token
+
+        async def historical_bars(self, symbol, interval, start, end):
+            assert interval == "1day"
+            return _daily_preflight_bars(symbol, active=True)
+
     async def fake_discover_midcaps(**kwargs):
         assert kwargs["verify_ig"] is False
         assert kwargs["require_ig_catalogue"] is False
@@ -394,6 +418,7 @@ def test_midcap_template_pipeline_runs_research_first_without_ig_price_validatio
     monkeypatch.setattr(main, "settings", FakeSettings())
     monkeypatch.setattr(main, "discover_midcap_markets", fake_discover_midcaps)
     monkeypatch.setattr(main, "sync_ig_market_costs", fake_sync_costs)
+    monkeypatch.setattr(main, "EODHDProvider", FakeEODHDProvider)
 
     background_tasks = FakeBackgroundTasks()
     result = asyncio.run(
@@ -412,6 +437,8 @@ def test_midcap_template_pipeline_runs_research_first_without_ig_price_validatio
     assert result["run_ready_market_ids"] == []
     assert result["research_market_ids"] == ["ABC"]
     assert result["selected_markets"][0]["market_id"] == "ABC"
+    assert result["day_trading_preflight"]["passed_count"] == 1
+    assert result["selected_markets"][0]["day_trading_preflight"]["status"] == "passed"
     assert result["cost_sync"]["status"] == "deferred_research_first"
     assert result["auto_freeze_policy"]["enabled"] is False
     assert result["auto_freeze_policy"]["blocked_reason"] == "research_only_until_top_candidates_are_ig_price_validated"
@@ -424,6 +451,108 @@ def test_midcap_template_pipeline_runs_research_first_without_ig_price_validatio
     assert run["config"]["pipeline"]["broker_validated_market_ids"] == []
     assert run["config"]["pipeline"]["auto_freeze"]["enabled"] is False
     assert run["config"]["pipeline"]["auto_freeze"]["status"] == "research_only_awaiting_ig_finalist_validation"
+
+
+def test_midcap_template_pipeline_blocks_low_action_research_first_candidates(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+
+    class FakeMarkets:
+        def get(self, market_id):
+            return None
+
+        def list(self, enabled_only=False):
+            return []
+
+        def upsert(self, mapping):
+            raise AssertionError("low-action midcaps should not be installed")
+
+    class FakeSettings:
+        def get_secret(self, provider, key):
+            return "token" if provider == "eodhd" and key == "api_token" else None
+
+    class FakeBackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, func, *args):
+            self.tasks.append((func, args))
+
+    class FakeEODHDProvider:
+        def __init__(self, api_token):
+            self.api_token = api_token
+
+        async def historical_bars(self, symbol, interval, start, end):
+            return _daily_preflight_bars(symbol, active=False)
+
+    async def fake_discover_midcaps(**kwargs):
+        return {
+            "schema": "midcap_discovery_v1",
+            "country": kwargs["country"],
+            "data_source": "test",
+            "ig_status": "deferred_research_first",
+            "eligible_count": 1,
+            "criteria": {"country": kwargs["country"], "product_mode": kwargs["product_mode"]},
+            "candidates": [
+                {
+                    "market_id": "ABC",
+                    "name": "ABC plc",
+                    "volume": 900000,
+                    "market_cap": 2_500_000_000,
+                    "score": 91,
+                    "eligible": True,
+                    "ig_status": "ig_deferred",
+                    "blockers": [],
+                    "warnings": [],
+                    "estimated_spread_bps": 35.0,
+                    "estimated_slippage_bps": 8.0,
+                    "market_mapping": {
+                        "market_id": "ABC",
+                        "name": "ABC plc",
+                        "asset_class": "share",
+                        "eodhd_symbol": "ABC.LSE",
+                        "ig_epic": "IX.D.ABC.DAILY.IP",
+                        "enabled": True,
+                        "plugin_id": "discovered-abc",
+                        "ig_name": "ABC",
+                        "ig_search_terms": "ABC,ABC plc",
+                        "default_timeframe": "5min",
+                        "spread_bps": 35.0,
+                        "slippage_bps": 8.0,
+                        "min_backtest_bars": 750,
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "discover_midcap_markets", fake_discover_midcaps)
+    monkeypatch.setattr(main, "EODHDProvider", FakeEODHDProvider)
+
+    background_tasks = FakeBackgroundTasks()
+    result = asyncio.run(
+        main.start_midcap_template_pipeline(
+            main.MidcapTemplatePipelinePayload(
+                design_id="liquid_uk_midcap_trend_pullback",
+                country="UK",
+                account_size=3000.0,
+            ),
+            background_tasks,
+        )
+    )
+
+    assert result["status"] == "blocked_no_actionable_midcaps"
+    assert result["research_run_id"] is None
+    assert result["selected_markets"] == []
+    assert result["day_trading_preflight"]["checked_count"] == 1
+    assert result["day_trading_preflight"]["passed_count"] == 0
+    assert result["day_trading_preflight"]["blocked_preview"][0]["blockers"] == [
+        "recent_range_too_low_for_day_trading",
+        "move_to_cost_too_low_for_day_trading",
+        "no_recent_action_for_day_trading",
+    ]
+    assert background_tasks.tasks == []
 
 
 def test_guided_auto_freeze_selects_best_freezeable_intraday_trial():

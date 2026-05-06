@@ -105,6 +105,7 @@ TWO_VCPU_MIDCAP_MARKET_CAP = 3
 TWO_VCPU_MIDCAP_SEARCH_BUDGET = 36
 TWO_VCPU_MIDCAP_REGIME_BUDGET = 6
 TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT = 18
+TWO_VCPU_MIDCAP_PREFLIGHT_LIMIT = 18
 GUIDED_AUTO_FREEZE_TRIAL_LIMIT = 250
 GUIDED_AUTO_FREEZE_MIN_TRADES = 20
 GUIDED_AUTO_FREEZE_MIN_OOS_TRADES = 8
@@ -3030,6 +3031,144 @@ def _midcap_broker_validation_mode(value: str) -> str:
     return "research_first"
 
 
+async def _rank_midcap_candidates_for_day_trading(
+    candidates: list[dict[str, object]],
+    api_token: str,
+    end: str,
+    design: dict[str, object],
+    run_market_cap: int,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    if not candidates or not api_token:
+        return candidates, {"status": "skipped", "reason": "missing_candidates_or_eodhd_token"}
+    provider = EODHDProvider(api_token)
+    limit = min(len(candidates), max(run_market_cap * 6, TWO_VCPU_MIDCAP_PREFLIGHT_LIMIT))
+    checked: list[dict[str, object]] = []
+    provider_errors: list[dict[str, object]] = []
+    for candidate in candidates[:limit]:
+        mapping_payload = candidate.get("market_mapping")
+        if not isinstance(mapping_payload, dict):
+            continue
+        mapping = _market_mapping_from_payload(mapping_payload)
+        try:
+            preflight = await _midcap_day_trading_preflight(provider, candidate, mapping, end, design)
+        except Exception as exc:
+            provider_errors.append({"market_id": mapping.market_id, "detail": _public_error(exc)})
+            preflight = {
+                "status": "unavailable",
+                "blockers": [],
+                "warnings": ["day_trading_preflight_unavailable"],
+                "detail": _public_error(exc),
+                "rank_score": _safe_number(candidate.get("score")),
+            }
+        checked.append({**candidate, "day_trading_preflight": preflight, "day_trading_rank_score": preflight.get("rank_score", candidate.get("score", 0))})
+    if not checked:
+        return candidates, {"status": "skipped", "reason": "no_preflight_candidates"}
+    passed = [
+        candidate
+        for candidate in checked
+        if (candidate.get("day_trading_preflight") or {}).get("status") == "passed"
+    ]
+    blocked = [
+        candidate
+        for candidate in checked
+        if (candidate.get("day_trading_preflight") or {}).get("status") == "blocked"
+    ]
+    unavailable_count = sum(1 for candidate in checked if (candidate.get("day_trading_preflight") or {}).get("status") == "unavailable")
+    ranked_pool = passed if passed else checked if unavailable_count == len(checked) else []
+    ranked = sorted(ranked_pool, key=lambda item: (_safe_number(item.get("day_trading_rank_score")), _safe_number(item.get("score"))), reverse=True)
+    summary = {
+        "status": "completed",
+        "checked_count": len(checked),
+        "passed_count": len(passed),
+        "blocked_count": len(blocked),
+        "unavailable_count": unavailable_count,
+        "fallback_used": unavailable_count == len(checked) and len(checked) > 0,
+        "blocked_preview": [
+            {
+                "market_id": candidate.get("market_id"),
+                "name": candidate.get("name"),
+                "blockers": (candidate.get("day_trading_preflight") or {}).get("blockers", []),
+                "avg_range_bps_20d": (candidate.get("day_trading_preflight") or {}).get("avg_range_bps_20d"),
+                "move_to_cost_ratio": (candidate.get("day_trading_preflight") or {}).get("move_to_cost_ratio"),
+                "recent_action_bps": (candidate.get("day_trading_preflight") or {}).get("recent_action_bps"),
+            }
+            for candidate in blocked[:5]
+        ],
+        "provider_errors": provider_errors[:5],
+        "policy": "Require recent action, enough daily range, and enough movement versus stressed public costs before spending a research slot.",
+    }
+    return ranked, summary
+
+
+async def _midcap_day_trading_preflight(
+    provider: EODHDProvider,
+    candidate: dict[str, object],
+    mapping: MarketMapping,
+    end: str,
+    design: dict[str, object],
+) -> dict[str, object]:
+    end_date = _parse_iso_date(end) or date.today()
+    start_date = end_date - timedelta(days=120)
+    bars = await provider.historical_bars(mapping.eodhd_symbol, "1day", start_date.isoformat(), end_date.isoformat())
+    clean = [bar for bar in bars if bar.close > 0 and bar.high >= bar.low]
+    if len(clean) < 35:
+        return {
+            "status": "blocked",
+            "blockers": ["not_enough_recent_daily_bars_for_day_trading_preflight"],
+            "warnings": [],
+            "bar_count": len(clean),
+            "rank_score": _safe_number(candidate.get("score")) - 50.0,
+        }
+    recent = clean[-20:]
+    recent5 = clean[-5:]
+    avg_range_bps = sum(((bar.high - bar.low) / bar.close) * 10_000 for bar in recent) / len(recent)
+    recent_range_bps = sum(((bar.high - bar.low) / bar.close) * 10_000 for bar in recent5) / len(recent5)
+    trend_20d_bps = ((clean[-1].close - clean[-21].close) / clean[-21].close) * 10_000 if clean[-21].close else 0.0
+    trend_5d_bps = ((clean[-1].close - clean[-6].close) / clean[-6].close) * 10_000 if clean[-6].close else 0.0
+    cost_stress = _safe_number((design.get("run_defaults") or {}).get("cost_stress_multiplier"), 2.5) if isinstance(design.get("run_defaults"), dict) else 2.5
+    estimated_spread_bps = _safe_number(candidate.get("estimated_spread_bps"), mapping.spread_bps)
+    estimated_slippage_bps = _safe_number(candidate.get("estimated_slippage_bps"), mapping.slippage_bps)
+    stressed_cost_bps = estimated_spread_bps + estimated_slippage_bps * max(1.0, cost_stress)
+    move_to_cost = avg_range_bps / max(stressed_cost_bps, 1.0)
+    recent_action_bps = max(abs(trend_5d_bps), recent_range_bps)
+    country = str(candidate.get("country") or design.get("country") or "").upper()
+    min_range_bps = 175.0 if country == "US" else 135.0
+    min_move_to_cost = 4.25 if country == "US" else 3.75
+    min_recent_action_bps = 125.0 if country == "US" else 100.0
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if avg_range_bps < min_range_bps:
+        blockers.append("recent_range_too_low_for_day_trading")
+    if move_to_cost < min_move_to_cost:
+        blockers.append("move_to_cost_too_low_for_day_trading")
+    if recent_action_bps < min_recent_action_bps:
+        blockers.append("no_recent_action_for_day_trading")
+    if abs(trend_20d_bps) < 100 and recent_range_bps < min_range_bps:
+        warnings.append("flat_recent_daily_structure")
+    action_score = (
+        min(35.0, avg_range_bps / max(min_range_bps, 1.0) * 16.0)
+        + min(30.0, move_to_cost * 4.0)
+        + min(20.0, abs(trend_20d_bps) / 60.0)
+        + min(15.0, recent_action_bps / max(min_recent_action_bps, 1.0) * 8.0)
+    )
+    blocker_penalty = 80.0 if blockers else 0.0
+    rank_score = _safe_number(candidate.get("score")) + action_score - blocker_penalty
+    return {
+        "status": "passed" if not blockers else "blocked",
+        "blockers": blockers,
+        "warnings": warnings,
+        "bar_count": len(clean),
+        "avg_range_bps_20d": round(avg_range_bps, 4),
+        "recent_range_bps_5d": round(recent_range_bps, 4),
+        "trend_20d_bps": round(trend_20d_bps, 4),
+        "trend_5d_bps": round(trend_5d_bps, 4),
+        "stressed_cost_bps": round(stressed_cost_bps, 4),
+        "move_to_cost_ratio": round(move_to_cost, 4),
+        "recent_action_bps": round(recent_action_bps, 4),
+        "rank_score": round(rank_score, 4),
+    }
+
+
 async def _run_midcap_template_pipeline(
     payload: MidcapTemplatePipelinePayload,
     background_tasks: BackgroundTasks,
@@ -3064,7 +3203,22 @@ async def _run_midcap_template_pipeline(
         and isinstance(candidate.get("market_mapping"), dict)
     ]
     eligible = sorted(eligible, key=lambda item: (_safe_number(item.get("score")), _safe_number(item.get("volume"))), reverse=True)
+    day_trading_preflight: dict[str, object] = {"status": "skipped"}
+    if research_first:
+        eligible, day_trading_preflight = await _rank_midcap_candidates_for_day_trading(
+            eligible,
+            api_token,
+            payload.end,
+            design,
+            run_market_cap,
+        )
     selected_candidates = eligible[:run_market_cap]
+    selected_candidate_ids = {str(candidate.get("market_id") or "") for candidate in selected_candidates if isinstance(candidate, dict)}
+    enriched_candidates_by_id = {
+        str(candidate.get("market_id") or ""): candidate
+        for candidate in eligible
+        if isinstance(candidate, dict) and str(candidate.get("market_id") or "")
+    }
     installed_markets: list[dict[str, object]] = []
     selected_market_ids: list[str] = []
     for candidate in selected_candidates:
@@ -3086,6 +3240,8 @@ async def _run_midcap_template_pipeline(
                 "volume": candidate.get("volume", 0),
                 "estimated_spread_bps": candidate.get("estimated_spread_bps", mapping.spread_bps),
                 "estimated_slippage_bps": candidate.get("estimated_slippage_bps", mapping.slippage_bps),
+                "day_trading_preflight": candidate.get("day_trading_preflight", {}),
+                "day_trading_rank_score": candidate.get("day_trading_rank_score", candidate.get("score", 0)),
                 "ig_epic": mapping.ig_epic,
                 "market_mapping": _market_response(mapping),
             }
@@ -3156,18 +3312,28 @@ async def _run_midcap_template_pipeline(
             config=_research_run_config(run_payload, selected_markets),
         )
         background_tasks.add_task(_run_research_job, research_run_id, run_payload.model_dump(), api_token)
-    rejected = [
-        {
-            "market_id": candidate.get("market_id"),
-            "name": candidate.get("name"),
-            "ig_status": candidate.get("ig_status"),
-            "blockers": candidate.get("blockers", []),
-            "warnings": candidate.get("warnings", []),
-            "score": candidate.get("score", 0),
-        }
-        for candidate in candidates
-        if isinstance(candidate, dict) and candidate not in selected_candidates
-    ][:8]
+    rejected: list[dict[str, object]] = []
+    for raw_candidate in candidates:
+        if not isinstance(raw_candidate, dict):
+            continue
+        market_id = str(raw_candidate.get("market_id") or "")
+        if market_id in selected_candidate_ids:
+            continue
+        candidate = enriched_candidates_by_id.get(market_id, raw_candidate)
+        rejected.append(
+            {
+                "market_id": candidate.get("market_id"),
+                "name": candidate.get("name"),
+                "ig_status": candidate.get("ig_status"),
+                "blockers": candidate.get("blockers", []),
+                "warnings": candidate.get("warnings", []),
+                "score": candidate.get("score", 0),
+                "day_trading_preflight": candidate.get("day_trading_preflight", {}),
+                "day_trading_rank_score": candidate.get("day_trading_rank_score", candidate.get("score", 0)),
+            }
+        )
+        if len(rejected) >= 8:
+            break
     status = (
         "running"
         if research_run_id is not None and run_ready_market_ids
@@ -3177,6 +3343,8 @@ async def _run_midcap_template_pipeline(
         if selected_market_ids and payload.auto_sync_costs and not run_ready_market_ids and not research_first
         else "ready_without_run"
         if selected_market_ids
+        else "blocked_no_actionable_midcaps"
+        if research_first and day_trading_preflight.get("status") == "completed" and int(_safe_number(day_trading_preflight.get("passed_count"))) == 0
         else "blocked_no_eligible_midcaps"
     )
     return {
@@ -3206,6 +3374,7 @@ async def _run_midcap_template_pipeline(
             "blocker_counts": discovery.get("blocker_counts", {}),
             "criteria": discovery.get("criteria", {}),
         },
+        "day_trading_preflight": day_trading_preflight,
         "selected_markets": installed_markets,
         "research_market_ids": research_market_ids,
         "run_ready_market_ids": run_ready_market_ids,

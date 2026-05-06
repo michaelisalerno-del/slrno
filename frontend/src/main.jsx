@@ -550,6 +550,8 @@ function App() {
           ? result.status === "running_research_only"
             ? `Run ${result.research_run_id} started in research-only mode for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"}. IG broker validation is deferred until the best finalists are worth checking.`
             : `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; Auto Freeze will save and validate the best eligible lead when it finishes.`
+          : result.status === "blocked_no_actionable_midcaps"
+          ? "No run started because the shortlisted midcaps did not have enough recent movement versus stressed costs for day trading. Try a wider or more active watchlist before changing score weights."
           : result.cost_sync?.ig_rate_limited
           ? "No run started because IG refused price validation for the unvalidated shortlist. Cached price-validated profiles were reused where available; let the IG API cool down before trying another fresh shortlist."
           : result.status === "blocked_price_validation"
@@ -564,6 +566,8 @@ function App() {
         ? "IG price-validation cooldown hit; no cached price-ready midcaps were available for a run."
         : result.status === "blocked_price_validation"
         ? "Midcap template builder stopped before running because IG price validation is missing."
+        : result.status === "blocked_no_actionable_midcaps"
+        ? "Midcap template builder stopped because the shortlist was too flat or too expensive for day trading."
         : "Midcap template builder did not find enough eligible markets to start a run.");
       await loadModule("backtests").catch(() => undefined);
       if (result.research_run_id) {
@@ -3803,6 +3807,11 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
   const designOptions = compatibleDesigns.length > 0 ? compatibleDesigns : templateDesigns;
   const selectedDesign = designOptions.find((design) => design.id === search.design_id) ?? designOptions[0];
   const sourceIssues = result?.source_errors ?? pipeline?.discovery?.source_errors ?? [];
+  const dayTradingPreflight = pipeline?.day_trading_preflight;
+  const preflightStatus = dayTradingPreflight?.status === "completed"
+    ? `${dayTradingPreflight.passed_count ?? 0}/${dayTradingPreflight.checked_count ?? 0}${dayTradingPreflight.fallback_used ? " fallback" : ""}`
+    : "skipped";
+  const preflightBlockedPreview = dayTradingPreflight?.blocked_preview ?? [];
   React.useEffect(() => {
     if (!selectedDesign?.id || search.design_id === selectedDesign.id) return;
     setSearch((current) => (
@@ -3862,7 +3871,7 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
         <input value={search.max_markets} onChange={(event) => setSearch({ ...search, max_markets: event.target.value })} type="number" min="1" max="3" step="1" />
         <label className="check compact-check">
           <input type="checkbox" checked readOnly />
-          IG catalogue required
+          Guided build defers IG validation
         </label>
         <div className="button-row midcap-actions">
           <button type="button" onClick={onRunPipeline} disabled={pipelineState?.status === "running"}>
@@ -3906,8 +3915,23 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
           <Metric label="Shortlist" value={pipeline.selected_markets.length} />
           <Metric label="IG-ready" value={pipeline.run_ready_market_ids?.length ?? 0} />
           <Metric label="Mode" value={readableSnake(pipeline.broker_validation_mode ?? "research_first")} />
+          <Metric label="Preflight" value={preflightStatus} />
           <Metric label="Universe" value={pipeline.discovery?.candidate_count ?? "-"} />
           <Metric label="Cost sync" value={pipeline.cost_sync?.status ?? "n/a"} />
+        </div>
+      )}
+      {dayTradingPreflight?.status === "completed" && (
+        <div className="status compact-status">
+          <strong>Day-trading preflight</strong>
+          <span>
+            {dayTradingPreflight.passed_count ?? 0} of {dayTradingPreflight.checked_count ?? 0} candidates had enough recent action and movement versus stressed costs.
+          </span>
+          <small>{dayTradingPreflight.policy}</small>
+          {preflightBlockedPreview.length > 0 && (
+            <div className="warning-row">
+              <WarningChips warnings={preflightBlockedPreview.flatMap((item) => item.blockers ?? [])} limit={6} />
+            </div>
+          )}
         </div>
       )}
       {result && (
