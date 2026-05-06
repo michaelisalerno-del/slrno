@@ -148,7 +148,7 @@ const CANDIDATE_FACTORY_MODES = [
   {
     id: "deep_one_market",
     label: "Deep one-market factory",
-    badge: "Best for gold",
+    badge: "One market",
     detail: "Uses only the first selected market and spends the whole budget there. Best when you want templates for every regime on one instrument.",
     preset: "deep",
     budgetLabel: "120 base trials + 18 trials / eligible regime",
@@ -165,12 +165,17 @@ const CANDIDATE_FACTORY_MODES = [
 
 const MODULES = [
   ["cockpit", "Today", Home],
-  ["broker", "Accounts", Wallet],
-  ["backtests", "Build Templates", Sparkles],
+  ["index_factory", "Indices", BarChart3],
+  ["share_lab", "Shares", Search],
   ["paper", "Daily Paper", LineChart],
   ["templates", "Library", Library],
+  ["broker", "Accounts", Wallet],
   ["settings", "Settings", SlidersHorizontal],
+  ["guide", "Guide", BookOpen],
 ];
+
+const BUILD_DATA_MODULES = new Set(["index_factory", "share_lab", "backtests"]);
+const INDEX_CORE_MARKETS = ["NAS100", "US500", "US30", "FTSE100", "DE40"];
 
 function App() {
   const [status, setStatus] = React.useState([]);
@@ -274,6 +279,14 @@ function App() {
   const enabledMarkets = markets.filter((item) => item.enabled);
   const disabledMarkets = markets.filter((item) => !item.enabled);
   const selectedMarkets = enabledMarkets.filter((item) => activeMarketIds.includes(item.market_id));
+  const indexEnabledMarkets = enabledMarkets.filter((item) => item.asset_class === "index");
+  const indexDisabledMarkets = disabledMarkets.filter((item) => item.asset_class === "index");
+  const indexSelectedMarkets = indexEnabledMarkets.filter((item) => activeMarketIds.includes(item.market_id));
+  const shareEnabledMarkets = enabledMarkets.filter((item) => item.asset_class === "share");
+  const isIndexWorkspace = activeModule === "index_factory" || activeModule === "backtests";
+  const builderEnabledMarkets = isIndexWorkspace ? indexEnabledMarkets : enabledMarkets;
+  const builderDisabledMarkets = isIndexWorkspace ? indexDisabledMarkets : disabledMarkets;
+  const builderSelectedMarkets = isIndexWorkspace ? indexSelectedMarkets : selectedMarkets;
   const selectedEngine = engines.find((engine) => engine.id === researchRun.engine) ?? engines[0] ?? FALLBACK_ENGINES[0];
   const selectedPreset = SEARCH_PRESETS.find((preset) => preset.id === researchRun.search_preset) ?? SEARCH_PRESETS[1];
   const refinementRepairActions = refinementTemplate ? repairActionsForTemplate(refinementTemplate) : [];
@@ -307,7 +320,7 @@ function App() {
         setCandidates(summary.candidates ?? []);
         setCritique(summary.critique ?? null);
         getResearchCritique().then(setCritique).catch(() => undefined);
-      } else if (moduleId === "backtests") {
+      } else if (BUILD_DATA_MODULES.has(moduleId)) {
         const [nextStatus, nextMarkets, nextPlugins, nextCacheStatus, summary, researchSummary, daySummary, designSummary, brokerSummary] = await Promise.all([
           getStatus(),
           getMarkets(),
@@ -371,8 +384,11 @@ function App() {
   }, [activeModule, includeArchivedRuns, loadModule]);
 
   React.useEffect(() => {
-    if (activeModule === "backtests" && !["builder", "factory", "results"].includes(activeTab)) {
-      setActiveTab("builder");
+    if ((activeModule === "index_factory" || activeModule === "backtests") && !["builder", "factory", "results"].includes(activeTab)) {
+      setActiveTab("factory");
+    }
+    if (activeModule === "share_lab" && !["share_overview", "share_results"].includes(activeTab)) {
+      setActiveTab("share_overview");
     }
   }, [activeModule, activeTab]);
 
@@ -381,6 +397,20 @@ function App() {
       setActiveMarketIds([enabledMarkets[0].market_id]);
     }
   }, [enabledMarkets, activeMarketIds.length]);
+
+  React.useEffect(() => {
+    if (activeModule !== "index_factory" && activeModule !== "backtests") {
+      return;
+    }
+    if (indexEnabledMarkets.length === 0) {
+      return;
+    }
+    const hasIndexSelected = activeMarketIds.some((marketId) => indexEnabledMarkets.some((market) => market.market_id === marketId));
+    if (!hasIndexSelected) {
+      const preferred = INDEX_CORE_MARKETS.find((marketId) => indexEnabledMarkets.some((market) => market.market_id === marketId)) ?? indexEnabledMarkets[0].market_id;
+      setActiveMarketIds([preferred]);
+    }
+  }, [activeModule, activeMarketIds, indexEnabledMarkets]);
 
   React.useEffect(() => {
     if (activeMarketIds.length > 0) {
@@ -453,17 +483,47 @@ function App() {
     setMessage(`${productModeLabel(mode)} workspace selected. Live order placement remains disabled.`);
   }
 
+  function selectIndexPreset(kind = "core") {
+    const availableCore = INDEX_CORE_MARKETS.filter((marketId) => indexEnabledMarkets.some((market) => market.market_id === marketId));
+    const marketIds = kind === "single"
+      ? [availableCore[0] ?? indexEnabledMarkets[0]?.market_id].filter(Boolean)
+      : availableCore.slice(0, 3);
+    if (marketIds.length === 0) {
+      setMessage("No enabled index markets are available.");
+      return;
+    }
+    setActiveMarketIds(marketIds);
+    setRefinementTemplate(null);
+    setResearchRun((current) => ({
+      ...current,
+      market_id: marketIds[0],
+      interval: "5min",
+      trading_style: "intraday_only",
+      objective: "profit_first",
+      risk_profile: "conservative",
+      search_preset: "balanced",
+      strategy_families: DAY_TRADING_FAMILIES,
+      cost_stress_multiplier: 2.5,
+      include_regime_scans: true,
+      day_trading_mode: true,
+      force_flat_before_close: true,
+      paper_queue_limit: current.paper_queue_limit || "3",
+      review_queue_limit: current.review_queue_limit || "10",
+    }));
+    setMessage(`${marketIds.join(" / ")} selected for index day-trading template discovery.`);
+  }
+
   async function submitMarket(event) {
     event.preventDefault();
     await saveMarket(market);
     setMessage("Market mapping saved.");
-    await loadModule("backtests");
+    await loadModule(activeModule);
   }
 
   async function installPlugin(pluginId) {
     await installMarketPlugin(pluginId);
     setMessage("Market plugin installed.");
-    await loadModule("backtests");
+    await loadModule(activeModule);
   }
 
   async function syncCosts(marketIds = activeMarketIds, productMode = researchRun.product_mode || "spread_bet") {
@@ -503,7 +563,7 @@ function App() {
     setActiveMarketIds([mapping.market_id]);
     setResearchRun((current) => ({ ...current, market_id: mapping.market_id, interval: "market_default" }));
     setMessage(`${mapping.market_id} installed as a share market.`);
-    await loadModule("backtests");
+    await loadModule("share_lab");
   }
 
   async function runMidcapTemplatePipeline() {
@@ -569,7 +629,7 @@ function App() {
         : result.status === "blocked_no_actionable_midcaps"
         ? "Midcap template builder stopped because the shortlist was too flat or too expensive for day trading."
         : "Midcap template builder did not find enough eligible markets to start a run.");
-      await loadModule("backtests").catch(() => undefined);
+      await loadModule("share_lab").catch(() => undefined);
       if (result.research_run_id) {
         await loadRunDetail(result.research_run_id);
       }
@@ -632,7 +692,7 @@ function App() {
       });
   }
 
-  async function launchResearchRun(runConfig = researchRun, marketIdsOverride = activeMarketIds, launchMessage = "Launching adaptive IG-aware search...") {
+  async function launchResearchRun(runConfig = researchRun, marketIdsOverride = activeMarketIds, launchMessage = "Launching adaptive IG-aware search...", refreshModule = activeModule) {
     const market_ids = marketIdsOverride.length ? marketIdsOverride : [runConfig.market_id];
     const preset = SEARCH_PRESETS.find((item) => item.id === runConfig.search_preset) ?? selectedPreset;
     const engine = engines.find((item) => item.id === runConfig.engine) ?? selectedEngine;
@@ -679,11 +739,11 @@ function App() {
         progress: runProgress(detail, plannedTrials),
       });
       setMessage(runCompletionMessage(result.run_id, detail));
-      await loadModule("backtests");
+      await loadModule(refreshModule);
     } catch (error) {
       setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
-      await loadModule("backtests").catch(() => undefined);
+      await loadModule(refreshModule).catch(() => undefined);
     }
   }
 
@@ -706,8 +766,8 @@ function App() {
     await launchAutoRefinementPlan(autoRefinementPlan, "Launching make-tradeable repair run...");
   }
 
-  function stageCandidateFactory(mode = "balanced") {
-    const plan = candidateFactoryPlan(mode, researchRun, enabledMarkets, activeMarketIds);
+  function stageCandidateFactory(mode = "balanced", marketUniverse = enabledMarkets, nextTab = "builder") {
+    const plan = candidateFactoryPlan(mode, researchRun, marketUniverse, activeMarketIds);
     if (plan.stopReason) {
       setMessage(plan.stopReason);
       return;
@@ -718,12 +778,12 @@ function App() {
       loadCostProfile(marketId).catch(() => undefined);
     }
     setResearchRun({ ...researchRun, ...plan.runPatch });
-    setActiveTab("builder");
+    setActiveTab(nextTab);
     setMessage(plan.stageMessage);
   }
 
-  async function runCandidateFactory(mode = "balanced") {
-    const plan = candidateFactoryPlan(mode, researchRun, enabledMarkets, activeMarketIds);
+  async function runCandidateFactory(mode = "balanced", marketUniverse = enabledMarkets, targetModule = activeModule) {
+    const plan = candidateFactoryPlan(mode, researchRun, marketUniverse, activeMarketIds);
     if (plan.stopReason) {
       setMessage(plan.stopReason);
       return;
@@ -735,7 +795,7 @@ function App() {
       loadCostProfile(marketId).catch(() => undefined);
     }
     setResearchRun(runConfig);
-    setActiveModule("backtests");
+    setActiveModule(targetModule);
     setActiveTab("results");
     try {
       setMessage(plan.mode.id === "day_trading" ? "Intraday discovery: syncing IG cost profiles..." : "Candidate Factory: syncing IG cost profiles...");
@@ -747,7 +807,7 @@ function App() {
         }
         return next;
       });
-      await launchResearchRun(runConfig, plan.marketIds, plan.launchMessage);
+      await launchResearchRun(runConfig, plan.marketIds, plan.launchMessage, targetModule);
     } catch (error) {
       setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
@@ -801,7 +861,7 @@ function App() {
     const plan = autoRefinementPlanForTemplate(template, researchRun, enabledMarkets, template.market_id ? [template.market_id] : activeMarketIds, { mode: "repair_remaining" });
     setRefinementTemplate(template);
     if (plan.stopReason) {
-      setActiveModule("backtests");
+      setActiveModule("index_factory");
       setActiveTab("builder");
       setMessage(plan.stopReason);
       return;
@@ -815,7 +875,7 @@ function App() {
     const plan = frozenValidationPlanForTemplate(template, researchRun, template.market_id ? [template.market_id] : activeMarketIds);
     setRefinementTemplate(template);
     if (plan.stopReason) {
-      setActiveModule("backtests");
+      setActiveModule("index_factory");
       setActiveTab("builder");
       setMessage(plan.stopReason);
       return;
@@ -825,13 +885,13 @@ function App() {
 
   async function launchAutoRefinementPlan(plan, launchMessage = "Launching auto-refine run...") {
     if (plan.stopReason) {
-      setActiveModule("backtests");
+      setActiveModule("index_factory");
       setActiveTab("builder");
       setMessage(plan.stopReason);
       return;
     }
     const runConfig = applyAutoRefinementPlan(plan);
-    setActiveModule("backtests");
+    setActiveModule("index_factory");
     setActiveTab("results");
     try {
       if (plan.syncCosts) {
@@ -845,7 +905,7 @@ function App() {
           return next;
         });
       }
-      await launchResearchRun(runConfig, plan.marketIds, launchMessage);
+      await launchResearchRun(runConfig, plan.marketIds, launchMessage, "index_factory");
     } catch (error) {
       setResearchState({ status: "error", detail: error.message, progress: 100 });
       setMessage(error.message);
@@ -982,9 +1042,9 @@ function App() {
   function useSavedTemplate(template) {
     const source = savedTemplateAsSource(template);
     refineTemplate(source);
-    setActiveModule("backtests");
+    setActiveModule("index_factory");
     setActiveTab("builder");
-    setMessage(`Loaded ${template.name} into the Backtests builder.`);
+    setMessage(`Loaded ${template.name} into the advanced builder.`);
   }
 
   async function makeSavedTemplateTradeable(template) {
@@ -1247,7 +1307,7 @@ function App() {
       setRunDetail(null);
     }
     setMessage(`Deleted Run ${run.id}: ${result.deleted_trials} trials and ${result.deleted_candidates} candidates removed.`);
-    await loadModule("backtests");
+    await loadModule(activeModule);
   }
 
   async function archiveRun(run) {
@@ -1260,7 +1320,7 @@ function App() {
       setRunDetail(null);
     }
     setMessage(`Archived Run ${result.run_id}.`);
-    await loadModule("backtests");
+    await loadModule(activeModule);
   }
 
   async function archiveRuns(runs) {
@@ -1276,7 +1336,7 @@ function App() {
       setRunDetail(null);
     }
     setMessage(`Archived ${archivable.length} runs.`);
-    await loadModule("backtests");
+    await loadModule(activeModule);
   }
 
   async function deleteRuns(runs) {
@@ -1299,7 +1359,7 @@ function App() {
       setRunDetail(null);
     }
     setMessage(`Deleted ${deletable.length} runs: ${deletedTrials} trials and ${deletedCandidates} candidates removed.`);
-    await loadModule("backtests");
+    await loadModule(activeModule);
   }
 
   function toggleMarket(marketId) {
@@ -1317,7 +1377,7 @@ function App() {
       <header className="topbar app-topbar">
         <div>
           <h1>slrno</h1>
-          <p>One guided workflow for template design, frozen-rule paper trading, and account safety.</p>
+          <p>Separated workspaces for index templates, share experiments, frozen-rule paper trading, and account safety.</p>
         </div>
         <div className="topbar-actions">
           <AccountSwitcher
@@ -1367,13 +1427,13 @@ function App() {
         </section>
       )}
 
-      {activeModule === "backtests" && (
+      {(activeModule === "index_factory" || activeModule === "backtests") && (
         <>
           <section className="lab-shell">
             <div className="lab-header">
               <div>
-                <h2><Sparkles size={20} /> Build Templates</h2>
-                <p>Find eligible markets, design intraday templates, repair blockers, and freeze exact rules before daily paper.</p>
+                <h2><BarChart3 size={20} /> Index Day Trading Factory</h2>
+                <p>Build and repair frozen templates on lower-cost index markets before Daily Paper uses them.</p>
               </div>
               <div className={`run-state ${researchState.status}`}>
                 <strong>{researchState.status.toUpperCase()}</strong>
@@ -1388,22 +1448,18 @@ function App() {
             </div>
             <AccountWorkspaceNotice productMode={selectedProductMode} accountRoles={igAccountRoles} />
             <div className="grid two build-start-grid">
-              <MidcapDiscoveryPanel
-                search={midcapSearch}
-                setSearch={setMidcapSearch}
-                result={midcapDiscovery}
-                loading={midcapLoading}
-                templateDesigns={templateDesigns}
-                pipeline={midcapPipeline}
-                pipelineState={midcapPipelineState}
-                onSearch={runMidcapDiscovery}
-                onInstall={installDiscoveredMarket}
-                onRunPipeline={runMidcapTemplatePipeline}
+              <IndexFactoryPanel
+                markets={indexEnabledMarkets}
+                selectedMarkets={indexSelectedMarkets}
+                researchState={researchState}
+                onSelectCore={() => selectIndexPreset("core")}
+                onSelectSingle={() => selectIndexPreset("single")}
+                onRunIntraday={() => runCandidateFactory("day_trading", indexEnabledMarkets, "index_factory")}
               />
               <Panel icon={<ShieldCheck />} title="Template Workflow">
                 <div className="factory-flow compact-flow">
                   {[
-                    ["1", "Find", "Choose account and discover IG-eligible markets."],
+                    ["1", "Choose", "Use one index or the core index set."],
                     ["2", "Design", "Run intraday/no-overnight template discovery."],
                     ["3", "Repair", "Clear cost, OOS, fold, regime, and capital blockers."],
                     ["4", "Freeze", "Retest exact parameters before reuse."],
@@ -1424,7 +1480,7 @@ function App() {
             </div>
             <div className="tabs">
               {[
-                ["factory", "Repair & Freeze"],
+                ["factory", "Index Factory"],
                 ["builder", "Advanced Run"],
                 ["results", "Evidence Runs"],
               ].map(([id, label]) => (
@@ -1576,14 +1632,14 @@ function App() {
                 <section className="lab-section span-2">
                   <h3>Markets</h3>
                   <div className="market-picker">
-                    {enabledMarkets.map((item) => (
+                    {builderEnabledMarkets.map((item) => (
                       <button type="button" className={activeMarketIds.includes(item.market_id) ? "market-chip active" : "market-chip"} key={item.market_id} onClick={() => toggleMarket(item.market_id)}>
                         <strong>{item.market_id}</strong>
                         <span>{item.name}</span>
                         {marketSubline(item) && <small>{marketSubline(item)}</small>}
                       </button>
                     ))}
-                    {disabledMarkets.map((item) => (
+                    {builderDisabledMarkets.map((item) => (
                       <button type="button" className="market-chip unavailable" key={item.market_id} disabled title={marketAvailabilityNote(item)}>
                         <strong>{item.market_id}</strong>
                         <span>{item.name}</span>
@@ -1734,8 +1790,8 @@ function App() {
                 <section className="lab-section span-2">
                   <h3>Cost Profiles</h3>
                   <div className="cost-grid">
-                    {selectedMarkets.map((item) => <CostProfile key={item.market_id} market={item} profile={costProfiles[item.market_id]} onLoad={() => loadCostProfile(item.market_id)} />)}
-                    {selectedMarkets.length === 0 && <span className="muted">Choose at least one market.</span>}
+                    {builderSelectedMarkets.map((item) => <CostProfile key={item.market_id} market={item} profile={costProfiles[item.market_id]} onLoad={() => loadCostProfile(item.market_id)} />)}
+                    {builderSelectedMarkets.length === 0 && <span className="muted">Choose at least one market.</span>}
                   </div>
                 </section>
               </form>
@@ -1747,19 +1803,19 @@ function App() {
                 dayFactory={dayFactory}
                 runDetail={runDetail}
                 researchRuns={researchRuns}
-                enabledMarkets={enabledMarkets}
-                disabledMarkets={disabledMarkets}
-                activeMarketIds={activeMarketIds}
-                selectedMarkets={selectedMarkets}
+                enabledMarkets={indexEnabledMarkets}
+                disabledMarkets={indexDisabledMarkets}
+                activeMarketIds={indexSelectedMarkets.map((market) => market.market_id)}
+                selectedMarkets={indexSelectedMarkets}
                 researchRun={researchRun}
                 toggleMarket={toggleMarket}
-                onRunFactory={runCandidateFactory}
-                onStageFactory={stageCandidateFactory}
+                onRunFactory={(mode) => runCandidateFactory(mode, indexEnabledMarkets, "index_factory")}
+                onStageFactory={(mode) => stageCandidateFactory(mode, indexEnabledMarkets, "builder")}
                 onMakeTradeable={makeTradeable}
                 onRepairRemaining={repairRemaining}
                 onFreezeValidate={freezeValidate}
                 onSaveTemplate={saveTemplateFromSource}
-                onRefresh={() => loadModule("backtests")}
+                onRefresh={() => loadModule("index_factory")}
               />
             )}
 
@@ -1783,6 +1839,7 @@ function App() {
             )}
           </section>
 
+          {activeTab === "builder" && (
           <section className="grid two lower-grid">
             <Panel icon={<Plug />} title="Market Plugins">
               <div className="plugin-list">
@@ -1833,9 +1890,72 @@ function App() {
               </div>
             </Panel>
           </section>
+          )}
 
-          <MarketTable markets={markets} />
+          {activeTab === "builder" && <MarketTable markets={builderEnabledMarkets} />}
         </>
+      )}
+
+      {activeModule === "share_lab" && (
+        <section className="lab-shell">
+          <div className="lab-header">
+            <div>
+              <h2><Search size={20} /> Shares Lab</h2>
+              <p>High-cost share discovery is kept separate from the index factory.</p>
+            </div>
+            <button type="button" className="secondary" onClick={() => loadModule("share_lab")}><RefreshCw size={16} /> Refresh</button>
+          </div>
+          <AccountWorkspaceNotice productMode={selectedProductMode} accountRoles={igAccountRoles} />
+          <div className="grid two build-start-grid">
+            <ShareCostRealityPanel shareMarkets={shareEnabledMarkets} indexMarkets={indexEnabledMarkets} />
+            <MidcapDiscoveryPanel
+              search={midcapSearch}
+              setSearch={setMidcapSearch}
+              result={midcapDiscovery}
+              loading={midcapLoading}
+              templateDesigns={templateDesigns}
+              pipeline={midcapPipeline}
+              pipelineState={midcapPipelineState}
+              onSearch={runMidcapDiscovery}
+              onInstall={installDiscoveredMarket}
+              onRunPipeline={runMidcapTemplatePipeline}
+            />
+          </div>
+          <div className="tabs">
+            {[
+              ["share_overview", "Share Builder"],
+              ["share_results", "Share Evidence"],
+            ].map(([id, label]) => (
+              <button className={activeTab === id ? "tab active" : "tab"} key={id} type="button" onClick={() => setActiveTab(id)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {activeTab === "share_overview" && (
+            <section className="lab-section">
+              <h3>Share Watchlist</h3>
+              <MarketTable markets={shareEnabledMarkets} />
+            </section>
+          )}
+          {activeTab === "share_results" && (
+            <ResultsView
+              runDetail={runDetail}
+              researchRuns={researchRuns}
+              loadRun={loadRunDetail}
+              deleteRun={deleteRun}
+              archiveRun={archiveRun}
+              archiveRuns={archiveRuns}
+              deleteRuns={deleteRuns}
+              onRefineTemplate={refineTemplate}
+              onRefineFurther={refineFurther}
+              onMakeTradeable={makeTradeable}
+              onRepairRemaining={repairRemaining}
+              onFreezeValidate={freezeValidate}
+              onSaveTemplate={saveTemplateFromSource}
+              exportIncludeBars={exportIncludeBars}
+            />
+          )}
+        </section>
       )}
 
       {activeModule === "paper" && (
@@ -1964,7 +2084,7 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
         <Panel icon={<Activity />} title="Next Actions">
           <div className="status-list">
             {(summary?.next_actions ?? []).map((item) => (
-              <button className="status action-status" type="button" key={item.kind} onClick={() => setActiveModule(item.kind === "providers" ? "settings" : "backtests")}>
+              <button className="status action-status" type="button" key={item.kind} onClick={() => setActiveModule(item.kind === "providers" ? "settings" : "index_factory")}>
                 <strong>{item.label}</strong>
                 <span>{item.detail}</span>
               </button>
@@ -1978,7 +2098,7 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
                 <strong>Run {latest.id} · {latest.status}</strong>
                 <span>{latest.market_id} · {latest.trial_count} trials · best {round(latest.best_score)}</span>
               </div>
-              <button className="secondary" type="button" onClick={() => setActiveModule("backtests")}>Build Templates</button>
+              <button className="secondary" type="button" onClick={() => setActiveModule("index_factory")}>Index Factory</button>
             </div>
           ) : <span className="muted">No research runs yet.</span>}
         </Panel>
@@ -2025,8 +2145,8 @@ function CockpitView({ summary, marketContext, setActiveModule }) {
 function GuideView({ setActiveModule }) {
   const workflow = [
     ["1", "Connect providers", "Use Settings for EODHD bars, FMP market context, and IG demo credentials. IG validation matters because costs, margin, minimum stake, and stop rules change the result."],
-    ["2", "Check markets", "Use Backtests to confirm each market has the right symbol, timeframe, spread, slippage, minimum bars, and IG mapping."],
-    ["3", "Run Candidate Factory", "Start with one market, Balanced factory, realistic dates, cost stress 2.0, and regime templates on. This creates leads without lowering paper gates."],
+    ["2", "Start with indices", "Use the Indices workspace for the cleaner day-trading path. Shares stay in their own lab because spreads and stop rules are much harder."],
+    ["3", "Run Candidate Factory", "Start with one index or the core index set, intraday discovery, realistic dates, cost stress, and regime templates on. This creates leads without lowering paper gates."],
     ["4", "Read evidence first", "Focus on net profit after costs, compounded end balance, out-of-sample net, trade count, fold win rate, fold concentration, cost/gross, drawdown, capital fit, and warnings."],
     ["5", "Make it tradeable", "Use Best by market first, then click Make tradeable. The app chooses the next repair from the blockers, locks the market/family/regime, syncs IG costs when needed, and launches the repair run."],
     ["6", "Save and freeze", "Save promising repaired results to Templates, then use Freeze validate. This retests the exact rules with no parameter hunting, so the OOS period does not quietly become training data."],
@@ -2034,12 +2154,12 @@ function GuideView({ setActiveModule }) {
     ["8", "Paper only", "Only move forward after freshness, IG validation, capital, OOS, fold, cost, frozen validation, and regime gates are clear."],
   ];
   const modules = [
-    ["Cockpit", "The home view for system status, provider health, current mode, and next actions."],
-    ["Backtests", "Candidate Factory, run builder, run history, trial cards, regime evidence, Make tradeable repair workflow, archives, and exports."],
-    ["Templates", "Saved strategy templates with frozen rules, market/timeframe/regime identity, readiness, and reuse actions."],
-    ["Research", "Candidate readiness, blockers, validation warnings, capital feasibility, and paper queue status."],
-    ["Broker", "Order previews only. Live order placement remains disabled."],
-    ["Risk", "Capital scenarios, selected testing capital, compounded balance projections, 1% planned risk, and 5% daily loss envelope."],
+    ["Today", "The home view for system status, provider health, current mode, and next actions."],
+    ["Indices", "The main template factory for lower-cost index markets, repair, frozen validation, run history, and exports."],
+    ["Shares", "A separate high-cost discovery lab for midcap/share experiments that should not pollute the index workflow."],
+    ["Daily Paper", "Frozen template scanning only. It produces paper previews and review signals without inventing new rules."],
+    ["Library", "Saved strategy templates with frozen rules, market/timeframe/regime identity, readiness, and reuse actions."],
+    ["Accounts", "IG demo account roles, broker previews, and capital guardrails. Live order placement remains disabled."],
   ];
   const metrics = [
     ["Net", "Profit after spread, slippage, funding, FX, and other modelled costs."],
@@ -2094,7 +2214,7 @@ function GuideView({ setActiveModule }) {
           <p>A practical map of the trading cockpit, research workflow, robustness gates, and evidence exports.</p>
         </div>
         <div className="button-row">
-          <button type="button" className="secondary" onClick={() => setActiveModule("backtests")}><Sparkles size={16} /> Build Templates</button>
+          <button type="button" className="secondary" onClick={() => setActiveModule("index_factory")}><BarChart3 size={16} /> Index Factory</button>
           <button type="button" className="ghost" onClick={() => setActiveModule("paper")}><LineChart size={16} /> Daily Paper</button>
         </div>
       </div>
@@ -3053,6 +3173,65 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
         )}
       </section>
     </div>
+  );
+}
+
+function IndexFactoryPanel({ markets = [], selectedMarkets = [], researchState, onSelectCore, onSelectSingle, onRunIntraday }) {
+  const cost = averageMarketCosts(markets);
+  const selectedText = selectedMarkets.length ? selectedMarkets.map((market) => market.market_id).join(" / ") : "None selected";
+  const coreAvailable = INDEX_CORE_MARKETS.filter((marketId) => markets.some((market) => market.market_id === marketId));
+  return (
+    <Panel icon={<BarChart3 />} title="Index First Workspace">
+      <div className="status-list">
+        <div className="status compact-status">
+          <strong>Default focus · indices</strong>
+          <span>Lower spreads make intraday testing more realistic for a small account.</span>
+          <small>{coreAvailable.length ? `Core set available: ${coreAvailable.join(" / ")}` : "No core index markets are enabled yet."}</small>
+        </div>
+      </div>
+      <div className="discovery-summary index-summary">
+        <Metric label="Enabled indices" value={markets.length} />
+        <Metric label="Avg spread" value={`${round(cost.spread)} bps`} />
+        <Metric label="Avg slippage" value={`${round(cost.slippage)} bps`} />
+        <Metric label="Selected" value={selectedText} />
+        <Metric label="Holding" value="Flat same day" />
+        <Metric label="Live orders" value="Locked" />
+      </div>
+      <div className="button-row">
+        <button type="button" onClick={onSelectCore}><BarChart3 size={16} /> Core indices</button>
+        <button type="button" className="ghost" onClick={onSelectSingle}><Search size={16} /> One index</button>
+        <button type="button" className="secondary" onClick={onRunIntraday} disabled={researchState?.status === "running" || markets.length === 0}>
+          <Sparkles size={16} /> Start intraday build
+        </button>
+      </div>
+    </Panel>
+  );
+}
+
+function ShareCostRealityPanel({ shareMarkets = [], indexMarkets = [] }) {
+  const shareCost = averageMarketCosts(shareMarkets);
+  const indexCost = averageMarketCosts(indexMarkets);
+  const spreadMultiple = indexCost.spread > 0 ? shareCost.spread / indexCost.spread : 0;
+  return (
+    <Panel icon={<ShieldCheck />} title="Share Cost Reality">
+      <div className="metrics">
+        <Metric label="Index avg spread" value={`${round(indexCost.spread)} bps`} />
+        <Metric label="Share avg spread" value={`${round(shareCost.spread)} bps`} />
+        <Metric label="Share spread multiple" value={`${round(spreadMultiple)}x`} />
+        <Metric label="Enabled shares" value={shareMarkets.length} />
+      </div>
+      <div className="status-list">
+        <div className="status compact-status">
+          <strong>Shares are advanced</strong>
+          <span>Only run them when the watchlist is liquid, active, and clearly large enough versus spread and slippage.</span>
+          <small>The guided builder now stops early when a share shortlist is too flat or too expensive for day trading.</small>
+        </div>
+        <div className="status compact-status">
+          <strong>Keep templates separate</strong>
+          <span>Index templates and share templates should not be mixed. Daily Paper can match each frozen template to its own market type.</span>
+        </div>
+      </div>
+    </Panel>
   );
 }
 
@@ -4596,7 +4775,7 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
   const enabledIds = new Set(enabledMarkets.map((market) => market.market_id));
   const selected = activeMarketIds.filter((marketId) => enabledIds.has(marketId));
   const fallbackMarket = (isDayTrading
-    ? enabledMarkets.find((market) => market.asset_class === "share")?.market_id
+    ? enabledMarkets.find((market) => intervalValue(market.default_timeframe) === "5min")?.market_id
     : enabledMarkets.find((market) => market.market_id === "XAUUSD")?.market_id)
     ?? enabledMarkets[0]?.market_id
     ?? researchRun.market_id;
@@ -4649,6 +4828,17 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
     stageMessage: isDayTrading
       ? `Intraday discovery staged for ${marketIds.join(" / ")}: no overnight, ${trialPlan}, then save and Freeze validate.`
       : `Candidate Factory staged for ${marketIds.join(" / ")}: find-anything-robust, regime templates on, ${trialPlan}.`,
+  };
+}
+
+function averageMarketCosts(markets = []) {
+  const usable = markets.filter((market) => Number.isFinite(Number(market.estimated_spread_bps ?? market.spread_bps)));
+  if (usable.length === 0) {
+    return { spread: 0, slippage: 0 };
+  }
+  return {
+    spread: usable.reduce((total, market) => total + Number(market.estimated_spread_bps ?? market.spread_bps ?? 0), 0) / usable.length,
+    slippage: usable.reduce((total, market) => total + Number(market.estimated_slippage_bps ?? market.slippage_bps ?? 0), 0) / usable.length,
   };
 }
 
