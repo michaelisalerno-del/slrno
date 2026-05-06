@@ -109,6 +109,23 @@ TWO_VCPU_MIDCAP_PREFLIGHT_LIMIT = 18
 GUIDED_AUTO_FREEZE_TRIAL_LIMIT = 250
 GUIDED_AUTO_FREEZE_MIN_TRADES = 20
 GUIDED_AUTO_FREEZE_MIN_OOS_TRADES = 8
+GUIDED_AUTO_REPAIR_MAX_RUNS = 1
+GUIDED_AUTO_FREEZE_PIPELINE_SCHEMAS = {
+    "midcap_template_pipeline_v1",
+    "index_template_pipeline_v1",
+    "guided_auto_repair_pipeline_v1",
+}
+GUIDED_AUTO_FREEZE_REPAIR_MODES = {
+    "standard",
+    "auto_refine",
+    "capital_fit",
+    "cost_stress",
+    "frozen_validation",
+    "longer_history",
+    "month_exclusion",
+    "more_trades",
+    "regime_repair",
+}
 GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS = {
     "diagnostics_deferred_fast_scan",
     "ig_minimum_margin_too_large_for_account",
@@ -138,6 +155,7 @@ GUIDED_AUTO_FREEZE_STRICT_WARNINGS = {
     "weak_net_cost_efficiency",
     "weak_oos_evidence",
 }
+GUIDED_AUTO_REPAIR_TERMINAL_WARNINGS = GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS - {"diagnostics_deferred_fast_scan"}
 MANUAL_TRADER_PLAYBOOKS: dict[str, dict[str, object]] = {
     "opening_range_breakout": {
         "id": "opening_range_breakout",
@@ -1880,22 +1898,28 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
         return
     final_status = "finished_with_warnings" if market_failures else "finished"
     final_error = _market_failure_summary(market_failures) if market_failures else ""
-    research_store.update_run_status(run_id, final_status, final_error)
-    try:
-        await _maybe_auto_freeze_guided_pipeline(run_id, payload, api_token, selected_markets, market_statuses, market_failures)
-    except Exception as exc:
-        _record_guided_auto_freeze_status(
-            run_id,
-            payload,
-            selected_markets,
-            market_statuses,
-            market_failures,
-            {
-                "status": "error",
-                "detail": "The design run finished, but automatic freeze validation could not be started.",
-                "error": _public_error(exc),
-            },
-        )
+    if _is_guided_auto_promotion_payload(payload):
+        research_store.update_run_status(run_id, "running", final_error)
+        try:
+            await _maybe_auto_freeze_guided_pipeline(run_id, payload, api_token, selected_markets, market_statuses, market_failures)
+        except Exception as exc:
+            _record_guided_auto_freeze_status(
+                run_id,
+                payload,
+                selected_markets,
+                market_statuses,
+                market_failures,
+                {
+                    "status": "error",
+                    "detail": "The design run finished, but automatic repair/freeze validation could not be started.",
+                    "error": _public_error(exc),
+                },
+            )
+        current_run = research_store.get_run(run_id) or {}
+        if current_run.get("status") == "running":
+            research_store.update_run_status(run_id, final_status, final_error)
+    else:
+        research_store.update_run_status(run_id, final_status, final_error)
 
 
 @app.get("/research/runs")
@@ -2094,13 +2118,18 @@ def _is_frozen_validation_payload(payload: ResearchRunPayload) -> bool:
     return payload.repair_mode == "frozen_validation" and isinstance(parameters, dict) and bool(parameters)
 
 
-def _is_guided_midcap_design_payload(payload: ResearchRunPayload) -> bool:
+def _is_guided_auto_promotion_payload(payload: ResearchRunPayload) -> bool:
     pipeline = payload.pipeline if isinstance(payload.pipeline, dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
     return (
-        payload.repair_mode == "standard"
-        and str(pipeline.get("schema") or "") == "midcap_template_pipeline_v1"
-        and bool(pipeline.get("auto_freeze", {}).get("enabled", False) if isinstance(pipeline.get("auto_freeze"), dict) else False)
+        payload.repair_mode in GUIDED_AUTO_FREEZE_REPAIR_MODES
+        and str(pipeline.get("schema") or "") in GUIDED_AUTO_FREEZE_PIPELINE_SCHEMAS
+        and bool(auto_freeze.get("enabled", False))
     )
+
+
+def _is_guided_midcap_design_payload(payload: ResearchRunPayload) -> bool:
+    return _is_guided_auto_promotion_payload(payload)
 
 
 async def _maybe_auto_freeze_guided_pipeline(
@@ -2111,7 +2140,7 @@ async def _maybe_auto_freeze_guided_pipeline(
     market_statuses: list[dict[str, object]],
     market_failures: list[dict[str, object]],
 ) -> None:
-    if not _is_guided_midcap_design_payload(payload):
+    if not _is_guided_auto_promotion_payload(payload):
         return
     _record_guided_auto_freeze_status(
         run_id,
@@ -2127,6 +2156,17 @@ async def _maybe_auto_freeze_guided_pipeline(
     trials = research_store.list_trials(run_id, limit=GUIDED_AUTO_FREEZE_TRIAL_LIMIT)
     selected_trial, skip_summary = _select_guided_auto_freeze_trial(trials)
     if selected_trial is None:
+        if await _maybe_auto_repair_guided_pipeline(
+            run_id,
+            payload,
+            api_token,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            trials,
+            skip_summary,
+        ):
+            return
         _record_guided_auto_freeze_status(
             run_id,
             payload,
@@ -2136,7 +2176,7 @@ async def _maybe_auto_freeze_guided_pipeline(
             {
                 "status": "skipped",
                 "reason": "no_freezeable_trial",
-                "detail": "No design result was safe to freeze automatically.",
+                "detail": "No design or repair result was safe to freeze automatically.",
                 "trial_count": len(trials),
                 "skip_summary": skip_summary,
             },
@@ -2156,6 +2196,40 @@ async def _maybe_auto_freeze_guided_pipeline(
                 "reason": "missing_frozen_parameters",
                 "detail": "The selected design result did not expose exact frozen parameters.",
                 "source_trial_id": selected_trial.get("id"),
+            },
+        )
+        return
+
+    if _is_frozen_validation_payload(payload):
+        readiness = selected_trial.get("promotion_readiness") if isinstance(selected_trial.get("promotion_readiness"), dict) else {}
+        readiness_status = str(readiness.get("status") or selected_trial.get("readiness_status") or "blocked")
+        saved_template = research_store.save_template(
+            _guided_auto_freeze_template_payload(
+                selected_trial,
+                payload,
+                source_template,
+                source_kind="guided_pipeline_auto_freeze_validated",
+                validation_trial=selected_trial,
+                validation_run_id=run_id,
+            )
+        )
+        status = "freeze_validated_ready" if readiness_status == "ready_for_paper" else "freeze_validated_blocked"
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": status,
+                "detail": _guided_auto_freeze_completion_detail(status, readiness_status),
+                "source_trial_id": selected_trial.get("id"),
+                "template_id": saved_template.get("id"),
+                "template_name": saved_template.get("name"),
+                "freeze_run_id": run_id,
+                "freeze_run_status": "finished",
+                "validation_trial_id": selected_trial.get("id"),
+                "readiness_status": readiness_status,
             },
         )
         return
@@ -2252,6 +2326,138 @@ async def _maybe_auto_freeze_guided_pipeline(
     )
 
 
+async def _maybe_auto_repair_guided_pipeline(
+    run_id: int,
+    payload: ResearchRunPayload,
+    api_token: str,
+    selected_markets: list[MarketMapping],
+    market_statuses: list[dict[str, object]],
+    market_failures: list[dict[str, object]],
+    trials: list[dict[str, object]],
+    freeze_skip_summary: dict[str, int],
+) -> bool:
+    if not _guided_auto_repair_allowed(payload):
+        return False
+    repair_trial, repair_skip_summary = _select_guided_auto_repair_trial(trials)
+    if repair_trial is None:
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "repair_skipped",
+                "reason": "no_repairable_trial",
+                "detail": "No result had enough non-terminal evidence to spend an automatic repair run.",
+                "trial_count": len(trials),
+                "skip_summary": freeze_skip_summary,
+                "repair_skip_summary": repair_skip_summary,
+            },
+        )
+        return False
+    try:
+        repair_payload, repair_plan = _guided_auto_repair_payload(payload, repair_trial, run_id)
+    except ValueError as exc:
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "repair_skipped",
+                "reason": "repair_plan_unavailable",
+                "detail": str(exc),
+                "source_trial_id": repair_trial.get("id"),
+                "skip_summary": freeze_skip_summary,
+                "repair_skip_summary": repair_skip_summary,
+            },
+        )
+        return False
+    repair_markets = _selected_markets(repair_payload.market_ids or [repair_payload.market_id])
+    repair_run_id = research_store.create_run(
+        market_id=repair_markets[0].market_id,
+        data_source="eodhd_with_ig_cost_model",
+        status="running",
+        config=_research_run_config(repair_payload, repair_markets),
+    )
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": "running_repair",
+            "detail": repair_plan.get("detail")
+            or "No result was safe to freeze yet, so the app started one automatic make-tradeable repair run.",
+            "source_trial_id": repair_trial.get("id"),
+            "repair_run_id": repair_run_id,
+            "repair_mode": repair_payload.repair_mode,
+            "repair_attempt": repair_plan.get("repair_attempt"),
+            "repair_steps": repair_plan.get("steps", []),
+            "skip_summary": freeze_skip_summary,
+            "repair_skip_summary": repair_skip_summary,
+        },
+    )
+    try:
+        await _execute_research_run(repair_run_id, repair_payload, api_token)
+    except Exception as exc:
+        research_store.update_run_status(repair_run_id, "error", _public_error(exc))
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "repair_error",
+                "detail": "Automatic repair failed before it could produce validation evidence.",
+                "source_trial_id": repair_trial.get("id"),
+                "repair_run_id": repair_run_id,
+                "repair_mode": repair_payload.repair_mode,
+                "error": _public_error(exc),
+            },
+        )
+        return True
+
+    repair_run = research_store.get_run(repair_run_id) or {}
+    repair_config = repair_run.get("config") if isinstance(repair_run.get("config"), dict) else {}
+    repair_pipeline = repair_config.get("pipeline") if isinstance(repair_config.get("pipeline"), dict) else {}
+    repair_auto_freeze = repair_pipeline.get("auto_freeze") if isinstance(repair_pipeline.get("auto_freeze"), dict) else {}
+    downstream_status = str(repair_auto_freeze.get("status") or repair_run.get("status") or "unknown")
+    parent_status = "repair_finished"
+    if downstream_status == "freeze_validated_ready":
+        parent_status = "repair_freeze_validated_ready"
+    elif downstream_status in {"freeze_validated_blocked", "freeze_validation_finished_without_trial", "freeze_validation_error"}:
+        parent_status = "repair_freeze_validated_blocked"
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": parent_status,
+            "detail": repair_auto_freeze.get("detail")
+            or "Automatic repair finished. Open the repair run to inspect freeze-validation and paper readiness.",
+            "source_trial_id": repair_trial.get("id"),
+            "repair_run_id": repair_run_id,
+            "repair_run_status": repair_run.get("status"),
+            "repair_mode": repair_payload.repair_mode,
+            "repair_attempt": repair_plan.get("repair_attempt"),
+            "downstream_auto_freeze_status": downstream_status,
+            "template_id": repair_auto_freeze.get("template_id"),
+            "template_name": repair_auto_freeze.get("template_name"),
+            "freeze_run_id": repair_auto_freeze.get("freeze_run_id"),
+            "validation_trial_id": repair_auto_freeze.get("validation_trial_id"),
+            "readiness_status": repair_auto_freeze.get("readiness_status"),
+        },
+    )
+    return True
+
+
 def _record_guided_auto_freeze_status(
     run_id: int,
     payload: ResearchRunPayload,
@@ -2265,10 +2471,10 @@ def _record_guided_auto_freeze_status(
     pipeline = dict(payload.pipeline if isinstance(payload.pipeline, dict) else {})
     existing = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
     pipeline["auto_freeze"] = {
-        **existing,
         "enabled": True,
-        "policy": "save_best_oos_positive_ig_validated_intraday_lead_then_one_trial_frozen_validation",
+        "policy": "build_repair_once_save_best_freezeable_intraday_lead_then_validate_exact_rules",
         "strategy_generation_allowed": False,
+        **existing,
         **auto_freeze,
     }
     payload.pipeline = pipeline
@@ -2290,16 +2496,297 @@ def _select_guided_auto_freeze_trial(trials: list[dict[str, object]]) -> tuple[d
     return None, skip_counts
 
 
+def _guided_auto_repair_allowed(payload: ResearchRunPayload) -> bool:
+    if _is_frozen_validation_payload(payload):
+        return False
+    pipeline = payload.pipeline if isinstance(payload.pipeline, dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    if auto_freeze.get("repair_enabled") is False:
+        return False
+    max_runs = max(0, _safe_int(auto_freeze.get("max_auto_repair_runs") or GUIDED_AUTO_REPAIR_MAX_RUNS))
+    current_runs = _safe_int(auto_freeze.get("auto_repair_count"))
+    return current_runs < max_runs
+
+
+def _select_guided_auto_repair_trial(trials: list[dict[str, object]]) -> tuple[dict[str, object] | None, dict[str, int]]:
+    skip_counts: dict[str, int] = {}
+    ranked = sorted(trials, key=_guided_auto_repair_trial_rank, reverse=True)
+    for trial in ranked:
+        rejection = _guided_auto_repair_rejection(trial)
+        if rejection:
+            skip_counts[rejection] = skip_counts.get(rejection, 0) + 1
+            continue
+        return trial, skip_counts
+    return None, skip_counts
+
+
+def _guided_auto_repair_rejection(trial: dict[str, object]) -> str:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    warnings = _guided_trial_warning_set(trial)
+    if warnings & GUIDED_AUTO_REPAIR_TERMINAL_WARNINGS:
+        return sorted(warnings & GUIDED_AUTO_REPAIR_TERMINAL_WARNINGS)[0]
+    if "needs_ig_price_validation" in warnings:
+        return "needs_ig_price_validation"
+    if not str(parameters.get("market_id") or trial.get("market_id") or "").strip():
+        return "missing_market_id"
+    if not _freezeable_parameter_subset(parameters):
+        return "missing_frozen_parameters"
+    if not bool(parameters.get("day_trading_mode")):
+        return "not_day_trading"
+    if not bool(parameters.get("force_flat_before_close")) or not bool(parameters.get("no_overnight")):
+        return "missing_intraday_flat_contract"
+    if int(_safe_number(backtest.get("trade_count"))) < 6:
+        return "too_few_trades_to_repair"
+    if _safe_number(backtest.get("net_profit")) <= 0 and _safe_number(backtest.get("test_profit")) <= 0:
+        return "non_positive_net_and_oos_profit"
+    freeze_rejection = _guided_auto_freeze_rejection(trial)
+    if not freeze_rejection:
+        return "already_freezeable"
+    repairable = {
+        "best_trades_dominate",
+        "costs_overwhelm_edge",
+        "diagnostics_deferred_fast_scan",
+        "fails_higher_slippage",
+        "headline_sharpe_not_regime_robust",
+        "low_oos_trades",
+        "multiple_testing_haircut",
+        "negative_after_costs",
+        "negative_stress_net_profit",
+        "non_positive_regime_gated_oos_profit",
+        "one_fold_dependency",
+        "profit_concentrated_single_month",
+        "profit_concentrated_single_regime",
+        "profits_not_consistent_across_folds",
+        "regime_gated_backtest_negative",
+        "regime_gated_oos_negative",
+        "target_regime_low_oos_trades",
+        "too_few_oos_trades_to_freeze",
+        "too_few_trades",
+        "too_few_trades_to_freeze",
+        "weak_net_cost_efficiency",
+        "weak_oos_evidence",
+    }
+    if freeze_rejection in repairable or warnings & repairable:
+        return ""
+    return freeze_rejection
+
+
+def _guided_auto_repair_trial_rank(trial: dict[str, object]) -> tuple[float, ...]:
+    return (
+        1.0 if _guided_auto_repair_rejection(trial) == "" else 0.0,
+        *_guided_auto_freeze_trial_rank(trial),
+    )
+
+
+def _guided_auto_repair_payload(
+    parent_payload: ResearchRunPayload,
+    source_trial: dict[str, object],
+    parent_run_id: int,
+) -> tuple[ResearchRunPayload, dict[str, object]]:
+    source_template = _guided_auto_freeze_source_template(source_trial)
+    if not source_template.get("parameters"):
+        raise ValueError("The selected repair result did not expose exact parameters to lock.")
+    market_id = str(source_template.get("market_id") or source_trial.get("market_id") or parent_payload.market_id)
+    family = str(source_template.get("family") or source_trial.get("strategy_family") or "")
+    warnings = _guided_trial_warning_set(source_trial)
+    pattern = (
+        (source_trial.get("parameters") if isinstance(source_trial.get("parameters"), dict) else {})
+        .get("bar_pattern_analysis", {})
+    )
+    pattern = pattern if isinstance(pattern, dict) else {}
+    target_regime = str(source_template.get("target_regime") or _guided_auto_repair_target_regime(pattern, warnings) or "")
+    dominant_month = _guided_auto_repair_dominant_month(pattern)
+    pipeline = parent_payload.pipeline if isinstance(parent_payload.pipeline, dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    repair_attempt = _safe_int(auto_freeze.get("auto_repair_count")) + 1
+    max_repair_runs = max(repair_attempt, _safe_int(auto_freeze.get("max_auto_repair_runs") or GUIDED_AUTO_REPAIR_MAX_RUNS))
+
+    budget = 54
+    start = parent_payload.start
+    stress = max(2.5, parent_payload.cost_stress_multiplier)
+    objective = "profit_first"
+    risk_profile = parent_payload.risk_profile
+    repair_mode = "auto_refine"
+    include_regime_scans = False
+    regime_scan_budget = None
+    excluded_months: list[str] = []
+    steps = [f"Repair attempt {repair_attempt}/{max_repair_runs}", "Keep market, family, and no-overnight rules locked"]
+
+    cost_blocked = bool(warnings & {"negative_after_costs", "costs_overwhelm_edge", "fails_higher_slippage", "weak_net_cost_efficiency", "negative_stress_net_profit"})
+    capital_blocked = bool(
+        warnings
+        & {
+            "risk_budget_exceeded",
+            "historical_drawdown_too_large",
+            "historical_daily_loss_stop_breached",
+            "margin_too_large",
+            "insufficient_account_for_margin",
+            "below_ig_min_deal_size",
+            "missing_reference_price",
+            "drawdown_too_high",
+        }
+    )
+    trade_count_blocked = bool(warnings & {"too_few_trades", "low_oos_trades", "target_regime_low_oos_trades"})
+    fold_blocked = bool(warnings & {"profits_not_consistent_across_folds", "weak_oos_evidence", "one_fold_dependency"})
+    regime_blocked = bool(
+        warnings
+        & {
+            "headline_sharpe_not_regime_robust",
+            "profit_concentrated_single_regime",
+            "regime_gated_backtest_negative",
+            "regime_gated_oos_negative",
+        }
+    )
+    month_blocked = bool(warnings & {"profit_concentrated_single_month", "best_trades_dominate"})
+    scan_bias = "multiple_testing_haircut" in warnings
+
+    if capital_blocked:
+        budget = 120
+        start = _earlier_date(start, _guided_auto_freeze_validation_start(parent_payload.start, source_template))
+        stress = max(stress, 2.5)
+        objective = "balanced"
+        risk_profile = "conservative"
+        repair_mode = "capital_fit"
+        steps.extend(["Rank by small-account capital fit", "Search smaller stakes and tighter stops before profit"])
+    if trade_count_blocked or fold_blocked:
+        budget = 120
+        start = _earlier_date(start, _guided_auto_freeze_validation_start(parent_payload.start, source_template))
+        if repair_mode == "auto_refine":
+            repair_mode = "more_trades" if trade_count_blocked else "longer_history"
+        steps.append("Run longer-history locked-family evidence")
+    if regime_blocked:
+        if target_regime:
+            steps.append(f"Score only {target_regime} and force flat outside it")
+        else:
+            include_regime_scans = True
+            regime_scan_budget = None
+            steps.append("Run capped regime specialists")
+        if repair_mode == "auto_refine":
+            repair_mode = "regime_repair"
+    if month_blocked and dominant_month:
+        excluded_months = [dominant_month]
+        if repair_mode == "auto_refine":
+            repair_mode = "month_exclusion"
+        steps.append(f"Exclude {dominant_month} and require the edge to survive")
+    if cost_blocked:
+        stress = max(stress, 3.0)
+        if repair_mode == "auto_refine":
+            repair_mode = "cost_stress"
+        steps.append("Stress spread, slippage, and costs before trusting the edge")
+    if scan_bias and not (capital_blocked or trade_count_blocked or fold_blocked or regime_blocked or month_blocked or cost_blocked):
+        budget = 1
+        repair_mode = "frozen_validation"
+        include_regime_scans = False
+        regime_scan_budget = None
+        start = _earlier_date(start, _guided_auto_freeze_validation_start(parent_payload.start, source_template))
+        steps.append("Freeze exact rules immediately to clear parameter hunting")
+
+    repair_pipeline = {
+        "schema": "guided_auto_repair_pipeline_v1",
+        "parent_run_id": parent_run_id,
+        "source_trial_id": source_trial.get("id"),
+        "daily_mode_source": "active_frozen_template_library_only",
+        "strategy_generation_allowed": False,
+        "auto_freeze": {
+            "enabled": True,
+            "status": "waiting_for_repair_run",
+            "policy": "auto_repair_once_then_save_best_freezeable_intraday_lead_and_validate_exact_rules",
+            "repair_enabled": repair_attempt < max_repair_runs,
+            "auto_repair_count": repair_attempt,
+            "max_auto_repair_runs": max_repair_runs,
+            "repair_steps": steps[:8],
+            "source_design_run_id": parent_run_id,
+            "source_trial_id": source_trial.get("id"),
+        },
+    }
+    payload = ResearchRunPayload(
+        market_id=market_id,
+        market_ids=[market_id],
+        start=start,
+        end=parent_payload.end,
+        interval=str(source_template.get("interval") or parent_payload.interval or "5min"),
+        engine=parent_payload.engine,
+        search_preset="deep" if budget >= 120 else "balanced",
+        trading_style=str(source_template.get("style") or parent_payload.trading_style or "intraday_only"),
+        objective=objective,
+        search_budget=budget,
+        risk_profile=risk_profile,
+        strategy_families=[family] if family else [],
+        product_mode=parent_payload.product_mode,
+        cost_stress_multiplier=stress,
+        include_regime_scans=include_regime_scans and not target_regime,
+        regime_scan_budget_per_regime=regime_scan_budget,
+        diagnostic_limit=None,
+        include_market_context=False,
+        target_regime=target_regime or None,
+        excluded_months=excluded_months,
+        repair_mode=repair_mode,
+        account_size=parent_payload.account_size,
+        source_template={**source_template, "repair_attempt_count": repair_attempt},
+        pipeline=repair_pipeline,
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        paper_queue_limit=parent_payload.paper_queue_limit,
+        review_queue_limit=parent_payload.review_queue_limit,
+    )
+    return payload, {
+        "repair_attempt": repair_attempt,
+        "steps": steps[:8],
+        "detail": f"Auto repair started on {market_id}: {', '.join(steps[1:4])}.",
+    }
+
+
+def _guided_trial_warning_set(trial: dict[str, object]) -> set[str]:
+    readiness = trial.get("promotion_readiness") if isinstance(trial.get("promotion_readiness"), dict) else {}
+    warnings = set(str(item) for item in (trial.get("warnings") or []) if item)
+    warnings.update(str(item) for item in (readiness.get("blockers") or []) if item)
+    warnings.update(str(item) for item in (readiness.get("validation_warnings") or []) if item)
+    return warnings
+
+
+def _guided_auto_repair_target_regime(pattern: dict[str, object], warnings: set[str]) -> str:
+    existing = str(pattern.get("target_regime") or "").strip()
+    if existing:
+        return existing
+    if not (
+        warnings
+        & {
+            "headline_sharpe_not_regime_robust",
+            "profit_concentrated_single_regime",
+            "regime_gated_backtest_negative",
+            "regime_gated_oos_negative",
+            "target_regime_low_oos_trades",
+        }
+    ):
+        return ""
+    dominant = pattern.get("dominant_profit_regime") if isinstance(pattern.get("dominant_profit_regime"), dict) else {}
+    return str(dominant.get("key") or "").strip()
+
+
+def _guided_auto_repair_dominant_month(pattern: dict[str, object]) -> str:
+    dominant = pattern.get("dominant_profit_month") if isinstance(pattern.get("dominant_profit_month"), dict) else {}
+    month = str(dominant.get("key") or "").strip()
+    return month if re.fullmatch(r"\d{4}-\d{2}", month) else ""
+
+
+def _earlier_date(left: str, right: str) -> str:
+    left_value = str(left or "").strip()
+    right_value = str(right or "").strip()
+    if not left_value:
+        return right_value
+    if not right_value:
+        return left_value
+    return left_value if left_value <= right_value else right_value
+
+
 def _guided_auto_freeze_rejection(trial: dict[str, object]) -> str:
     parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
     backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
     pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
     gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
     evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
-    readiness = trial.get("promotion_readiness") if isinstance(trial.get("promotion_readiness"), dict) else {}
-    warnings = set(str(item) for item in (trial.get("warnings") or []) if item)
-    warnings.update(str(item) for item in (readiness.get("blockers") or []) if item)
-    warnings.update(str(item) for item in (readiness.get("validation_warnings") or []) if item)
+    warnings = _guided_trial_warning_set(trial)
     if warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS:
         return sorted(warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS)[0]
     if warnings & GUIDED_AUTO_FREEZE_STRICT_WARNINGS:

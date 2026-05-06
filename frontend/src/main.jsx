@@ -131,9 +131,9 @@ const OBJECTIVES = [
 const CANDIDATE_FACTORY_MODES = [
   {
     id: "day_trading",
-    label: "Intraday discovery",
-    badge: "Discovery only",
-    detail: "Searches for no-overnight ideas to repair, freeze, and validate. Daily paper mode uses saved frozen templates only.",
+    label: "Build paper-ready template",
+    badge: "One click",
+    detail: "Builds no-overnight ideas, runs one automatic repair when needed, saves the best safe template, then freeze-validates exact rules.",
     preset: "balanced",
     budgetLabel: "54 base trials / market + capped regime specialists",
   },
@@ -505,6 +505,7 @@ function App() {
       strategy_families: DAY_TRADING_FAMILIES,
       cost_stress_multiplier: 2.5,
       include_regime_scans: true,
+      pipeline: {},
       day_trading_mode: true,
       force_flat_before_close: true,
       paper_queue_limit: current.paper_queue_limit || "3",
@@ -723,6 +724,7 @@ function App() {
         repair_mode: runConfig.repair_mode || "standard",
         account_size: testingCapital,
         source_template: runConfig.source_template && Object.keys(runConfig.source_template).length ? runConfig.source_template : {},
+        pipeline: runConfig.pipeline && typeof runConfig.pipeline === "object" ? runConfig.pipeline : {},
         product_mode: runConfig.product_mode || "spread_bet",
         day_trading_mode: Boolean(runConfig.day_trading_mode),
         force_flat_before_close: Boolean(runConfig.force_flat_before_close || runConfig.day_trading_mode),
@@ -3016,10 +3018,12 @@ function ResultsView({ runDetail, researchRuns, loadRun, deleteRun, archiveRun, 
             <div className="status compact-status">
               <strong>{readableSnake(autoFreeze.status ?? "waiting")}</strong>
               <span>{autoFreeze.detail ?? autoFreeze.reason ?? "Waiting for the guided design run to finish."}</span>
-              {(autoFreeze.template_id || autoFreeze.freeze_run_id) && (
+              {(autoFreeze.template_id || autoFreeze.repair_run_id || autoFreeze.freeze_run_id) && (
                 <small>
                   {autoFreeze.template_id ? `Template ${autoFreeze.template_id}` : ""}
-                  {autoFreeze.template_id && autoFreeze.freeze_run_id ? " · " : ""}
+                  {autoFreeze.template_id && (autoFreeze.repair_run_id || autoFreeze.freeze_run_id) ? " · " : ""}
+                  {autoFreeze.repair_run_id ? `Repair run ${autoFreeze.repair_run_id}` : ""}
+                  {autoFreeze.repair_run_id && autoFreeze.freeze_run_id ? " · " : ""}
                   {autoFreeze.freeze_run_id ? `Freeze run ${autoFreeze.freeze_run_id}` : ""}
                 </small>
               )}
@@ -3201,7 +3205,7 @@ function IndexFactoryPanel({ markets = [], selectedMarkets = [], researchState, 
         <button type="button" onClick={onSelectCore}><BarChart3 size={16} /> Core indices</button>
         <button type="button" className="ghost" onClick={onSelectSingle}><Search size={16} /> One index</button>
         <button type="button" className="secondary" onClick={onRunIntraday} disabled={researchState?.status === "running" || markets.length === 0}>
-          <Sparkles size={16} /> Start intraday build
+          <Sparkles size={16} /> Build paper-ready template
         </button>
       </div>
     </Panel>
@@ -3383,13 +3387,19 @@ function CandidateFactoryView({
         <div className="factory-mode-grid">
           {CANDIDATE_FACTORY_MODES.map((mode) => {
             const plan = candidateFactoryPlan(mode.id, researchRun, enabledMarkets, activeMarketIds);
+            const autoPromotes = Boolean(plan.runPatch?.pipeline?.auto_freeze?.enabled);
+            const label = mode.id === "day_trading" && !autoPromotes ? "Intraday discovery" : mode.label;
+            const badge = mode.id === "day_trading" && !autoPromotes ? "Discovery only" : mode.badge;
+            const detail = mode.id === "day_trading" && !autoPromotes
+              ? "Searches for no-overnight ideas to repair, save, and freeze manually. One-click repair/freeze is currently enabled for index markets."
+              : mode.detail;
             return (
               <div className="factory-mode-card" key={mode.id}>
                 <div className="label-row">
-                  <strong>{mode.label}</strong>
-                  <span className="badge base">{mode.badge}</span>
+                  <strong>{label}</strong>
+                  <span className="badge base">{badge}</span>
                 </div>
-                <span>{mode.detail}</span>
+                <span>{detail}</span>
                 <div className="mini-metrics">
                   <Metric label="Preset" value={mode.preset} />
                   <Metric label="Budget" value={mode.budgetLabel} />
@@ -4786,6 +4796,11 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
   if (marketIds.length === 0) {
     return { marketIds: [], runPatch: {}, stopReason: "Choose at least one enabled market before running the factory." };
   }
+  const selectedMarketObjects = enabledMarkets.filter((market) => marketIds.includes(market.market_id));
+  const oneClickAutoPromotion = isDayTrading
+    && selectedMarketObjects.length > 0
+    && selectedMarketObjects.every((market) => market.asset_class === "index");
+  const productMode = researchRun.product_mode || "spread_bet";
   const preset = mode.id === "deep_one_market" ? "deep" : "balanced";
   const budget = mode.id === "deep_one_market" ? "120" : mode.id === "evidence_first" ? "54" : "";
   const interval = isDayTrading ? "5min" : marketIds.length > 1 ? "market_default" : (researchRun.interval || "market_default");
@@ -4801,6 +4816,7 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
     search_preset: preset,
     search_budget: budget,
     strategy_families: isDayTrading ? DAY_TRADING_FAMILIES : [],
+    product_mode: productMode,
     cost_stress_multiplier: mode.id === "evidence_first" || isDayTrading ? 2.5 : 2.0,
     include_regime_scans: true,
     regime_scan_budget_per_regime: "",
@@ -4813,6 +4829,31 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
     force_flat_before_close: isDayTrading,
     paper_queue_limit: isDayTrading ? "3" : researchRun.paper_queue_limit || "3",
     review_queue_limit: isDayTrading ? "10" : researchRun.review_queue_limit || "10",
+    pipeline: oneClickAutoPromotion
+      ? {
+          schema: "index_template_pipeline_v1",
+          product_mode: productMode,
+          selected_market_ids: marketIds,
+          daily_mode_source: "active_frozen_template_library_only",
+          strategy_generation_allowed: false,
+          auto_freeze: {
+            enabled: true,
+            status: "waiting_for_design_run",
+            policy: "build_repair_once_save_best_freezeable_intraday_lead_then_validate_exact_rules",
+            repair_enabled: true,
+            auto_repair_count: 0,
+            max_auto_repair_runs: 1,
+            blocked_reason: "",
+          },
+          promotion_required: [
+            "build_no_overnight_design_run",
+            "auto_repair_once_if_fixable",
+            "auto_save_best_freezeable_lead",
+            "freeze_validate_exact_rules",
+            "paper_ready_only_if_validation_passes",
+          ],
+        }
+      : {},
   };
   const specialistBudget = regimePresetBudget(preset);
   const trialPlan = mode.id === "deep_one_market"
@@ -4823,10 +4864,14 @@ function candidateFactoryPlan(modeId, researchRun, enabledMarkets = [], activeMa
     marketIds,
     runPatch,
     launchMessage: isDayTrading
-      ? `Launching intraday discovery: ${marketIds.join(" / ")} · ${trialPlan} · leads must be frozen before daily paper.`
+      ? oneClickAutoPromotion
+        ? `Launching one-click intraday template build: ${marketIds.join(" / ")} · build, one repair if needed, save, then freeze validate.`
+        : `Launching intraday discovery: ${marketIds.join(" / ")} · ${trialPlan} · leads must be frozen before daily paper.`
       : `Launching Candidate Factory: ${marketIds.join(" / ")} · ${trialPlan}.`,
     stageMessage: isDayTrading
-      ? `Intraday discovery staged for ${marketIds.join(" / ")}: no overnight, ${trialPlan}, then save and Freeze validate.`
+      ? oneClickAutoPromotion
+        ? `One-click template build staged for ${marketIds.join(" / ")}: no overnight, auto repair once if fixable, then freeze validate exact rules.`
+        : `Intraday discovery staged for ${marketIds.join(" / ")}: no overnight, ${trialPlan}, then save and Freeze validate.`
       : `Candidate Factory staged for ${marketIds.join(" / ")}: find-anything-robust, regime templates on, ${trialPlan}.`,
   };
 }
@@ -5711,6 +5756,7 @@ function autoRefinementPlanForTemplate(template, researchRun, enabledMarkets = [
     repair_mode: repairMode,
     account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
     source_template: sourceTemplate,
+    pipeline: {},
     day_trading_mode: isDayTrading,
     force_flat_before_close: isDayTrading,
     paper_queue_limit: researchRun.paper_queue_limit || "3",
@@ -5787,6 +5833,7 @@ function frozenValidationPlanForTemplate(template, researchRun, activeMarketIds 
       repair_mode: "frozen_validation",
       account_size: researchRun.account_size || String(WORKING_ACCOUNT_SIZE),
       source_template: sourceTemplate,
+      pipeline: {},
       day_trading_mode: isDayTrading,
       force_flat_before_close: isDayTrading,
       paper_queue_limit: researchRun.paper_queue_limit || "3",

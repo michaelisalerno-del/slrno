@@ -632,3 +632,117 @@ def test_guided_auto_freeze_rejects_fragile_watchlist_trial():
 
     assert selected is None
     assert skipped["multiple_testing_haircut"] == 1
+
+
+def test_index_pipeline_payload_enables_guided_auto_promotion():
+    payload = main.ResearchRunPayload(
+        market_id="NAS100",
+        market_ids=["NAS100"],
+        start="2024-01-01",
+        end="2026-05-06",
+        interval="5min",
+        trading_style="intraday_only",
+        repair_mode="standard",
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        pipeline={
+            "schema": "index_template_pipeline_v1",
+            "auto_freeze": {"enabled": True, "repair_enabled": True, "max_auto_repair_runs": 1},
+        },
+    )
+
+    assert main._is_guided_midcap_design_payload(payload) is True
+    assert main._guided_auto_repair_allowed(payload) is True
+
+
+def test_guided_auto_repair_selects_fixable_intraday_trial():
+    repairable = {
+        "id": 4,
+        "strategy_name": "repairable",
+        "market_id": "NAS100",
+        "promotion_tier": "research_candidate",
+        "robustness_score": 60,
+        "warnings": ["low_oos_trades"],
+        "promotion_readiness": {"status": "blocked", "blockers": ["low_oos_trades"], "validation_warnings": []},
+        "parameters": {
+            "market_id": "NAS100",
+            "timeframe": "5min",
+            "family": "intraday_trend",
+            "style": "intraday_only",
+            "day_trading_mode": True,
+            "force_flat_before_close": True,
+            "no_overnight": True,
+            "lookback": 12,
+            "threshold_bps": 10,
+            "position_size": 1,
+            "stress_net_profit": 40,
+            "evidence_profile": {"oos_trade_count": 3},
+            "bar_pattern_analysis": {"dominant_profit_regime": {"key": "trend_up"}},
+        },
+        "backtest": {"trade_count": 30, "net_profit": 200, "test_profit": 80, "net_cost_ratio": 0.6, "max_drawdown": 120},
+    }
+    terminal = {
+        **repairable,
+        "id": 5,
+        "warnings": ["ig_minimum_margin_too_large_for_account"],
+        "promotion_readiness": {"status": "blocked", "blockers": ["ig_minimum_margin_too_large_for_account"], "validation_warnings": []},
+    }
+
+    selected, skipped = main._select_guided_auto_repair_trial([terminal, repairable])
+
+    assert selected["id"] == 4
+    assert skipped["ig_minimum_margin_too_large_for_account"] == 1
+
+
+def test_guided_auto_repair_payload_runs_once_then_freezes():
+    source_trial = {
+        "id": 6,
+        "strategy_name": "needs oos",
+        "market_id": "NAS100",
+        "promotion_tier": "research_candidate",
+        "robustness_score": 60,
+        "warnings": ["low_oos_trades"],
+        "promotion_readiness": {"status": "blocked", "blockers": ["low_oos_trades"], "validation_warnings": []},
+        "parameters": {
+            "market_id": "NAS100",
+            "timeframe": "5min",
+            "family": "intraday_trend",
+            "style": "intraday_only",
+            "day_trading_mode": True,
+            "force_flat_before_close": True,
+            "no_overnight": True,
+            "lookback": 12,
+            "threshold_bps": 10,
+            "position_size": 1,
+            "stress_net_profit": 40,
+            "evidence_profile": {"oos_trade_count": 3},
+            "bar_pattern_analysis": {"dominant_profit_regime": {"key": "trend_up"}},
+        },
+        "backtest": {"trade_count": 30, "net_profit": 200, "test_profit": 80, "net_cost_ratio": 0.6, "max_drawdown": 120},
+    }
+    parent_payload = main.ResearchRunPayload(
+        market_id="NAS100",
+        market_ids=["NAS100"],
+        start="2025-01-01",
+        end="2026-05-06",
+        interval="5min",
+        trading_style="intraday_only",
+        repair_mode="standard",
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        pipeline={
+            "schema": "index_template_pipeline_v1",
+            "auto_freeze": {"enabled": True, "repair_enabled": True, "auto_repair_count": 0, "max_auto_repair_runs": 1},
+        },
+    )
+
+    repair_payload, plan = main._guided_auto_repair_payload(parent_payload, source_trial, 123)
+
+    assert repair_payload.market_ids == ["NAS100"]
+    assert repair_payload.repair_mode == "more_trades"
+    assert repair_payload.search_budget == 120
+    assert repair_payload.source_template["repair_attempt_count"] == 1
+    assert repair_payload.pipeline["auto_freeze"]["enabled"] is True
+    assert repair_payload.pipeline["auto_freeze"]["repair_enabled"] is False
+    assert repair_payload.pipeline["auto_freeze"]["auto_repair_count"] == 1
+    assert plan["repair_attempt"] == 1
