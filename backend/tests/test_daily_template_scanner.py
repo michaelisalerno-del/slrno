@@ -267,7 +267,12 @@ def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_pat
         }
 
     async def fake_sync_costs(payload):
-        return {"status": "synced", "profile_count": len(payload.market_ids), "profiles": [{"market_id": "ABC", "confidence": "test"}]}
+        return {
+            "status": "synced",
+            "profile_count": len(payload.market_ids),
+            "price_validated_count": len(payload.market_ids),
+            "profiles": [{"market_id": "ABC", "confidence": "ig_recent_epic_reference_profile", "validation_status": "ig_price_validated"}],
+        }
 
     monkeypatch.setattr(main, "research_store", store)
     monkeypatch.setattr(main, "markets", FakeMarkets())
@@ -313,6 +318,102 @@ def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_pat
     assert run["config"]["strategy_families"] == ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"]
 
 
+def test_midcap_template_pipeline_waits_for_ig_price_validation(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    installed = {}
+
+    class FakeMarkets:
+        def get(self, market_id):
+            return installed.get(market_id)
+
+        def list(self, enabled_only=False):
+            return list(installed.values())
+
+        def upsert(self, mapping):
+            installed[mapping.market_id] = mapping
+
+    class FakeSettings:
+        def get_secret(self, provider, key):
+            return "token" if provider == "eodhd" and key == "api_token" else None
+
+    class FakeBackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, func, *args):
+            self.tasks.append((func, args))
+
+    async def fake_discover_midcaps(**kwargs):
+        return {
+            "schema": "midcap_discovery_v1",
+            "country": kwargs["country"],
+            "data_source": "test",
+            "ig_status": "checked",
+            "eligible_count": 1,
+            "criteria": {"country": kwargs["country"], "product_mode": kwargs["product_mode"]},
+            "candidates": [
+                {
+                    "market_id": "ABC",
+                    "name": "ABC plc",
+                    "volume": 900000,
+                    "market_cap": 2_500_000_000,
+                    "score": 91,
+                    "eligible": True,
+                    "ig_status": "ig_matched",
+                    "blockers": [],
+                    "warnings": [],
+                    "market_mapping": {
+                        "market_id": "ABC",
+                        "name": "ABC plc",
+                        "asset_class": "share",
+                        "eodhd_symbol": "ABC.LSE",
+                        "ig_epic": "IX.D.ABC.DAILY.IP",
+                        "enabled": True,
+                        "plugin_id": "discovered-abc",
+                        "ig_name": "ABC",
+                        "ig_search_terms": "ABC,ABC plc",
+                        "default_timeframe": "5min",
+                        "spread_bps": 18.0,
+                        "slippage_bps": 5.0,
+                        "min_backtest_bars": 750,
+                    },
+                }
+            ],
+        }
+
+    async def fake_sync_costs(payload):
+        return {
+            "status": "synced_needs_price_validation",
+            "profile_count": len(payload.market_ids),
+            "price_validated_count": 0,
+            "profiles": [{"market_id": "ABC", "confidence": "ig_public_spread_baseline", "validation_status": "needs_ig_price_validation"}],
+        }
+
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "discover_midcap_markets", fake_discover_midcaps)
+    monkeypatch.setattr(main, "sync_ig_market_costs", fake_sync_costs)
+
+    background_tasks = FakeBackgroundTasks()
+    result = asyncio.run(
+        main.start_midcap_template_pipeline(
+            main.MidcapTemplatePipelinePayload(
+                design_id="liquid_uk_midcap_trend_pullback",
+                country="UK",
+                account_size=3000.0,
+            ),
+            background_tasks,
+        )
+    )
+
+    assert result["status"] == "blocked_price_validation"
+    assert result["research_run_id"] is None
+    assert result["run_ready_market_ids"] == []
+    assert result["selected_markets"][0]["market_id"] == "ABC"
+    assert len(background_tasks.tasks) == 0
+
+
 def test_guided_auto_freeze_selects_best_freezeable_intraday_trial():
     deferred = {
         "id": 1,
@@ -333,6 +434,9 @@ def test_guided_auto_freeze_selects_best_freezeable_intraday_trial():
             "lookback": 12,
             "threshold_bps": 10,
             "position_size": 1,
+            "stress_net_profit": 40,
+            "evidence_profile": {"oos_trade_count": 12},
+            "bar_pattern_analysis": {"regime_gated_backtest": {"test_profit": 30}},
         },
         "backtest": {"trade_count": 30, "net_profit": 200, "test_profit": 80, "net_cost_ratio": 0.6, "max_drawdown": 120},
     }
@@ -341,8 +445,8 @@ def test_guided_auto_freeze_selects_best_freezeable_intraday_trial():
         "id": 2,
         "strategy_name": "freezeable",
         "robustness_score": 52,
-        "warnings": ["multiple_testing_haircut"],
-        "promotion_readiness": {"status": "blocked", "blockers": ["multiple_testing_haircut"], "validation_warnings": []},
+        "warnings": [],
+        "promotion_readiness": {"status": "ready_for_paper", "blockers": [], "validation_warnings": []},
     }
 
     selected, skipped = main._select_guided_auto_freeze_trial([deferred, freezeable])
@@ -354,3 +458,36 @@ def test_guided_auto_freeze_selects_best_freezeable_intraday_trial():
     assert source_template["force_flat_before_close"] is True
     assert source_template["no_overnight"] is True
     assert source_template["parameters"] == {"lookback": 12, "position_size": 1, "threshold_bps": 10}
+
+
+def test_guided_auto_freeze_rejects_fragile_watchlist_trial():
+    fragile = {
+        "id": 3,
+        "strategy_name": "fragile",
+        "market_id": "ABC",
+        "promotion_tier": "watchlist",
+        "robustness_score": 80,
+        "warnings": ["multiple_testing_haircut"],
+        "promotion_readiness": {"status": "blocked", "blockers": ["one_fold_dependency"], "validation_warnings": ["needs_ig_price_validation"]},
+        "parameters": {
+            "market_id": "ABC",
+            "timeframe": "5min",
+            "family": "intraday_trend",
+            "style": "intraday_only",
+            "day_trading_mode": True,
+            "force_flat_before_close": True,
+            "no_overnight": True,
+            "lookback": 12,
+            "threshold_bps": 10,
+            "position_size": 1,
+            "stress_net_profit": 30,
+            "evidence_profile": {"oos_trade_count": 12},
+            "bar_pattern_analysis": {"regime_gated_backtest": {"test_profit": 20}},
+        },
+        "backtest": {"trade_count": 30, "net_profit": 200, "test_profit": 80, "net_cost_ratio": 0.6, "max_drawdown": 120},
+    }
+
+    selected, skipped = main._select_guided_auto_freeze_trial([fragile])
+
+    assert selected is None
+    assert skipped["multiple_testing_haircut"] == 1

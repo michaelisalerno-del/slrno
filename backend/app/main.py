@@ -106,7 +106,8 @@ TWO_VCPU_MIDCAP_SEARCH_BUDGET = 36
 TWO_VCPU_MIDCAP_REGIME_BUDGET = 6
 TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT = 18
 GUIDED_AUTO_FREEZE_TRIAL_LIMIT = 250
-GUIDED_AUTO_FREEZE_MIN_TRADES = 5
+GUIDED_AUTO_FREEZE_MIN_TRADES = 20
+GUIDED_AUTO_FREEZE_MIN_OOS_TRADES = 8
 GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS = {
     "diagnostics_deferred_fast_scan",
     "ig_minimum_margin_too_large_for_account",
@@ -115,6 +116,26 @@ GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS = {
     "day_trade_held_overnight",
     "day_trade_missing_flat_policy",
     "day_trade_requires_intraday_bars",
+}
+GUIDED_AUTO_FREEZE_STRICT_WARNINGS = {
+    "best_trades_dominate",
+    "costs_overwhelm_edge",
+    "fails_higher_slippage",
+    "headline_sharpe_not_regime_robust",
+    "low_oos_trades",
+    "multiple_testing_haircut",
+    "needs_ig_price_validation",
+    "negative_after_costs",
+    "one_fold_dependency",
+    "profit_concentrated_single_month",
+    "profit_concentrated_single_regime",
+    "profits_not_consistent_across_folds",
+    "regime_gated_backtest_negative",
+    "regime_gated_oos_negative",
+    "target_regime_low_oos_trades",
+    "too_few_trades",
+    "weak_net_cost_efficiency",
+    "weak_oos_evidence",
 }
 MANUAL_TRADER_PLAYBOOKS: dict[str, dict[str, object]] = {
     "opening_range_breakout": {
@@ -1400,11 +1421,19 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
         research_store.save_cost_profile(profile)
         profiles.append(profile.as_dict())
     price_validated_count = sum(1 for profile in profiles if str(profile.get("confidence") or "") in PRICE_VALIDATED_COST_CONFIDENCES)
-    status = "synced" if price_validated_count == len(profiles) else "synced_needs_price_validation"
+    ig_rate_limited = any(_looks_like_ig_rate_limit(" ".join(str(note) for note in profile.get("notes") or [])) for profile in profiles)
+    status = (
+        "synced"
+        if price_validated_count == len(profiles)
+        else "ig_rate_limited"
+        if ig_rate_limited
+        else "synced_needs_price_validation"
+    )
     return {
         "status": status,
         "profile_count": len(profiles),
         "price_validated_count": price_validated_count,
+        "ig_rate_limited": ig_rate_limited,
         "profiles": profiles,
     }
 
@@ -1417,6 +1446,11 @@ def _cost_profile_with_notes(profile: IGCostProfile, notes: list[str]) -> IGCost
             existing_notes.append(note)
     payload["notes"] = existing_notes
     return IGCostProfile(**{key: value for key, value in payload.items() if key in IGCostProfile.__dataclass_fields__})
+
+
+def _looks_like_ig_rate_limit(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return "exceeded" in lowered and ("api key" in lowered or "rate" in lowered or "allowance" in lowered or "api-key" in lowered)
 
 
 async def _resolve_ig_market(provider: IGDemoProvider, market: MarketMapping) -> tuple[MarketMapping, str] | None:
@@ -2021,7 +2055,7 @@ async def _maybe_auto_freeze_guided_pipeline(
         market_failures,
         {
             "status": "selecting",
-            "detail": "Selecting the best non-deferred intraday lead to save and freeze validate.",
+            "detail": "Selecting only IG-validated, OOS-positive intraday evidence that is strong enough to freeze automatically.",
         },
     )
     trials = research_store.list_trials(run_id, limit=GUIDED_AUTO_FREEZE_TRIAL_LIMIT)
@@ -2167,7 +2201,7 @@ def _record_guided_auto_freeze_status(
     pipeline["auto_freeze"] = {
         **existing,
         "enabled": True,
-        "policy": "save_best_non_deferred_intraday_lead_then_one_trial_frozen_validation",
+        "policy": "save_best_oos_positive_ig_validated_intraday_lead_then_one_trial_frozen_validation",
         "strategy_generation_allowed": False,
         **auto_freeze,
     }
@@ -2193,12 +2227,17 @@ def _select_guided_auto_freeze_trial(trials: list[dict[str, object]]) -> tuple[d
 def _guided_auto_freeze_rejection(trial: dict[str, object]) -> str:
     parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
     backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
     readiness = trial.get("promotion_readiness") if isinstance(trial.get("promotion_readiness"), dict) else {}
     warnings = set(str(item) for item in (trial.get("warnings") or []) if item)
     warnings.update(str(item) for item in (readiness.get("blockers") or []) if item)
     warnings.update(str(item) for item in (readiness.get("validation_warnings") or []) if item)
     if warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS:
         return sorted(warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS)[0]
+    if warnings & GUIDED_AUTO_FREEZE_STRICT_WARNINGS:
+        return sorted(warnings & GUIDED_AUTO_FREEZE_STRICT_WARNINGS)[0]
     if not str(parameters.get("market_id") or trial.get("market_id") or "").strip():
         return "missing_market_id"
     if not _freezeable_parameter_subset(parameters):
@@ -2209,8 +2248,14 @@ def _guided_auto_freeze_rejection(trial: dict[str, object]) -> str:
         return "missing_intraday_flat_contract"
     if int(_safe_number(backtest.get("trade_count"))) < GUIDED_AUTO_FREEZE_MIN_TRADES:
         return "too_few_trades_to_freeze"
-    if _safe_number(backtest.get("net_profit")) <= 0 and _safe_number(backtest.get("test_profit")) <= 0:
-        return "negative_net_and_oos_profit"
+    if int(_safe_number(evidence.get("oos_trade_count"), backtest.get("oos_trade_count"))) < GUIDED_AUTO_FREEZE_MIN_OOS_TRADES:
+        return "too_few_oos_trades_to_freeze"
+    if _safe_number(backtest.get("net_profit")) <= 0 or _safe_number(backtest.get("test_profit")) <= 0:
+        return "non_positive_net_or_oos_profit"
+    if "regime_gated_backtest" in pattern and _safe_number(gated.get("test_profit")) <= 0:
+        return "non_positive_regime_gated_oos_profit"
+    if "stress_net_profit" in parameters and _safe_number(parameters.get("stress_net_profit")) <= 0:
+        return "negative_stress_net_profit"
     return ""
 
 
@@ -2971,7 +3016,8 @@ async def _run_midcap_template_pipeline(
                 "market_mapping": _market_response(mapping),
             }
         )
-    cost_sync: dict[str, object] = {"status": "skipped", "profile_count": 0}
+    cost_sync: dict[str, object] = {"status": "skipped", "profile_count": 0, "price_validated_count": 0, "ig_rate_limited": False}
+    run_ready_market_ids = list(selected_market_ids)
     if payload.auto_sync_costs and selected_market_ids:
         try:
             cost_sync_result = await sync_ig_market_costs(IGCostSyncPayload(market_ids=selected_market_ids, product_mode=product_mode))
@@ -2979,28 +3025,35 @@ async def _run_midcap_template_pipeline(
                 "status": cost_sync_result.get("status", "synced"),
                 "profile_count": cost_sync_result.get("profile_count", 0),
                 "price_validated_count": cost_sync_result.get("price_validated_count", 0),
+                "ig_rate_limited": cost_sync_result.get("ig_rate_limited", False),
                 "profiles": [
                     {
                         "market_id": profile.get("market_id"),
                         "confidence": profile.get("confidence"),
-                        "estimated_spread_bps": profile.get("estimated_spread_bps"),
-                        "estimated_slippage_bps": profile.get("estimated_slippage_bps"),
+                        "validation_status": profile.get("validation_status"),
+                        "spread_bps": profile.get("spread_bps"),
+                        "slippage_bps": profile.get("slippage_bps"),
                         "min_deal_size": profile.get("min_deal_size"),
                         "margin_percent": profile.get("margin_percent"),
+                        "notes": list(profile.get("notes") or [])[-3:],
                     }
                     for profile in list(cost_sync_result.get("profiles") or [])[: payload.max_markets]
                     if isinstance(profile, dict)
                 ],
             }
+            validated_market_ids = _price_validated_cost_profile_market_ids(cost_sync_result)
+            run_ready_market_ids = [market_id for market_id in selected_market_ids if market_id in validated_market_ids]
         except HTTPException as exc:
             cost_sync = {"status": "error", "profile_count": 0, "error": str(exc.detail)}
+            run_ready_market_ids = []
         except Exception as exc:
             cost_sync = {"status": "error", "profile_count": 0, "error": _public_error(exc)}
+            run_ready_market_ids = []
     research_run_id: int | None = None
     run_payload: ResearchRunPayload | None = None
-    if payload.auto_start_run and selected_market_ids:
-        run_payload = _midcap_template_research_payload(payload, design, selected_market_ids, product_mode, cost_sync)
-        selected_markets = _selected_markets(selected_market_ids)
+    if payload.auto_start_run and run_ready_market_ids:
+        run_payload = _midcap_template_research_payload(payload, design, run_ready_market_ids, product_mode, cost_sync)
+        selected_markets = _selected_markets(run_ready_market_ids)
         run_market_id = selected_markets[0].market_id if len(selected_markets) == 1 else "MULTI"
         research_run_id = research_store.create_run(
             market_id=run_market_id,
@@ -3021,7 +3074,15 @@ async def _run_midcap_template_pipeline(
         for candidate in candidates
         if isinstance(candidate, dict) and candidate not in selected_candidates
     ][:8]
-    status = "running" if research_run_id is not None else "ready_without_run" if selected_market_ids else "blocked_no_eligible_midcaps"
+    status = (
+        "running"
+        if research_run_id is not None
+        else "blocked_price_validation"
+        if selected_market_ids and payload.auto_sync_costs and not run_ready_market_ids
+        else "ready_without_run"
+        if selected_market_ids
+        else "blocked_no_eligible_midcaps"
+    )
     return {
         "schema": "midcap_template_pipeline_v1",
         "status": status,
@@ -3048,6 +3109,7 @@ async def _run_midcap_template_pipeline(
             "criteria": discovery.get("criteria", {}),
         },
         "selected_markets": installed_markets,
+        "run_ready_market_ids": run_ready_market_ids,
         "rejected_candidates": rejected,
         "cost_sync": cost_sync,
         "research_run_id": research_run_id,
@@ -3055,16 +3117,28 @@ async def _run_midcap_template_pipeline(
         "auto_freeze_policy": {
             "enabled": bool(research_run_id),
             "max_freeze_runs": 1,
-            "selection": "best non-deferred intraday lead that is not terminally oversized",
+            "selection": "best IG-price-validated intraday lead with positive OOS, robust costs, and no fragile-evidence blockers",
             "validation": "one frozen-validation run with search_budget=1 and no parameter hunting",
         },
         "promotion_pipeline": _midcap_template_promotion_pipeline(status, research_run_id, str(cost_sync.get("status") or "skipped")),
         "next_actions": [
-            "Open the research run after it finishes to see the Auto Freeze status.",
+            "Open the research run after it finishes to see the Auto Freeze status." if research_run_id else "Fix IG price validation before running template discovery.",
             "If Auto Freeze is blocked, use Make tradeable or Repair remaining on the best non-terminal lead.",
             "Daily paper mode still uses only active frozen templates; rejected discovery leads will not fire.",
         ],
     }
+
+
+def _price_validated_cost_profile_market_ids(cost_sync_result: dict[str, object]) -> set[str]:
+    output: set[str] = set()
+    for profile in cost_sync_result.get("profiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        confidence = str(profile.get("confidence") or "")
+        market_id = str(profile.get("market_id") or "").strip()
+        if market_id and confidence in PRICE_VALIDATED_COST_CONFIDENCES:
+            output.add(market_id)
+    return output
 
 
 def _midcap_template_research_payload(
@@ -3115,7 +3189,7 @@ def _midcap_template_research_payload(
             "auto_freeze": {
                 "enabled": True,
                 "status": "waiting_for_design_run",
-                "policy": "save_best_non_deferred_intraday_lead_then_one_trial_frozen_validation",
+                "policy": "save_best_oos_positive_ig_validated_intraday_lead_then_one_trial_frozen_validation",
                 "max_freeze_runs": 1,
                 "strategy_generation_allowed": False,
             },
@@ -3130,27 +3204,29 @@ def _midcap_template_research_payload(
 
 
 def _midcap_template_promotion_pipeline(status: str, research_run_id: int | None, cost_sync_status: str) -> list[dict[str, object]]:
+    no_eligible = status == "blocked_no_eligible_midcaps"
+    price_blocked = status == "blocked_price_validation"
     return [
         {
             "step": "discover_ig_midcaps",
-            "status": "completed" if status != "blocked_no_eligible_midcaps" else "blocked",
-            "detail": "FMP/built-in midcap universe filtered through the selected IG demo account catalogue.",
+            "status": "completed" if not no_eligible else "blocked",
+            "detail": "Provider midcap universe filtered through liquidity, turnover, account-fit, and selected IG demo account checks.",
         },
         {
             "step": "sync_ig_costs",
-            "status": cost_sync_status if status != "blocked_no_eligible_midcaps" else "blocked",
-            "detail": "Stores spread, slippage, minimum deal size, margin, and stop-distance assumptions for installed markets.",
+            "status": "blocked" if no_eligible or price_blocked else cost_sync_status,
+            "detail": "Requires IG price-validated spread, slippage, minimum deal size, margin, and stop-distance assumptions before running.",
         },
         {
             "step": "run_intraday_design_search",
-            "status": "running" if research_run_id is not None else "waiting",
+            "status": "running" if research_run_id is not None else "blocked" if no_eligible or price_blocked else "waiting",
             "detail": "Runs the selected behaviour design on 5-minute bars with no overnight holding.",
             "run_id": research_run_id,
         },
         {
             "step": "auto_save_best_freezeable_lead",
             "status": "waiting_for_finished_run" if research_run_id is not None else "waiting",
-            "detail": "When the design run finishes, the backend saves the best non-deferred intraday lead as frozen rules.",
+            "detail": "When the design run finishes, the backend only saves leads with positive OOS, robust costs, and no fragile-evidence blockers.",
         },
         {
             "step": "auto_freeze_validate_exact_rules",

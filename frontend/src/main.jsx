@@ -509,8 +509,8 @@ function App() {
   async function runMidcapTemplatePipeline() {
     const accountSize = optionalNumber(midcapSearch.account_size) ?? WORKING_ACCOUNT_SIZE;
     const maxMarkets = optionalNumber(midcapSearch.max_markets) ?? 3;
-    setMidcapPipelineState({ status: "running", detail: "Finding IG-eligible midcaps, running a fast no-overnight design pass, then auto-freezing the best eligible lead..." });
-    setMessage("Midcap template pipeline: quick guided scan, IG costs, design run, then automatic freeze validation...");
+    setMidcapPipelineState({ status: "running", detail: "Finding liquid IG-eligible midcaps, validating live/recent IG prices, then only running clean markets..." });
+    setMessage("Midcap template pipeline: watchlist quality gates, IG price validation, design run, then strict freeze validation...");
     try {
       const result = await startMidcapTemplatePipeline({
         design_id: midcapSearch.design_id,
@@ -528,7 +528,7 @@ function App() {
         auto_start_run: true,
       });
       setMidcapPipeline(result);
-      const marketIds = (result.selected_markets ?? []).map((item) => item.market_id).filter(Boolean);
+      const marketIds = (result.run_ready_market_ids?.length ? result.run_ready_market_ids : result.selected_markets?.map((item) => item.market_id) ?? []).filter(Boolean);
       if (marketIds.length > 0) {
         setActiveMarketIds(marketIds);
       }
@@ -547,10 +547,18 @@ function App() {
         status: result.status ?? "started",
         detail: result.research_run_id
           ? `Run ${result.research_run_id} started for ${marketIds.length} midcap market${marketIds.length === 1 ? "" : "s"} using the fast 2 vCPU profile; Auto Freeze will save and validate the best eligible lead when it finishes.`
+          : result.cost_sync?.ig_rate_limited
+          ? "No run started because IG rate-limited the price validation calls. Let the API cool down, then start again."
+          : result.status === "blocked_price_validation"
+          ? "No run started because IG did not return price-validated cost profiles for the shortlisted markets. Wait for the IG API cooldown or refresh credentials, then start again."
           : `No run started. ${result.discovery?.eligible_count ?? 0} eligible midcap candidate${result.discovery?.eligible_count === 1 ? "" : "s"} found.`,
       });
       setMessage(result.research_run_id
         ? `Midcap template pipeline started run ${result.research_run_id}.`
+        : result.cost_sync?.ig_rate_limited
+        ? "IG rate limit hit during price validation; the builder stopped before spending CPU."
+        : result.status === "blocked_price_validation"
+        ? "Midcap template builder stopped before running because IG price validation is missing."
         : "Midcap template builder did not find enough eligible markets to start a run.");
       await loadModule("backtests").catch(() => undefined);
       if (result.research_run_id) {
@@ -3890,7 +3898,8 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
       {pipeline?.selected_markets?.length > 0 && (
         <div className="discovery-summary">
           <Metric label="Run ID" value={pipeline.research_run_id ?? "-"} />
-          <Metric label="Markets" value={pipeline.selected_markets.length} />
+          <Metric label="Shortlist" value={pipeline.selected_markets.length} />
+          <Metric label="Price-ready" value={pipeline.run_ready_market_ids?.length ?? 0} />
           <Metric label="Universe" value={pipeline.discovery?.candidate_count ?? "-"} />
           <Metric label="Cost sync" value={pipeline.cost_sync?.status ?? "n/a"} />
         </div>
@@ -3931,6 +3940,7 @@ function MidcapDiscoveryPanel({ search, setSearch, result, loading, templateDesi
               <Metric label="Mkt cap" value={formatLargeMoney(candidate.market_cap)} />
               <Metric label="Price" value={round(candidate.price)} />
               <Metric label="Volume" value={formatLargeNumber(candidate.volume)} />
+              <Metric label="Turnover" value={formatLargeMoney(candidate.turnover)} />
               <Metric label="£1/pt margin" value={formatMoney(candidate.estimated_margin_for_probe_stake)} />
               <Metric label="Spread/slip" value={`${round(candidate.estimated_spread_bps)} / ${round(candidate.estimated_slippage_bps)} bps`} />
               <Metric label="IG" value={candidate.ig_status?.replaceAll("_", " ") ?? "n/a"} />

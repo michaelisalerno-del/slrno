@@ -378,3 +378,8 @@ def test_midcap_endpoint_checks_all_us_exchanges_before_ranking(tmp_path, monkey
     assert result["data_source"] == "eodhd_stock_screener"
     assert {"NASDAQ", "NYSE", "AMEX"}.issubset(set(calls))
     assert result["candidate_count"] == 1
+
+
+def test_ig_rate_limit_text_is_reported_as_cost_sync_status():
+    assert main._looks_like_ig_rate_limit("IG login failed: error.public-api.exceeded-API key hidden")
+    assert not main._looks_like_ig_rate_limit("IG market not found")

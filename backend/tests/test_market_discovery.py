@@ -43,7 +43,7 @@ def test_midcap_discovery_accepts_eodhd_screener_rows():
                 "currency_symbol": "GBp",
                 "market_capitalization": 6_500_000_000,
                 "adjusted_close": 323.95,
-                "avgvol_200d": 2_000_000,
+                "avgvol_200d": 5_000_000,
             }
         ],
         MidcapDiscoveryCriteria(country="UK", account_size=3000),
@@ -58,6 +58,7 @@ def test_midcap_discovery_accepts_eodhd_screener_rows():
     assert candidate.exchange == "LSE"
     assert candidate.currency == "GBp"
     assert "starter_universe_not_live_constituents" not in candidate.warnings
+    assert candidate.turnover > 10_000_000
 
 
 def test_midcap_discovery_penalizes_speculative_us_profiles():
@@ -97,6 +98,7 @@ def test_midcap_discovery_penalizes_speculative_us_profiles():
     assert candidates[0].market_id == "PEGA"
     riot = next(candidate for candidate in candidates if candidate.market_id == "RIOT")
     assert "speculative_share_profile" in riot.warnings
+    assert "speculative_share_profile" in riot.blockers
     assert "negative_earnings_share" in riot.warnings
 
 
@@ -123,6 +125,55 @@ def test_midcap_discovery_blocks_expensive_us_share_for_small_account_probe_stak
     assert candidate.estimated_margin_for_probe_stake == 10_000
     assert candidate.eligible is False
     assert "probe_stake_margin_too_large" in candidate.blockers
+
+
+def test_midcap_discovery_blocks_low_turnover_day_trading_watchlist_names():
+    candidates = build_midcap_candidates(
+        [
+            {
+                "code": "QUIET",
+                "name": "Quiet Industrials",
+                "exchange": "US",
+                "currency_symbol": "$",
+                "market_capitalization": 3_000_000_000,
+                "adjusted_close": 20,
+                "avgvol_200d": 500_000,
+                "earnings_share": 1.2,
+            }
+        ],
+        MidcapDiscoveryCriteria(country="US", account_size=3000),
+        "eodhd_stock_screener",
+    )
+
+    candidate = candidates[0]
+
+    assert candidate.turnover == 10_000_000
+    assert candidate.eligible is False
+    assert "turnover_too_low_for_day_trading_watchlist" in candidate.blockers
+
+
+def test_midcap_discovery_blocks_low_priced_us_shares_for_guided_watchlist():
+    candidates = build_midcap_candidates(
+        [
+            {
+                "code": "VLY",
+                "name": "Valley National Bancorp",
+                "exchange": "US",
+                "currency_symbol": "$",
+                "market_capitalization": 5_000_000_000,
+                "adjusted_close": 8.25,
+                "avgvol_200d": 20_000_000,
+                "earnings_share": 1.0,
+            }
+        ],
+        MidcapDiscoveryCriteria(country="US", account_size=3000),
+        "eodhd_stock_screener",
+    )
+
+    candidate = candidates[0]
+
+    assert candidate.eligible is False
+    assert "low_priced_us_share" in candidate.blockers
 
 
 def test_midcap_discovery_ig_match_controls_eligibility_after_verification():
