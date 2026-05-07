@@ -1852,7 +1852,8 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             persist_status()
             continue
         required_bars = _minimum_bars_for_interval(market, interval)
-        if _should_try_daily_fallback(market, interval, len(bars), required_bars):
+        allow_daily_fallback = not payload.day_trading_mode
+        if allow_daily_fallback and _should_try_daily_fallback(market, interval, len(bars), required_bars):
             fallback_interval = "1day"
             fallback_start = _run_start_for_market(payload, market, fallback_interval)
             try:
@@ -1881,7 +1882,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                     start = fallback_start
                     bars = fallback_bars
                     required_bars = fallback_required
-        if _should_try_fmp_daily_fallback(market, interval, len(bars), required_bars):
+        if allow_daily_fallback and _should_try_fmp_daily_fallback(market, interval, len(bars), required_bars):
             fallback_symbol = _fmp_daily_symbol_for_market(market)
             fallback_interval = "1day"
             fallback_start = _run_start_for_market(payload, market, fallback_interval)
@@ -1929,11 +1930,14 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             )
             persist_status()
         if len(bars) < required_bars:
+            reason = f"{market.market_id} skipped: need at least {required_bars} {interval} bars; received {len(bars)}"
+            if payload.day_trading_mode and interval in INTRADAY_INTERVALS:
+                reason += "; daily fallback is disabled for no-overnight intraday scenario recipes"
             _mark_market_failed(
                 market_status,
                 market_failures,
                 market,
-                f"{market.market_id} skipped: need at least {required_bars} {interval} bars; received {len(bars)}",
+                reason,
                 bar_count=len(bars),
             )
             persist_status()
