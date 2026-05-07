@@ -577,6 +577,10 @@ label {
   gap: 6px;
 }
 
+.badge-group.left {
+  justify-content: flex-start;
+}
+
 .secret-badge,
 .badge {
   display: inline-flex;

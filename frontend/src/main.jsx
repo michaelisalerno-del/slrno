@@ -97,6 +97,8 @@ function App() {
 
   const productMode = roles.defaultProductMode || "spread_bet";
   const recipes = summary.recipes ?? [];
+  const buildRuns = summary.build_runs ?? [];
+  const buildRunning = buildRuns.some((run) => run.status === "running" || Number(run.progress_percent ?? 100) < 100);
   const recipeCards = summary.recipe_cards?.length ? summary.recipe_cards : recipes.map((recipe) => ({
     recipe_id: recipe.id,
     label: recipe.label,
@@ -106,6 +108,19 @@ function App() {
     no_trade_reason: "Press Start to scan today.",
     cost_profile: recipe.cost_profile,
   }));
+
+  useEffect(() => {
+    if (!buildRunning) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const scenarioPayload = await getScenarioSummary({ accountSize: WORKING_ACCOUNT_SIZE });
+        setSummary(scenarioPayload);
+      } catch (error) {
+        setMessage(error.message);
+      }
+    }, 3500);
+    return () => window.clearInterval(timer);
+  }, [buildRunning]);
 
   async function runAction(label, action, success) {
     setBusy(label);
@@ -361,12 +376,57 @@ function BuildRecipeView({ recipes, onBuild, busy }) {
             </div>
             <p>{recipe.setup}</p>
             <BadgeList items={recipe.families ?? []} />
+            {recipe.latest_build ? (
+              <BuildRunProgress run={recipe.latest_build} />
+            ) : (
+              <EmptyState text="No build run yet for this recipe." />
+            )}
             <button onClick={() => onBuild(recipe.id)} disabled={Boolean(busy)}>
               <Sparkles size={16} /> Build, Repair & Freeze
             </button>
           </article>
         ))}
       </section>
+    </div>
+  );
+}
+
+function BuildRunProgress({ run }) {
+  const progress = Math.max(0, Math.min(100, Number(run.progress_percent ?? 0)));
+  const autoFreeze = run.auto_freeze ?? {};
+  const blockers = run.blocker_summary ?? [];
+  return (
+    <div className={`run-state ${run.status}`}>
+      <div className="label-row">
+        <div>
+          <strong>Latest run #{run.run_id}</strong>
+          <span>{run.step_label ?? readable(run.status)}</span>
+        </div>
+        <span className={`badge ${run.status === "running" ? "base" : blockers.length ? "warn" : "good"}`}>
+          {readable(autoFreeze.status || run.status)}
+        </span>
+      </div>
+      <div className="progress-row">
+        <div className="progress-track" aria-label={`${progress}% complete`}>
+          <div className={`progress-fill ${run.status}`} style={{ width: `${progress}%` }} />
+        </div>
+        <small>{formatNumber(progress, 0)}%</small>
+      </div>
+      <div className="metrics four">
+        <Metric label="Trials" value={`${run.trial_count ?? 0}/${run.effective_search_budget ?? "?"}`} />
+        <Metric label="Best score" value={formatNumber(run.best_score, 1)} />
+        <Metric label="Passed" value={run.passed_count ?? 0} />
+        <Metric label="Paper" value={readable(autoFreeze.readiness_status || "not ready")} />
+      </div>
+      {autoFreeze.detail ? <p>{autoFreeze.detail}</p> : null}
+      {run.error ? <p>{run.error}</p> : null}
+      {blockers.length ? (
+        <div className="badge-group left">
+          {blockers.map((item) => (
+            <span className="badge warn" key={item.reason}>{item.label} · {item.count}</span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

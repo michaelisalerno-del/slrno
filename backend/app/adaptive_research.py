@@ -38,8 +38,12 @@ REGIME_SCAN_HARD_CAP = 96
 MAX_WALK_FORWARD_FOLDS = 36
 FROZEN_PARAMETER_KEYS = {
     "confidence_quantile",
+    "day_session_end_hour",
+    "day_session_start_hour",
     "direction",
     "false_breakout_filter",
+    "flat_cutoff_hour",
+    "flat_policy",
     "lookback",
     "max_hold_bars",
     "min_hold_bars",
@@ -123,6 +127,9 @@ class AdaptiveSearchConfig:
     market_context: dict[str, object] = field(default_factory=dict)
     day_trading_mode: bool = False
     force_flat_before_close: bool = False
+    day_session_start_hour: int | None = None
+    day_session_end_hour: int | None = None
+    flat_cutoff_hour: int = 22
     paper_queue_limit: int = 3
     review_queue_limit: int = 10
     diagnostic_limit: int | None = None
@@ -664,12 +671,17 @@ def _apply_day_trading_contract(
             "holding_period": "intraday",
             "force_flat_before_close": True,
             "no_overnight": True,
-            "flat_policy": "last_bar_before_date_change",
+            "flat_policy": "session_end_or_funding_cutoff",
+            "flat_cutoff_hour": int(config.flat_cutoff_hour or 22),
             "paper_order_mode": "preview_only",
             "live_ordering_enabled": False,
             "day_trading_interval": timeframe,
         }
     )
+    if config.day_session_start_hour is not None:
+        output["day_session_start_hour"] = int(config.day_session_start_hour)
+    if config.day_session_end_hour is not None:
+        output["day_session_end_hour"] = int(config.day_session_end_hour)
     if family not in DAY_TRADING_FAMILIES:
         output["overnight_template_family"] = True
     return output
@@ -1084,6 +1096,9 @@ def _generate_signals(bars: list[OHLCBar], family: str, parameters: dict[str, fl
                 confidence = 1.0
             signal = _apply_regime_filter(bars, index, signal, parameters)
         raw.append(_apply_direction(signal, str(parameters["direction"])))
+        if _day_trading_session_blocks_entry(bar, parameters):
+            raw[-1] = 0
+            confidence = 0.0
         confidences.append(confidence if signal else 0.0)
     raw = _apply_confidence_gate(raw, confidences, float(parameters.get("confidence_quantile", 1.0)))
     return _apply_risk_controls(bars, raw, parameters)
@@ -1168,7 +1183,44 @@ def _should_force_flat_before_next_session(
         return False
     if index >= len(bars) - 1:
         return False
-    return bars[index + 1].timestamp.date() > bars[index].timestamp.date()
+    current = bars[index].timestamp
+    following = bars[index + 1].timestamp
+    if following.date() > current.date():
+        return True
+    cutoff_hour = _positive_int(parameters.get("flat_cutoff_hour"), 22)
+    if current.hour < cutoff_hour <= following.hour:
+        return True
+    return _is_in_day_trading_session(current.hour, parameters) and not _is_in_day_trading_session(following.hour, parameters)
+
+
+def _day_trading_session_blocks_entry(bar: OHLCBar, parameters: dict[str, object]) -> bool:
+    if not parameters.get("force_flat_before_close") and not parameters.get("no_overnight"):
+        return False
+    return not _is_in_day_trading_session(bar.timestamp.hour, parameters)
+
+
+def _is_in_day_trading_session(hour: int, parameters: dict[str, object]) -> bool:
+    start_raw = parameters.get("day_session_start_hour")
+    end_raw = parameters.get("day_session_end_hour")
+    if start_raw is None and end_raw is None:
+        return hour < _positive_int(parameters.get("flat_cutoff_hour"), 22)
+    start = _positive_int(start_raw, 0)
+    end = _positive_int(end_raw, _positive_int(parameters.get("flat_cutoff_hour"), 22))
+    start = max(0, min(23, start))
+    end = max(0, min(24, end))
+    if start < end:
+        return start <= hour < end
+    if start > end:
+        return hour >= start or hour < end
+    return True
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _apply_confidence_gate(raw: list[int], confidences: list[float], top_quantile: float) -> list[int]:

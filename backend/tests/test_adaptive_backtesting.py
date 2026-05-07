@@ -156,6 +156,46 @@ def test_day_trading_signals_force_flat_before_next_session():
     assert result.funding_cost == 0
 
 
+def test_day_trading_signals_force_flat_before_ig_funding_cutoff():
+    bars = [
+        OHLCBar("TEST", datetime(2026, 1, 5, 21, 45), 100, 101, 99, 100),
+        OHLCBar("TEST", datetime(2026, 1, 5, 21, 50), 101, 102, 100, 101),
+        OHLCBar("TEST", datetime(2026, 1, 5, 21, 55), 102, 103, 101, 102),
+        OHLCBar("TEST", datetime(2026, 1, 5, 22, 0), 103, 104, 102, 103),
+        OHLCBar("TEST", datetime(2026, 1, 5, 22, 5), 104, 105, 103, 104),
+    ]
+    parameters = {
+        "lookback": 1,
+        "threshold_bps": 0,
+        "z_threshold": 1,
+        "volatility_multiplier": 1,
+        "stop_loss_bps": 500,
+        "take_profit_bps": 500,
+        "max_hold_bars": 20,
+        "min_hold_bars": 1,
+        "min_trade_spacing": 0,
+        "confidence_quantile": 1.0,
+        "regime_filter": "any",
+        "direction": "long_only",
+        "day_trading_mode": True,
+        "force_flat_before_close": True,
+        "no_overnight": True,
+        "flat_cutoff_hour": 22,
+    }
+
+    signals = _generate_signals(bars, "everyday_long", parameters)
+    result = run_vector_backtest(
+        bars,
+        signals,
+        BacktestConfig(position_size=1, overnight_admin_fee_annual=0.365, funding_cutoff_hour=22),
+    )
+
+    assert signals[1] == 1
+    assert signals[2] == 0
+    assert signals[3] == 0
+    assert result.funding_cost == 0
+
+
 def test_day_trading_adaptive_search_marks_no_overnight_contract():
     market = MarketMapping("TEST", "Synthetic", "index", "TEST", "", spread_bps=1, slippage_bps=0.5)
     profile = public_ig_cost_profile(market)

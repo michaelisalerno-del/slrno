@@ -223,6 +223,7 @@ SCENARIO_RECIPES: dict[str, dict[str, object]] = {
         "families": ["intraday_trend", "mean_reversion"],
         "manual_playbook": "vwap_trend_pullback",
         "setup": "VWAP hold/reclaim, pullback, continuation",
+        "session_window": {"start_hour": 13, "end_hour": 21},
         "max_spread_bps": 2.5,
         "min_relative_volume": 0.75,
         "min_trend_bps": 8.0,
@@ -241,6 +242,7 @@ SCENARIO_RECIPES: dict[str, dict[str, object]] = {
         "families": ["liquidity_sweep_reversal", "mean_reversion", "volatility_expansion"],
         "manual_playbook": "failed_breakout_reversal",
         "setup": "Opening range sweep, VWAP reclaim/loss, rejection confirmation",
+        "session_window": {"start_hour": 7, "end_hour": 21},
         "max_spread_bps": 14.0,
         "min_relative_volume": 0.8,
         "min_sweep_bps": 1.0,
@@ -490,6 +492,9 @@ class ResearchRunPayload(BaseModel):
     pipeline: dict[str, object] = Field(default_factory=dict)
     day_trading_mode: bool = False
     force_flat_before_close: bool = False
+    day_session_start_hour: int | None = Field(default=None, ge=0, le=23)
+    day_session_end_hour: int | None = Field(default=None, ge=0, le=24)
+    flat_cutoff_hour: int = Field(default=22, ge=1, le=23)
     paper_queue_limit: int = Field(default=3, ge=1, le=5)
     review_queue_limit: int = Field(default=10, ge=1, le=20)
 
@@ -1971,6 +1976,9 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         market_context=market_status.get("market_context") if isinstance(market_status.get("market_context"), dict) else {},
                         day_trading_mode=payload.day_trading_mode,
                         force_flat_before_close=payload.force_flat_before_close or payload.day_trading_mode,
+                        day_session_start_hour=payload.day_session_start_hour,
+                        day_session_end_hour=payload.day_session_end_hour,
+                        flat_cutoff_hour=payload.flat_cutoff_hour,
                         paper_queue_limit=payload.paper_queue_limit,
                         review_queue_limit=payload.review_queue_limit,
                     ),
@@ -3323,6 +3331,9 @@ def _research_run_config(
         "product_mode": payload.product_mode,
         "day_trading_mode": payload.day_trading_mode,
         "force_flat_before_close": payload.force_flat_before_close or payload.day_trading_mode,
+        "day_session_start_hour": payload.day_session_start_hour,
+        "day_session_end_hour": payload.day_session_end_hour,
+        "flat_cutoff_hour": payload.flat_cutoff_hour,
         "paper_queue_limit": payload.paper_queue_limit,
         "review_queue_limit": payload.review_queue_limit,
         "daily_factory_policy": _day_trading_policy(payload.paper_queue_limit, payload.review_queue_limit, payload.account_size)
@@ -3365,6 +3376,16 @@ def _safe_int(value: object) -> int:
         return max(0, int(float(value or 0)))
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_hour(value: object, maximum: int) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(maximum, parsed))
 
 
 def _mark_market_failed(
@@ -3574,6 +3595,13 @@ def _scenario_summary(account_size: float = WORKING_ACCOUNT_SIZE_GBP) -> dict[st
     latest_config = latest.get("config") if isinstance(latest, dict) and isinstance(latest.get("config"), dict) else {}
     recipe_cards = latest_config.get("recipe_cards") if isinstance(latest_config.get("recipe_cards"), list) else []
     templates = [_scenario_template_summary(template) for recipe in SCENARIO_RECIPES.values() for template in _scenario_templates_for_recipe(str(recipe["id"]))]
+    build_runs = _scenario_build_runs()
+    latest_build_by_recipe = {str(item.get("recipe_id")): item for item in reversed(build_runs)}
+    recipes = []
+    for recipe in SCENARIO_RECIPES.values():
+        recipe_payload = _scenario_recipe_payload(recipe)
+        recipe_payload["latest_build"] = latest_build_by_recipe.get(str(recipe["id"]))
+        recipes.append(recipe_payload)
     return {
         "schema": "scenario_app_summary_v1",
         "mode": "two_market_scenario_trainer",
@@ -3583,8 +3611,9 @@ def _scenario_summary(account_size: float = WORKING_ACCOUNT_SIZE_GBP) -> dict[st
         "order_placement": "disabled",
         "strategy_generation_allowed_in_daily_mode": False,
         "daily_limits": {"paper_trades_total": 1, "review_signals_total": 5},
-        "recipes": [_scenario_recipe_payload(recipe) for recipe in SCENARIO_RECIPES.values()],
+        "recipes": recipes,
         "templates": templates,
+        "build_runs": build_runs,
         "counts": {
             "recipes": len(SCENARIO_RECIPES),
             "active_frozen_templates": len(templates),
@@ -3615,6 +3644,170 @@ def _scenario_summary(account_size: float = WORKING_ACCOUNT_SIZE_GBP) -> dict[st
             "preserves": ["EODHD/FMP/IG credentials", "IG account roles", "settings/provider database", "market registry"],
         },
     }
+
+
+def _scenario_build_runs(limit: int = 12) -> list[dict[str, object]]:
+    builds: list[dict[str, object]] = []
+    for summary in research_store.list_runs(include_archived=False):
+        run_id = _safe_int(summary.get("id"))
+        if run_id <= 0:
+            continue
+        run = research_store.get_run(run_id)
+        if not isinstance(run, dict):
+            continue
+        config = run.get("config") if isinstance(run.get("config"), dict) else {}
+        pipeline = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
+        if pipeline.get("schema") != "scenario_recipe_pipeline_v1":
+            continue
+        recipe_id = str(pipeline.get("recipe_id") or "")
+        recipe = SCENARIO_RECIPES.get(recipe_id)
+        if recipe is None:
+            continue
+        builds.append(_scenario_build_run_payload(run, recipe))
+        if len(builds) >= limit:
+            break
+    return builds
+
+
+def _scenario_build_run_payload(run: dict[str, object], recipe: dict[str, object]) -> dict[str, object]:
+    config = run.get("config") if isinstance(run.get("config"), dict) else {}
+    pipeline = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    market_statuses = config.get("market_statuses") if isinstance(config.get("market_statuses"), list) else []
+    status = str(run.get("status") or "unknown")
+    progress = _scenario_build_progress(status, market_statuses, auto_freeze)
+    blockers = _scenario_build_blocker_summary(auto_freeze)
+    return {
+        "run_id": run.get("id"),
+        "recipe_id": recipe.get("id"),
+        "label": recipe.get("label"),
+        "market_id": recipe.get("market_id"),
+        "created_at": run.get("created_at"),
+        "status": status,
+        "error": run.get("error") or "",
+        "progress_percent": progress,
+        "step_label": _scenario_build_step_label(status, market_statuses, auto_freeze),
+        "trial_count": run.get("trial_count", 0),
+        "passed_count": run.get("passed_count", 0),
+        "best_score": round(_safe_number(run.get("best_score")), 2),
+        "effective_search_budget": _scenario_effective_search_budget(config, market_statuses),
+        "auto_freeze": _compact_scenario_auto_freeze(auto_freeze),
+        "blocker_summary": blockers,
+        "market_statuses": [_compact_market_status(status_item) for status_item in market_statuses if isinstance(status_item, dict)],
+    }
+
+
+def _scenario_build_progress(status: str, market_statuses: list[object], auto_freeze: dict[str, object]) -> int:
+    if status in {"finished", "finished_with_warnings", "error"}:
+        return 100
+    progress = 8
+    for item in market_statuses:
+        if not isinstance(item, dict):
+            continue
+        market_status = str(item.get("status") or "")
+        if market_status == "loading":
+            progress = max(progress, 18)
+        elif market_status == "evaluating":
+            progress = max(progress, 48)
+        elif market_status == "completed":
+            progress = max(progress, 70)
+    auto_status = str(auto_freeze.get("status") or "")
+    auto_progress = {
+        "waiting_for_design_run": 12,
+        "selecting": 76,
+        "running_repair": 84,
+        "repair_skipped": 92,
+        "repair_error": 100,
+        "repair_finished": 95,
+        "repair_freeze_validated_ready": 100,
+        "repair_freeze_validated_blocked": 100,
+        "running_freeze_validation": 92,
+        "freeze_validated_ready": 100,
+        "freeze_validated_blocked": 100,
+        "freeze_validation_finished_without_trial": 100,
+        "freeze_validation_error": 100,
+        "skipped": 100,
+        "error": 100,
+    }.get(auto_status, 0)
+    return max(progress, auto_progress)
+
+
+def _scenario_build_step_label(status: str, market_statuses: list[object], auto_freeze: dict[str, object]) -> str:
+    if status == "error":
+        return "Run stopped with an error"
+    auto_status = str(auto_freeze.get("status") or "")
+    labels = {
+        "waiting_for_design_run": "Waiting for market data",
+        "selecting": "Selecting a freezeable result",
+        "running_repair": "Repairing the best near-miss",
+        "repair_skipped": "No repairable result found",
+        "repair_error": "Repair stopped with an error",
+        "repair_finished": "Repair finished",
+        "repair_freeze_validated_ready": "Template frozen and paper ready",
+        "repair_freeze_validated_blocked": "Freeze validation blocked paper readiness",
+        "running_freeze_validation": "Freeze-validating exact rules",
+        "freeze_validated_ready": "Template frozen and paper ready",
+        "freeze_validated_blocked": "Template frozen but blocked",
+        "freeze_validation_finished_without_trial": "Freeze validation produced no trial",
+        "freeze_validation_error": "Freeze validation failed",
+        "skipped": "Finished with no template frozen",
+        "error": "Automatic freeze failed",
+    }
+    if auto_status in labels:
+        return labels[auto_status]
+    for item in market_statuses:
+        if not isinstance(item, dict):
+            continue
+        market_status = str(item.get("status") or "")
+        if market_status == "evaluating":
+            budget = item.get("effective_search_budget")
+            return f"Testing {budget} candidate rules" if budget else "Testing candidate rules"
+        if market_status == "loading":
+            return "Loading 5-minute bars"
+    if status in {"finished", "finished_with_warnings"}:
+        return "Finished"
+    return "Starting"
+
+
+def _scenario_effective_search_budget(config: dict[str, object], market_statuses: list[object]) -> int:
+    for item in market_statuses:
+        if isinstance(item, dict) and _safe_int(item.get("effective_search_budget")):
+            return _safe_int(item.get("effective_search_budget"))
+    return _safe_int(config.get("search_budget"))
+
+
+def _compact_scenario_auto_freeze(auto_freeze: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": auto_freeze.get("status", ""),
+        "reason": auto_freeze.get("reason", ""),
+        "detail": auto_freeze.get("detail", ""),
+        "source_trial_id": auto_freeze.get("source_trial_id"),
+        "template_id": auto_freeze.get("template_id"),
+        "template_name": auto_freeze.get("template_name", ""),
+        "repair_run_id": auto_freeze.get("repair_run_id"),
+        "freeze_run_id": auto_freeze.get("freeze_run_id"),
+        "readiness_status": auto_freeze.get("readiness_status", ""),
+        "skip_summary": auto_freeze.get("skip_summary", {}),
+        "repair_skip_summary": auto_freeze.get("repair_skip_summary", {}),
+    }
+
+
+def _scenario_build_blocker_summary(auto_freeze: dict[str, object]) -> list[dict[str, object]]:
+    counts: dict[str, int] = {}
+    for key in ("skip_summary", "repair_skip_summary"):
+        summary = auto_freeze.get(key) if isinstance(auto_freeze.get(key), dict) else {}
+        for reason, count in summary.items():
+            counts[str(reason)] = counts.get(str(reason), 0) + _safe_int(count)
+    return [
+        {"reason": reason, "label": _readable_reason(reason), "count": count}
+        for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]
+        if count > 0
+    ]
+
+
+def _readable_reason(value: object) -> str:
+    text = str(value or "").replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text else ""
 
 
 async def _start_scenario_recipe_build(
@@ -3673,6 +3866,7 @@ def _scenario_recipe_research_payload(
 ) -> ResearchRunPayload:
     market_id = str(recipe["market_id"])
     recipe_id = str(recipe["id"])
+    session_window = recipe.get("session_window") if isinstance(recipe.get("session_window"), dict) else {}
     return ResearchRunPayload(
         market_id=market_id,
         market_ids=[market_id],
@@ -3722,6 +3916,9 @@ def _scenario_recipe_research_payload(
         },
         day_trading_mode=True,
         force_flat_before_close=True,
+        day_session_start_hour=_optional_hour(session_window.get("start_hour"), maximum=23),
+        day_session_end_hour=_optional_hour(session_window.get("end_hour"), maximum=24),
+        flat_cutoff_hour=22,
         paper_queue_limit=1,
         review_queue_limit=5,
     )
@@ -3752,6 +3949,7 @@ def _scenario_recipe_payload(recipe: dict[str, object]) -> dict[str, object]:
         "families": list(recipe.get("families") or []),
         "manual_playbook": recipe.get("manual_playbook"),
         "setup": recipe.get("setup"),
+        "session_window": dict(recipe.get("session_window") if isinstance(recipe.get("session_window"), dict) else {}),
         "strict_gates": {
             "max_spread_bps": recipe.get("max_spread_bps"),
             "min_relative_volume": recipe.get("min_relative_volume"),
