@@ -258,7 +258,9 @@ def select_ig_market_candidate(market: MarketMapping, candidates: list[dict[str,
         share_matches = [candidate for candidate in viable if _asset_class_matches("share", _normalize_search_text(candidate.get("type")))]
         if not share_matches:
             return None
-        viable = share_matches
+        viable = [candidate for candidate in share_matches if _share_candidate_name_matches(market, candidate)]
+        if not viable:
+            return None
     return max(viable, key=lambda candidate: _ig_candidate_score(market, candidate))
 
 
@@ -296,8 +298,57 @@ def _ig_candidate_score(market: MarketMapping, candidate: dict[str, object]) -> 
     return score, len(candidate_name)
 
 
+def _share_candidate_name_matches(market: MarketMapping, candidate: dict[str, object]) -> bool:
+    candidate_name = _normalize_search_text(candidate.get("name"))
+    if not candidate_name:
+        return False
+    target_names = [
+        _normalize_search_text(value)
+        for value in (market.name, market.ig_name)
+        if _normalize_search_text(value)
+    ]
+    if any(candidate_name == name or name in candidate_name or candidate_name in name for name in target_names):
+        return True
+    market_tokens: set[str] = set()
+    for name in target_names:
+        market_tokens.update(_significant_share_name_tokens(name))
+    candidate_tokens = _significant_share_name_tokens(candidate_name)
+    if not market_tokens or not candidate_tokens:
+        return False
+    overlap = market_tokens & candidate_tokens
+    return len(overlap) >= min(2, len(market_tokens))
+
+
 def _normalize_search_text(value: object) -> str:
     return " ".join("".join(character.lower() if character.isalnum() else " " for character in str(value or "")).split())
+
+
+def _significant_share_name_tokens(value: str) -> set[str]:
+    stop_words = {
+        "ab",
+        "ag",
+        "and",
+        "class",
+        "co",
+        "company",
+        "corp",
+        "corporation",
+        "group",
+        "holdings",
+        "inc",
+        "limited",
+        "ltd",
+        "nv",
+        "ord",
+        "ordinary",
+        "plc",
+        "publ",
+        "sa",
+        "shares",
+        "stock",
+        "the",
+    }
+    return {token for token in _normalize_search_text(value).split() if token not in stop_words}
 
 
 def _asset_class_matches(asset_class: str, candidate_type: str) -> bool:

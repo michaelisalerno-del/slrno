@@ -34,6 +34,11 @@ COST_BLOCKING_WARNINGS = {
     "fails_higher_slippage",
 }
 ROBUSTNESS_BLOCKING_WARNINGS = {
+    "day_trade_forbidden_overnight_family",
+    "day_trade_held_overnight",
+    "day_trade_missing_flat_policy",
+    "day_trade_requires_intraday_bars",
+    "diagnostics_deferred_fast_scan",
     "too_few_trades",
     "low_oos_trades",
     "drawdown_too_high",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import asdict
 from datetime import date, timedelta
 from math import isfinite
 
@@ -9,7 +10,14 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .adaptive_research import SEARCH_PRESETS, AdaptiveSearchConfig, available_research_engines, run_adaptive_search
+from .adaptive_research import (
+    FROZEN_PARAMETER_KEYS,
+    SEARCH_PRESETS,
+    AdaptiveSearchConfig,
+    apply_frozen_template_rules,
+    available_research_engines,
+    run_adaptive_search,
+)
 from .bar_patterns import analyze_market_regimes
 from .broker_preview import broker_order_preview
 from .capital import (
@@ -51,6 +59,7 @@ from .providers.eodhd import EODHDProvider
 from .providers.fmp import FMPProvider
 from .providers.fred import FREDProvider
 from .providers.ig import IGDemoProvider
+from .promotion_readiness import PRICE_VALIDATED_COST_CONFIDENCES
 from .research_critic import ResearchCritic
 from .research_lab import ResearchStack
 from .research_store import ResearchStore
@@ -91,6 +100,330 @@ FMP_DAILY_BAR_SYMBOLS = {
     "FTSE100": "^FTSE",
 }
 PRODUCT_MODES = {"spread_bet", "cfd"}
+TWO_VCPU_MIDCAP_DISCOVERY_LIMIT = 24
+TWO_VCPU_MIDCAP_MARKET_CAP = 3
+TWO_VCPU_MIDCAP_SEARCH_BUDGET = 36
+TWO_VCPU_MIDCAP_REGIME_BUDGET = 6
+TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT = 18
+TWO_VCPU_MIDCAP_PREFLIGHT_LIMIT = 18
+GUIDED_AUTO_FREEZE_TRIAL_LIMIT = 250
+GUIDED_AUTO_FREEZE_MIN_TRADES = 20
+GUIDED_AUTO_FREEZE_MIN_OOS_TRADES = 8
+GUIDED_AUTO_REPAIR_MAX_RUNS = 1
+GUIDED_AUTO_FREEZE_PIPELINE_SCHEMAS = {
+    "midcap_template_pipeline_v1",
+    "index_template_pipeline_v1",
+    "scenario_recipe_pipeline_v1",
+    "guided_auto_repair_pipeline_v1",
+}
+GUIDED_AUTO_FREEZE_REPAIR_MODES = {
+    "standard",
+    "auto_refine",
+    "capital_fit",
+    "cost_stress",
+    "frozen_validation",
+    "longer_history",
+    "month_exclusion",
+    "more_trades",
+    "regime_repair",
+}
+GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS = {
+    "diagnostics_deferred_fast_scan",
+    "ig_minimum_margin_too_large_for_account",
+    "ig_minimum_risk_too_large_for_account",
+    "day_trade_forbidden_overnight_family",
+    "day_trade_held_overnight",
+    "day_trade_missing_flat_policy",
+    "day_trade_requires_intraday_bars",
+}
+GUIDED_AUTO_FREEZE_STRICT_WARNINGS = {
+    "best_trades_dominate",
+    "costs_overwhelm_edge",
+    "fails_higher_slippage",
+    "headline_sharpe_not_regime_robust",
+    "low_oos_trades",
+    "multiple_testing_haircut",
+    "needs_ig_price_validation",
+    "negative_after_costs",
+    "one_fold_dependency",
+    "profit_concentrated_single_month",
+    "profit_concentrated_single_regime",
+    "profits_not_consistent_across_folds",
+    "regime_gated_backtest_negative",
+    "regime_gated_oos_negative",
+    "target_regime_low_oos_trades",
+    "too_few_trades",
+    "weak_net_cost_efficiency",
+    "weak_oos_evidence",
+}
+GUIDED_AUTO_REPAIR_TERMINAL_WARNINGS = GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS - {"diagnostics_deferred_fast_scan"}
+MANUAL_TRADER_PLAYBOOKS: dict[str, dict[str, object]] = {
+    "opening_range_breakout": {
+        "id": "opening_range_breakout",
+        "label": "Opening range breakout",
+        "description": "Trade only when the frozen signal also breaks the first 30-minute range with VWAP and volume behind it.",
+        "families": ["breakout", "volatility_expansion"],
+        "min_relative_volume": 0.9,
+        "max_spread_bps": 65.0,
+        "min_opening_break_bps": 2.0,
+        "min_trend_bps": 0.0,
+        "require_vwap_alignment": True,
+    },
+    "vwap_trend_pullback": {
+        "id": "vwap_trend_pullback",
+        "label": "VWAP trend pullback",
+        "description": "Trade with the session trend when price has reclaimed or held VWAP and today has enough participation.",
+        "families": ["intraday_trend", "mean_reversion"],
+        "min_relative_volume": 0.75,
+        "max_spread_bps": 65.0,
+        "min_trend_bps": 8.0,
+        "max_vwap_distance_against_bps": 12.0,
+        "require_vwap_alignment": True,
+    },
+    "failed_breakout_reversal": {
+        "id": "failed_breakout_reversal",
+        "label": "Failed breakout reversal",
+        "description": "Trade a frozen reversal only after the session has rejected one side of the opening range and moved back through VWAP.",
+        "families": ["liquidity_sweep_reversal"],
+        "min_relative_volume": 0.8,
+        "max_spread_bps": 70.0,
+        "min_sweep_bps": 1.0,
+        "require_vwap_alignment": True,
+    },
+    "high_relative_volume_trend": {
+        "id": "high_relative_volume_trend",
+        "label": "High relative-volume trend",
+        "description": "Allow the frozen signal only when current volume is meaningfully ahead of normal and price is moving with VWAP.",
+        "families": ["volatility_expansion", "scalping"],
+        "min_relative_volume": 1.1,
+        "max_spread_bps": 60.0,
+        "min_trend_bps": 10.0,
+        "require_vwap_alignment": True,
+    },
+    "frozen_signal_confirmation": {
+        "id": "frozen_signal_confirmation",
+        "label": "Frozen signal confirmation",
+        "description": "Fallback manual gate for frozen templates: fresh same-day bars, acceptable spread, some volume, and no obvious tape conflict.",
+        "families": [],
+        "min_relative_volume": 0.5,
+        "max_spread_bps": 75.0,
+        "max_vwap_distance_against_bps": 25.0,
+        "require_vwap_alignment": False,
+    },
+}
+SCENARIO_MARKET_IDS = ("NAS100", "XAUUSD")
+SCENARIO_RECIPES: dict[str, dict[str, object]] = {
+    "nas100_vwap_pullback": {
+        "id": "nas100_vwap_pullback",
+        "label": "NAS100 VWAP Pullback",
+        "market_id": "NAS100",
+        "role": "primary",
+        "session": "US open",
+        "timeframe": "5min",
+        "families": ["intraday_trend", "mean_reversion"],
+        "manual_playbook": "vwap_trend_pullback",
+        "setup": "VWAP hold/reclaim, pullback, continuation",
+        "session_window": {"start_hour": 13, "end_hour": 21},
+        "max_spread_bps": 2.5,
+        "min_relative_volume": 0.75,
+        "min_trend_bps": 8.0,
+        "allowed_scenarios": ["vwap_acceptance", "vwap_pullback"],
+        "cost_stress_multiplier": 2.5,
+        "search_budget": 54,
+        "regime_scan_budget_per_regime": 6,
+    },
+    "xauusd_vwap_rejection": {
+        "id": "xauusd_vwap_rejection",
+        "label": "XAUUSD VWAP Rejection",
+        "market_id": "XAUUSD",
+        "role": "secondary",
+        "session": "London/NY overlap and US open",
+        "timeframe": "5min",
+        "families": ["liquidity_sweep_reversal", "mean_reversion", "volatility_expansion"],
+        "manual_playbook": "failed_breakout_reversal",
+        "setup": "Opening range sweep, VWAP reclaim/loss, rejection confirmation",
+        "session_window": {"start_hour": 7, "end_hour": 21},
+        "max_spread_bps": 14.0,
+        "min_relative_volume": 0.8,
+        "min_sweep_bps": 1.0,
+        "allowed_scenarios": ["opening_range_sweep", "vwap_rejection"],
+        "cost_stress_multiplier": 3.0,
+        "search_budget": 54,
+        "regime_scan_budget_per_regime": 6,
+    },
+}
+MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
+    "liquid_uk_midcap_trend_pullback": {
+        "id": "liquid_uk_midcap_trend_pullback",
+        "label": "Liquid UK midcap trend pullback",
+        "market_type": "share",
+        "country": "UK",
+        "behaviour": "Liquid mid-cap shares in a trend-up or orderly pullback regime.",
+        "template_goal": "Find reusable intraday/no-overnight pullback rules that can later be repaired, saved, and Freeze validated.",
+        "strategy_families": ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 2.5,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Make Tradeable / Repair Remaining must clear IG, cost, stop, margin, OOS, fold, and regime blockers.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+    "liquid_uk_midcap_breakout": {
+        "id": "liquid_uk_midcap_breakout",
+        "label": "Liquid UK midcap breakout",
+        "market_type": "share",
+        "country": "UK",
+        "behaviour": "Liquid mid-cap shares with volatility expansion, range breaks, or opening continuation.",
+        "template_goal": "Find intraday breakout templates that still survive realistic spread, slippage, and small-account margin checks.",
+        "strategy_families": ["breakout", "volatility_expansion", "intraday_trend"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 2.75,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Breakout candidates must prove net OOS profit after spread/slippage and avoid one-session dependence.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+    "liquid_us_midcap_trend_pullback": {
+        "id": "liquid_us_midcap_trend_pullback",
+        "label": "Liquid US midcap trend pullback",
+        "market_type": "share",
+        "country": "US",
+        "behaviour": "Liquid US mid-cap shares in a trend-up or orderly pullback regime.",
+        "template_goal": "Find reusable intraday/no-overnight US pullback rules with FX, spread, margin, and IG catalogue gates explicit.",
+        "strategy_families": ["intraday_trend", "mean_reversion", "liquidity_sweep_reversal"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 3.0,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Make Tradeable / Repair Remaining must clear IG, cost, stop, margin, OOS, fold, FX, and regime blockers.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+    "liquid_us_midcap_breakout": {
+        "id": "liquid_us_midcap_breakout",
+        "label": "Liquid US midcap breakout",
+        "market_type": "share",
+        "country": "US",
+        "behaviour": "Liquid US mid-cap shares with volatility expansion, range breaks, or opening continuation.",
+        "template_goal": "Find intraday US breakout templates that survive realistic spread, slippage, FX, and small-account margin checks.",
+        "strategy_families": ["breakout", "volatility_expansion", "intraday_trend"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 3.25,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "Breakout candidates must prove net OOS profit after spread/slippage/FX and avoid one-session dependence.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+    "liquid_us_midcap_intraday": {
+        "id": "liquid_us_midcap_intraday",
+        "label": "Liquid US midcap multi-setup",
+        "market_type": "share",
+        "country": "US",
+        "behaviour": "Liquid US mid-cap shares with intraday continuation, pullback, or reversal setups.",
+        "template_goal": "Create no-overnight US share templates while keeping account-size, FX, and IG catalogue gates explicit.",
+        "strategy_families": ["intraday_trend", "breakout", "mean_reversion", "liquidity_sweep_reversal"],
+        "market_filters": {
+            "min_market_cap": DEFAULT_MIN_MARKET_CAP,
+            "max_market_cap": DEFAULT_MAX_MARKET_CAP,
+            "min_volume": DEFAULT_MIN_VOLUME,
+            "max_spread_bps": DEFAULT_MAX_SPREAD_BPS,
+        },
+        "run_defaults": {
+            "interval": "5min",
+            "search_preset": "balanced",
+            "search_budget": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+            "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
+            "objective": "profit_first",
+            "risk_profile": "conservative",
+            "cost_stress_multiplier": 3.0,
+        },
+        "session_rules": {
+            "holding_period": "intraday",
+            "force_flat_before_close": True,
+            "no_overnight": True,
+        },
+        "promotion_contract": [
+            "Discovery run can create leads, not live rules.",
+            "US share candidates must keep FX, spread, and minimum-margin pressure visible for the GBP account.",
+            "Freeze Validate must retest exact parameters before the template can enter daily paper scanning.",
+        ],
+    },
+}
 
 
 class EODHDSettings(BaseModel):
@@ -149,11 +482,21 @@ class ResearchRunPayload(BaseModel):
     cost_stress_multiplier: float = 2.0
     include_regime_scans: bool = True
     regime_scan_budget_per_regime: int | None = Field(default=None, ge=1, le=96)
+    diagnostic_limit: int | None = Field(default=None, ge=1, le=500)
+    include_market_context: bool = True
     target_regime: str | None = None
     excluded_months: list[str] = Field(default_factory=list)
     repair_mode: str = "standard"
     account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
     source_template: dict[str, object] = Field(default_factory=dict)
+    pipeline: dict[str, object] = Field(default_factory=dict)
+    day_trading_mode: bool = False
+    force_flat_before_close: bool = False
+    day_session_start_hour: int | None = Field(default=None, ge=0, le=23)
+    day_session_end_hour: int | None = Field(default=None, ge=0, le=24)
+    flat_cutoff_hour: int = Field(default=22, ge=1, le=23)
+    paper_queue_limit: int = Field(default=3, ge=1, le=5)
+    review_queue_limit: int = Field(default=10, ge=1, le=20)
 
 
 class ResearchSchedulePayload(BaseModel):
@@ -190,6 +533,7 @@ class StrategyTemplateStatusPayload(BaseModel):
 class IGCostSyncPayload(BaseModel):
     market_ids: list[str] = Field(default_factory=list)
     product_mode: str = "default"
+    skip_account_status: bool = False
 
 
 class BrokerOrderPreviewPayload(BaseModel):
@@ -200,6 +544,62 @@ class BrokerOrderPreviewPayload(BaseModel):
     entry_price: float | None = Field(default=None, gt=0)
     stop: float | None = Field(default=None, gt=0)
     limit: float | None = Field(default=None, gt=0)
+
+
+class DailyTemplateScannerPayload(BaseModel):
+    trading_date: str | None = None
+    market_ids: list[str] = Field(default_factory=list)
+    product_mode: str = "spread_bet"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    paper_limit: int = Field(default=3, ge=1, le=5)
+    review_limit: int = Field(default=10, ge=1, le=20)
+    lookback_days: int = Field(default=10, ge=1, le=30)
+    max_markets: int = Field(default=24, ge=1, le=120)
+
+
+class DailyTemplateAfterClosePayload(BaseModel):
+    results: dict[str, object] = Field(default_factory=dict)
+    status: str = "reviewed"
+
+
+class ScenarioRecipeBuildPayload(BaseModel):
+    product_mode: str = "spread_bet"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    start: str = "2025-01-01"
+    end: str = Field(default_factory=lambda: date.today().isoformat())
+    auto_sync_costs: bool = True
+
+
+class ScenarioScannerPayload(BaseModel):
+    trading_date: str | None = None
+    product_mode: str = "spread_bet"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    paper_limit: int = Field(default=1, ge=1, le=3)
+    review_limit: int = Field(default=5, ge=1, le=10)
+    lookback_days: int = Field(default=10, ge=1, le=30)
+
+
+class ScenarioResetPayload(BaseModel):
+    confirm: str = ""
+
+
+class MidcapTemplatePipelinePayload(BaseModel):
+    design_id: str = "liquid_uk_midcap_trend_pullback"
+    country: str = "UK"
+    product_mode: str = "spread_bet"
+    broker_validation_mode: str = "research_first"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    limit: int = Field(default=TWO_VCPU_MIDCAP_DISCOVERY_LIMIT, ge=1, le=120)
+    max_markets: int = Field(default=TWO_VCPU_MIDCAP_MARKET_CAP, ge=1, le=20)
+    min_market_cap: float = Field(default=DEFAULT_MIN_MARKET_CAP, ge=0)
+    max_market_cap: float = Field(default=DEFAULT_MAX_MARKET_CAP, ge=0)
+    min_volume: float = Field(default=DEFAULT_MIN_VOLUME, ge=0)
+    max_spread_bps: float = Field(default=DEFAULT_MAX_SPREAD_BPS, ge=1)
+    start: str = "2025-01-01"
+    end: str = Field(default_factory=lambda: date.today().isoformat())
+    auto_install: bool = True
+    auto_sync_costs: bool = True
+    auto_start_run: bool = True
 
 
 @app.get("/health")
@@ -514,6 +914,211 @@ def paper_summary() -> dict[str, object]:
     }
 
 
+@app.get("/day-trading/factory/summary")
+def day_trading_factory_summary(
+    account_size: float = Query(default=WORKING_ACCOUNT_SIZE_GBP, gt=0),
+    paper_limit: int = Query(default=3, ge=1, le=5),
+    review_limit: int = Query(default=10, ge=1, le=20),
+) -> dict[str, object]:
+    templates = research_store.list_templates(limit=250)
+    candidates = [_candidate_with_capital(candidate) for candidate in research_store.list_candidates(limit=250)]
+    day_templates = [template for template in templates if _is_day_trading_template(template)]
+    frozen_day_templates = [template for template in day_templates if _is_frozen_template(template)]
+    overnight_templates = [template for template in templates if _is_overnight_template(template)]
+    daily_templates = [_day_trading_template_payload(template, account_size) for template in frozen_day_templates]
+    daily_templates = [template for template in daily_templates if template is not None]
+    unsuitable = [template for template in daily_templates if template["unsuitable"]]
+    eligible = [template for template in daily_templates if not template["unsuitable"] and template["eligible_for_review"]]
+    paper_ready = [template for template in eligible if template["paper_ready"]]
+    review_signals = sorted(eligible, key=_day_trading_signal_rank, reverse=True)[:review_limit]
+    paper_queue = sorted(paper_ready, key=_day_trading_signal_rank, reverse=True)[:paper_limit]
+    discovery_leads = [_day_trading_signal_payload(candidate, account_size) for candidate in candidates if _is_day_trading_source(candidate)]
+    discovery_leads = [candidate for candidate in discovery_leads if candidate is not None]
+    non_frozen_day_templates = [template for template in day_templates if not _is_frozen_template(template)]
+    latest_scan = research_store.latest_day_trading_scan() if hasattr(research_store, "latest_day_trading_scan") else None
+    latest_daily_queue = latest_scan.get("daily_paper_queue", []) if isinstance(latest_scan, dict) else []
+    latest_review_signals = latest_scan.get("review_signals", []) if isinstance(latest_scan, dict) else []
+    latest_unsuitable = latest_scan.get("unsuitable", []) if isinstance(latest_scan, dict) else []
+    latest_config = latest_scan.get("config", {}) if isinstance(latest_scan, dict) and isinstance(latest_scan.get("config"), dict) else {}
+    latest_no_setup = latest_config.get("no_setup_sample", []) if isinstance(latest_config.get("no_setup_sample"), list) else []
+    return {
+        "schema": "day_trading_template_factory_v2",
+        "mode": "manual",
+        "phase": "daily_template_matcher",
+        "account_size": account_size,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_template_library_only",
+        "policy": _day_trading_policy(paper_limit, review_limit, account_size),
+        "counts": {
+            "day_trading_candidates": len(discovery_leads),
+            "discovery_leads_needing_freeze": len(discovery_leads),
+            "day_trading_templates": len(day_templates),
+            "frozen_day_templates": len(frozen_day_templates),
+            "non_frozen_day_templates": len(non_frozen_day_templates),
+            "template_ready_for_scan": len(paper_queue),
+            "eligible_review_signals": len(latest_review_signals),
+            "daily_paper_queue": len(latest_daily_queue),
+            "unsuitable": len(latest_unsuitable) if latest_scan else len(unsuitable),
+            "no_setup": len(latest_no_setup),
+            "today_filter_blockers": len(latest_config.get("today_filter_blocker_counts", {})) if isinstance(latest_config.get("today_filter_blocker_counts"), dict) else 0,
+            "overnight_or_swing_templates": len(overnight_templates),
+        },
+        "daily_paper_queue": latest_daily_queue,
+        "review_signals": latest_review_signals,
+        "unsuitable": (latest_unsuitable if latest_scan else unsuitable)[:review_limit],
+        "no_setup_sample": latest_no_setup[:review_limit],
+        "template_ready_without_scan": paper_queue,
+        "latest_scan": latest_scan,
+        "template_library": {
+            "day_trading_templates": [_template_queue_payload(template) for template in day_templates[:review_limit]],
+            "needs_freeze_validation": [_template_queue_payload(template) for template in non_frozen_day_templates[:review_limit]],
+            "overnight_or_swing_templates": [_template_queue_payload(template) for template in overnight_templates[:review_limit]],
+        },
+        "manual_playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
+        "discovery_leads_not_live": sorted(discovery_leads, key=_day_trading_signal_rank, reverse=True)[:review_limit],
+        "next_actions": [
+            "Use Discovery mode to find or repair ideas, then save and Freeze validate them.",
+            "Keep only active frozen intraday/no-overnight templates in the daily queue.",
+            "At market open, match frozen templates to today's tape: relative volume, VWAP, opening range, spread, and broker-safe capital fit.",
+            "After close, review expected versus actual; do not change live/paper rules without another validation cycle.",
+        ],
+    }
+
+
+@app.post("/day-trading/scanner/start")
+async def start_daily_template_scanner(payload: DailyTemplateScannerPayload) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before starting the daily template scanner")
+    return await _run_daily_template_scanner(payload, api_token)
+
+
+@app.get("/day-trading/scanner/latest")
+def latest_daily_template_scan() -> dict[str, object]:
+    latest = research_store.latest_day_trading_scan()
+    if latest is None:
+        return {"status": "not_started", "latest_scan": None}
+    return {"status": latest.get("status", "unknown"), "latest_scan": latest}
+
+
+@app.post("/day-trading/scanner/{scan_id}/after-close")
+def record_daily_template_after_close(scan_id: int, payload: DailyTemplateAfterClosePayload) -> dict[str, object]:
+    if payload.status not in {"reviewed", "closed", "error"}:
+        raise HTTPException(status_code=400, detail="After-close status must be reviewed, closed, or error")
+    scan = research_store.update_day_trading_scan_results(scan_id, payload.results, payload.status)
+    if scan is None:
+        raise HTTPException(status_code=404, detail="Daily template scan not found")
+    return scan
+
+
+@app.get("/day-trading/template-designs")
+def day_trading_template_designs() -> dict[str, object]:
+    return {
+        "schema": "day_trading_template_designs_v1",
+        "designs": [_template_design_payload(design) for design in MIDCAP_TEMPLATE_DESIGNS.values()],
+        "manual_playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
+        "policy": {
+            "daily_mode_source": "active_frozen_template_library_only",
+            "strategy_generation_allowed_in_daily_mode": False,
+            "design_mode": "research_discovery_only",
+            "live_ordering_enabled": False,
+            "order_placement": "disabled",
+        },
+    }
+
+
+@app.get("/day-trading/manual-playbooks")
+def day_trading_manual_playbooks() -> dict[str, object]:
+    return {
+        "schema": "manual_trader_playbooks_v1",
+        "daily_mode_source": "active_frozen_template_library_only",
+        "strategy_generation_allowed": False,
+        "playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
+        "today_filters": [
+            "same-day 5-minute bars",
+            "relative volume versus recent sessions",
+            "opening range break or rejection",
+            "VWAP alignment",
+            "session trend",
+            "current spread/slippage and broker-safe preview",
+            "IG minimum stake, stop, margin, and £3k capital fit",
+        ],
+    }
+
+
+@app.post("/day-trading/midcap-template-pipeline/start")
+async def start_midcap_template_pipeline(
+    payload: MidcapTemplatePipelinePayload,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if payload.auto_start_run and api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before starting a midcap template-design run")
+    return await _run_midcap_template_pipeline(payload, background_tasks, api_token or "")
+
+
+@app.get("/scenario/summary")
+def scenario_summary(
+    account_size: float = Query(default=WORKING_ACCOUNT_SIZE_GBP, gt=0),
+) -> dict[str, object]:
+    return _scenario_summary(account_size)
+
+
+@app.post("/scenario/recipes/{recipe_id}/build")
+async def start_scenario_recipe_build(
+    recipe_id: str,
+    payload: ScenarioRecipeBuildPayload,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before building a scenario recipe")
+    return await _start_scenario_recipe_build(recipe_id, payload, background_tasks, api_token)
+
+
+@app.post("/scenario/scanner/start")
+async def start_scenario_scanner(payload: ScenarioScannerPayload) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before starting the scenario scanner")
+    return await _run_scenario_scanner(payload, api_token)
+
+
+@app.get("/scenario/scanner/latest")
+def latest_scenario_scan() -> dict[str, object]:
+    latest = research_store.latest_day_trading_scan()
+    if latest is None:
+        return {"status": "not_started", "latest_scan": None}
+    config = latest.get("config") if isinstance(latest.get("config"), dict) else {}
+    if config.get("schema") != "scenario_daily_scan_v1":
+        return {"status": "not_started", "latest_scan": None}
+    return {"status": latest.get("status", "unknown"), "latest_scan": latest}
+
+
+@app.post("/scenario/scanner/{scan_id}/after-close")
+def record_scenario_after_close(scan_id: int, payload: DailyTemplateAfterClosePayload) -> dict[str, object]:
+    return record_daily_template_after_close(scan_id, payload)
+
+
+@app.post("/scenario/reset")
+async def reset_scenario_research(payload: ScenarioResetPayload) -> dict[str, object]:
+    if payload.confirm != "RESET_SCENARIO_APP":
+        raise HTTPException(status_code=400, detail="Type RESET_SCENARIO_APP to back up and clear research data")
+    reset_result = research_store.backup_and_reset_research()
+    cost_sync = await sync_ig_market_costs(
+        IGCostSyncPayload(market_ids=list(SCENARIO_MARKET_IDS), product_mode="spread_bet", skip_account_status=True)
+    )
+    return {
+        "schema": "scenario_research_reset_v1",
+        **reset_result,
+        "cost_sync": cost_sync,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
+
+
 @app.get("/broker/summary")
 def broker_summary() -> dict[str, object]:
     return {
@@ -711,14 +1316,45 @@ async def discover_midcap_markets(
         max_spread_bps=max_spread_bps,
         account_size=account_size,
     )
-    source = "fmp_company_screener"
+    source = "eodhd_stock_screener"
     rows: list[dict[str, object]] = []
+    source_errors: list[dict[str, str]] = []
+    eodhd_error = ""
     fmp_error = ""
-    fmp_api_key = settings.get_secret("fmp", "api_key")
     exchange_hint, country_hint = country_exchange_hint(country)
-    if fmp_api_key:
+    exchanges = ["NASDAQ", "NYSE", "AMEX"] if country_hint == "US" else [exchange_hint]
+    eodhd_api_token = settings.get_secret("eodhd", "api_token")
+    if eodhd_api_token:
+        provider = EODHDProvider(eodhd_api_token)
+        per_exchange_row_target = max(limit, 40)
+        for exchange in [item for item in exchanges if item]:
+            try:
+                exchange_row_count = 0
+                for offset in range(0, 1000, 100):
+                    page = await provider.stock_screener(
+                        exchange=exchange,
+                        market_cap_more_than=min_market_cap,
+                        market_cap_lower_than=max_market_cap,
+                        min_volume=min_volume,
+                        limit=100,
+                        offset=offset,
+                    )
+                    filtered_rows = _eodhd_midcap_rows(page, criteria, country_hint)
+                    rows.extend(filtered_rows)
+                    exchange_row_count += len(filtered_rows)
+                    if exchange_row_count >= per_exchange_row_target or len(page) < 100:
+                        break
+            except Exception as exc:
+                eodhd_error = _public_error(exc)
+                source_errors.append({"provider": "eodhd", "operation": "stock_screener", "detail": eodhd_error})
+                if rows:
+                    break
+            if country_hint != "US" and len(rows) >= limit:
+                break
+    fmp_api_key = settings.get_secret("fmp", "api_key")
+    if not rows and fmp_api_key:
+        source = "fmp_company_screener"
         provider = FMPProvider(fmp_api_key)
-        exchanges = ["NASDAQ", "NYSE", "AMEX"] if country_hint == "US" else [exchange_hint]
         for exchange in exchanges:
             try:
                 rows.extend(
@@ -733,17 +1369,19 @@ async def discover_midcap_markets(
                 )
             except Exception as exc:
                 fmp_error = _public_error(exc)
+                source_errors.append({"provider": "fmp", "operation": "company_screener", "detail": fmp_error})
                 if rows:
                     break
     if not rows:
         rows = fallback_midcap_rows(country)
-        source = "built_in_uk_midcap_starter" if not fmp_error else "built_in_fallback_after_fmp_error"
+        source = "built_in_uk_midcap_starter" if not source_errors else "built_in_fallback_after_provider_error"
         if fmp_api_key and rows:
             try:
                 rows = await _enrich_midcap_fallback_rows_with_fmp_quotes(FMPProvider(fmp_api_key), rows)
                 source = "built_in_midcap_starter_with_fmp_quotes"
             except Exception as exc:
                 fmp_error = f"{fmp_error}; FMP batch quote fallback failed: {_public_error(exc)}" if fmp_error else _public_error(exc)
+                source_errors.append({"provider": "fmp", "operation": "batch_quote_fallback", "detail": _public_error(exc)})
     candidates = build_midcap_candidates(rows, criteria, source)[:limit]
     ig_status = "not_checked"
     if require_ig_catalogue and not verify_ig:
@@ -765,20 +1403,28 @@ async def discover_midcap_markets(
         else:
             candidates = await _verify_midcap_candidates_with_ig(provider, candidates)
             ig_status = "checked"
+    candidate_payloads = [candidate.as_dict() for candidate in candidates]
     return {
         "schema": "midcap_discovery_v1",
         "country": country,
         "product_mode": criteria.product_mode,
         "account_size": criteria.account_size,
         "data_source": source,
+        "eodhd_error": eodhd_error,
         "fmp_error": fmp_error,
+        "source_errors": source_errors,
         "ig_status": ig_status,
         "ig_catalogue_required": require_ig_catalogue,
         "criteria": criteria.as_dict(),
+        "candidate_count": len(candidates),
         "eligible_count": sum(1 for candidate in candidates if candidate.eligible),
-        "candidates": [candidate.as_dict() for candidate in candidates],
+        "blocked_count": sum(1 for candidate in candidates if not candidate.eligible),
+        "blocker_counts": _candidate_issue_counts(candidate_payloads, "blockers"),
+        "warning_counts": _candidate_issue_counts(candidate_payloads, "warnings"),
+        "candidates": candidate_payloads,
         "screening_pipeline": [
-            "FMP company-screener when your plan allows it.",
+            "EODHD stock screener for market cap, volume, and exchange filters.",
+            "FMP company-screener only as a secondary fallback.",
             "FMP batch-quote enrichment for the starter universe when the screener is unavailable.",
             "IG /markets search catalogue match as the hard eligibility gate.",
             "Installed markets still need IG cost sync and normal paper-readiness checks before promotion.",
@@ -867,16 +1513,38 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
     product_mode = None if payload.product_mode == "default" else _normalize_product_mode(payload.product_mode)
     provider = _ig_provider_from_settings(product_mode)
     account_currency = "GBP"
-    if provider is not None:
+    provider_warning = ""
+    account_status_rate_limited = False
+    price_validation_rate_limited = False
+    if provider is not None and not payload.skip_account_status:
         try:
             account_currency = (await provider.account_status()).currency or "GBP"
-        except Exception:
-            provider = None
+        except Exception as exc:
+            status_error = _public_error(exc)
+            account_status_rate_limited = _looks_like_ig_rate_limit(status_error)
+            provider_warning = f"IG account status check failed, using GBP account currency fallback before EPIC price validation: {status_error}"
     profiles: list[dict[str, object]] = []
     for market in selected:
+        stored_profile = _cost_profile_payload_for_market(market)
+        if _is_price_validated_cost_profile(stored_profile):
+            profiles.append(_cost_profile_reuse_payload(stored_profile, provider_warning))
+            continue
         profile = public_ig_cost_profile(market, account_currency)
         resolved_market = market
         resolution_note = ""
+        should_save_profile = True
+        if price_validation_rate_limited:
+            profile = _cost_profile_with_notes(
+                profile,
+                ["Skipped IG price validation because IG already rate-limited an earlier market in this sync. Retry after the IG API allowance cools down."],
+            )
+            should_save_profile = stored_profile is None
+            if provider_warning:
+                profile = _cost_profile_with_notes(profile, [provider_warning])
+            if should_save_profile:
+                research_store.save_cost_profile(profile)
+            profiles.append(profile.as_dict())
+            continue
         if provider is not None and not resolved_market.ig_epic:
             resolved = await _resolve_ig_market(provider, resolved_market)
             if resolved is not None:
@@ -887,20 +1555,103 @@ async def sync_ig_market_costs(payload: IGCostSyncPayload) -> dict[str, object]:
                 market_details = await provider.market_details(resolved_market.ig_epic)
                 profile = profile_from_ig_market(resolved_market, market_details, account_currency)
                 if profile.confidence == "ig_live_epic_rules_no_spread":
-                    recent_price = await _recent_ig_price_snapshot(provider, resolved_market)
+                    price_errors: list[str] = []
+                    recent_price = await _recent_ig_price_snapshot(provider, resolved_market, price_errors)
                     if recent_price is not None:
                         profile = profile_from_ig_market(resolved_market, market_details, account_currency, recent_price=recent_price)
+                    elif any(_looks_like_ig_rate_limit(error) for error in price_errors):
+                        price_validation_rate_limited = True
+                        profile = _cost_profile_with_notes(
+                            profile,
+                            ["IG /prices history validation was rate-limited, so this EPIC still needs price validation before research."],
+                        )
                 if resolution_note:
-                    payload = profile.as_dict()
-                    payload["notes"] = list(payload.get("notes", [])) + [resolution_note]
-                    profile = IGCostProfile(**{key: value for key, value in payload.items() if key in IGCostProfile.__dataclass_fields__})
+                    profile = _cost_profile_with_notes(profile, [resolution_note])
             except Exception as exc:
-                fallback = profile.as_dict()
-                fallback["notes"] = list(fallback.get("notes", [])) + [f"IG sync failed: {_public_error(exc)}"]
-                profile = IGCostProfile(**{key: value for key, value in fallback.items() if key in IGCostProfile.__dataclass_fields__})
-        research_store.save_cost_profile(profile)
+                sync_error = _public_error(exc)
+                price_errors: list[str] = []
+                recent_price = await _recent_ig_price_snapshot(provider, resolved_market, price_errors)
+                if recent_price is not None:
+                    profile = profile_from_ig_market(
+                        resolved_market,
+                        {
+                            "instrument": {
+                                "epic": resolved_market.ig_epic,
+                                "name": resolved_market.ig_name or resolved_market.name,
+                                "type": resolved_market.asset_class,
+                            },
+                            "snapshot": {},
+                            "dealingRules": {},
+                        },
+                        account_currency,
+                        recent_price=recent_price,
+                    )
+                    profile = _cost_profile_with_notes(
+                        profile,
+                        [f"IG market detail sync failed ({sync_error}), but recent IG /prices history validated the EPIC reference price."],
+                    )
+                else:
+                    profile = _cost_profile_with_notes(profile, [f"IG sync failed: {sync_error}"])
+                    if _looks_like_ig_rate_limit(sync_error) or any(_looks_like_ig_rate_limit(error) for error in price_errors):
+                        price_validation_rate_limited = True
+                        profile = _cost_profile_with_notes(
+                            profile,
+                            ["IG price validation was rate-limited; retry after the IG API allowance cools down."],
+                        )
+        if provider_warning:
+            profile = _cost_profile_with_notes(profile, [provider_warning])
+        if should_save_profile:
+            research_store.save_cost_profile(profile)
         profiles.append(profile.as_dict())
-    return {"status": "synced", "profile_count": len(profiles), "profiles": profiles}
+    price_validated_count = sum(1 for profile in profiles if str(profile.get("confidence") or "") in PRICE_VALIDATED_COST_CONFIDENCES)
+    ig_rate_limited = price_validation_rate_limited and price_validated_count == 0
+    status = (
+        "synced"
+        if price_validated_count == len(profiles)
+        else "ig_rate_limited"
+        if ig_rate_limited
+        else "synced_needs_price_validation"
+    )
+    return {
+        "status": status,
+        "profile_count": len(profiles),
+        "price_validated_count": price_validated_count,
+        "ig_rate_limited": ig_rate_limited,
+        "price_validation_rate_limited": price_validation_rate_limited,
+        "account_status_rate_limited": account_status_rate_limited,
+        "profiles": profiles,
+    }
+
+
+def _cost_profile_with_notes(profile: IGCostProfile, notes: list[str]) -> IGCostProfile:
+    payload = profile.as_dict()
+    existing_notes = list(payload.get("notes", []))
+    for note in notes:
+        if note and note not in existing_notes:
+            existing_notes.append(note)
+    payload["notes"] = existing_notes
+    return IGCostProfile(**{key: value for key, value in payload.items() if key in IGCostProfile.__dataclass_fields__})
+
+
+def _is_price_validated_cost_profile(profile: dict[str, object] | None) -> bool:
+    return bool(profile) and str((profile or {}).get("confidence") or "") in PRICE_VALIDATED_COST_CONFIDENCES
+
+
+def _cost_profile_reuse_payload(profile: dict[str, object] | None, provider_warning: str = "") -> dict[str, object]:
+    payload = dict(profile or {})
+    notes = list(payload.get("notes") or [])
+    reuse_note = "Reused an existing IG price-validated cost profile to conserve IG API allowance."
+    if reuse_note not in notes:
+        notes.append(reuse_note)
+    if provider_warning and provider_warning not in notes:
+        notes.append(provider_warning)
+    payload["notes"] = notes
+    return payload
+
+
+def _looks_like_ig_rate_limit(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return "exceeded" in lowered and ("api key" in lowered or "rate" in lowered or "allowance" in lowered or "api-key" in lowered)
 
 
 async def _resolve_ig_market(provider: IGDemoProvider, market: MarketMapping) -> tuple[MarketMapping, str] | None:
@@ -946,14 +1697,23 @@ async def _resolve_ig_market(provider: IGDemoProvider, market: MarketMapping) ->
     return None
 
 
-async def _recent_ig_price_snapshot(provider: IGDemoProvider, market: MarketMapping) -> dict[str, object] | None:
+async def _recent_ig_price_snapshot(
+    provider: IGDemoProvider,
+    market: MarketMapping,
+    errors: list[str] | None = None,
+) -> dict[str, object] | None:
     resolutions = ("MINUTE_5", "MINUTE", "HOUR", "DAY")
     if market.asset_class == "share" or ".DAILY." in market.ig_epic.upper():
         resolutions = ("MINUTE_5", "DAY", "HOUR", "MINUTE")
     for resolution in resolutions:
         try:
             snapshot = await provider.recent_price_snapshot(market.ig_epic, resolution=resolution)
-        except Exception:
+        except Exception as exc:
+            error = _public_error(exc)
+            if errors is not None:
+                errors.append(error)
+            if _looks_like_ig_rate_limit(error):
+                break
             continue
         if snapshot is not None:
             return snapshot
@@ -1066,7 +1826,15 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             market_status["history_expanded"] = True
         market_statuses.append(market_status)
         persist_status()
-        market_status["market_context"] = await _market_context_summary_for_range(start, payload.end, market_id=market.market_id, limit=8)
+        if payload.include_market_context:
+            market_status["market_context"] = await _market_context_summary_for_range(start, payload.end, market_id=market.market_id, limit=8)
+        else:
+            market_status["market_context"] = _market_context_unavailable(
+                "Skipped by the fast 2 vCPU guided scan profile.",
+                start,
+                payload.end,
+                market_id=market.market_id,
+            )
         persist_status()
         if not market.enabled:
             _mark_market_failed(market_status, market_failures, market, f"Market {market.market_id} is disabled")
@@ -1084,7 +1852,8 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             persist_status()
             continue
         required_bars = _minimum_bars_for_interval(market, interval)
-        if _should_try_daily_fallback(market, interval, len(bars), required_bars):
+        allow_daily_fallback = not payload.day_trading_mode
+        if allow_daily_fallback and _should_try_daily_fallback(market, interval, len(bars), required_bars):
             fallback_interval = "1day"
             fallback_start = _run_start_for_market(payload, market, fallback_interval)
             try:
@@ -1113,7 +1882,7 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                     start = fallback_start
                     bars = fallback_bars
                     required_bars = fallback_required
-        if _should_try_fmp_daily_fallback(market, interval, len(bars), required_bars):
+        if allow_daily_fallback and _should_try_fmp_daily_fallback(market, interval, len(bars), required_bars):
             fallback_symbol = _fmp_daily_symbol_for_market(market)
             fallback_interval = "1day"
             fallback_start = _run_start_for_market(payload, market, fallback_interval)
@@ -1161,11 +1930,14 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
             )
             persist_status()
         if len(bars) < required_bars:
+            reason = f"{market.market_id} skipped: need at least {required_bars} {interval} bars; received {len(bars)}"
+            if payload.day_trading_mode and interval in INTRADAY_INTERVALS:
+                reason += "; daily fallback is disabled for no-overnight intraday scenario recipes"
             _mark_market_failed(
                 market_status,
                 market_failures,
                 market,
-                f"{market.market_id} skipped: need at least {required_bars} {interval} bars; received {len(bars)}",
+                reason,
                 bar_count=len(bars),
             )
             persist_status()
@@ -1200,11 +1972,19 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
                         cost_stress_multiplier=max(1.0, payload.cost_stress_multiplier),
                         include_regime_scans=payload.include_regime_scans,
                         regime_scan_budget_per_regime=payload.regime_scan_budget_per_regime,
+                        diagnostic_limit=payload.diagnostic_limit,
                         target_regime=payload.target_regime,
                         repair_mode=payload.repair_mode,
                         account_size=payload.account_size,
                         source_template=payload.source_template,
                         market_context=market_status.get("market_context") if isinstance(market_status.get("market_context"), dict) else {},
+                        day_trading_mode=payload.day_trading_mode,
+                        force_flat_before_close=payload.force_flat_before_close or payload.day_trading_mode,
+                        day_session_start_hour=payload.day_session_start_hour,
+                        day_session_end_hour=payload.day_session_end_hour,
+                        flat_cutoff_hour=payload.flat_cutoff_hour,
+                        paper_queue_limit=payload.paper_queue_limit,
+                        review_queue_limit=payload.review_queue_limit,
                     ),
                 )
                 market_evaluations = list(result.evaluations)
@@ -1236,11 +2016,43 @@ async def _execute_research_run(run_id: int, payload: ResearchRunPayload, api_to
     if saved_trials == 0:
         error = _market_failure_summary(market_failures) or "No valid trials were produced for the selected markets"
         research_store.update_run_status(run_id, "error", error)
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "skipped",
+                "reason": "no_trials",
+                "detail": "The guided design run produced no trials to freeze.",
+            },
+        )
         return
-    if market_failures:
-        research_store.update_run_status(run_id, "finished_with_warnings", _market_failure_summary(market_failures))
-        return
-    research_store.update_run_status(run_id, "finished")
+    final_status = "finished_with_warnings" if market_failures else "finished"
+    final_error = _market_failure_summary(market_failures) if market_failures else ""
+    if _is_guided_auto_promotion_payload(payload):
+        research_store.update_run_status(run_id, "running", final_error)
+        try:
+            await _maybe_auto_freeze_guided_pipeline(run_id, payload, api_token, selected_markets, market_statuses, market_failures)
+        except Exception as exc:
+            _record_guided_auto_freeze_status(
+                run_id,
+                payload,
+                selected_markets,
+                market_statuses,
+                market_failures,
+                {
+                    "status": "error",
+                    "detail": "The design run finished, but automatic repair/freeze validation could not be started.",
+                    "error": _public_error(exc),
+                },
+            )
+        current_run = research_store.get_run(run_id) or {}
+        if current_run.get("status") == "running":
+            research_store.update_run_status(run_id, final_status, final_error)
+    else:
+        research_store.update_run_status(run_id, final_status, final_error)
 
 
 @app.get("/research/runs")
@@ -1253,6 +2065,7 @@ def get_research_run(run_id: int) -> dict[str, object]:
     run = research_store.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Research run not found")
+    run = _compact_research_run(run)
     return {
         **run,
         "trials": [_trial_with_capital(trial) for trial in research_store.list_trials(run_id, limit=25)],
@@ -1261,6 +2074,31 @@ def get_research_run(run_id: int) -> dict[str, object]:
         "regime_picks": research_store.list_regime_picks(run_id),
         "bar_snapshots": research_store.list_bar_snapshots(run_id, include_payload=False),
     }
+
+
+def _compact_research_run(run: dict[str, object]) -> dict[str, object]:
+    compacted = dict(run)
+    config = compacted.get("config")
+    if isinstance(config, dict):
+        compacted["config"] = _compact_research_config(config)
+    return compacted
+
+
+def _compact_research_config(config: dict[str, object]) -> dict[str, object]:
+    compacted = dict(config)
+    statuses = compacted.get("market_statuses")
+    if isinstance(statuses, list):
+        compacted["market_statuses"] = [_compact_market_status(status) for status in statuses if isinstance(status, dict)]
+    return compacted
+
+
+def _compact_market_status(status: dict[str, object]) -> dict[str, object]:
+    compacted = dict(status)
+    bar_regime = compacted.get("bar_regime")
+    if isinstance(bar_regime, dict):
+        keys = ("schema", "bar_count", "current_regime", "regime_counts", "start", "end")
+        compacted["bar_regime"] = {key: bar_regime[key] for key in keys if key in bar_regime}
+    return compacted
 
 
 @app.get("/research/runs/{run_id}/trials")
@@ -1413,6 +2251,937 @@ def _is_frozen_validation_payload(payload: ResearchRunPayload) -> bool:
     return payload.repair_mode == "frozen_validation" and isinstance(parameters, dict) and bool(parameters)
 
 
+def _is_guided_auto_promotion_payload(payload: ResearchRunPayload) -> bool:
+    pipeline = payload.pipeline if isinstance(payload.pipeline, dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    return (
+        payload.repair_mode in GUIDED_AUTO_FREEZE_REPAIR_MODES
+        and str(pipeline.get("schema") or "") in GUIDED_AUTO_FREEZE_PIPELINE_SCHEMAS
+        and bool(auto_freeze.get("enabled", False))
+    )
+
+
+def _is_guided_midcap_design_payload(payload: ResearchRunPayload) -> bool:
+    return _is_guided_auto_promotion_payload(payload)
+
+
+async def _maybe_auto_freeze_guided_pipeline(
+    run_id: int,
+    payload: ResearchRunPayload,
+    api_token: str,
+    selected_markets: list[MarketMapping],
+    market_statuses: list[dict[str, object]],
+    market_failures: list[dict[str, object]],
+) -> None:
+    if not _is_guided_auto_promotion_payload(payload):
+        return
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": "selecting",
+            "detail": "Selecting only IG-validated, OOS-positive intraday evidence that is strong enough to freeze automatically.",
+        },
+    )
+    trials = research_store.list_trials(run_id, limit=GUIDED_AUTO_FREEZE_TRIAL_LIMIT)
+    selected_trial, skip_summary = _select_guided_auto_freeze_trial(trials)
+    if selected_trial is None:
+        if await _maybe_auto_repair_guided_pipeline(
+            run_id,
+            payload,
+            api_token,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            trials,
+            skip_summary,
+        ):
+            return
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "skipped",
+                "reason": "no_freezeable_trial",
+                "detail": "No design or repair result was safe to freeze automatically.",
+                "trial_count": len(trials),
+                "skip_summary": skip_summary,
+            },
+        )
+        return
+
+    source_template = _guided_auto_freeze_source_template(selected_trial)
+    if not source_template.get("parameters"):
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "skipped",
+                "reason": "missing_frozen_parameters",
+                "detail": "The selected design result did not expose exact frozen parameters.",
+                "source_trial_id": selected_trial.get("id"),
+            },
+        )
+        return
+
+    if _is_frozen_validation_payload(payload):
+        readiness = selected_trial.get("promotion_readiness") if isinstance(selected_trial.get("promotion_readiness"), dict) else {}
+        readiness_status = str(readiness.get("status") or selected_trial.get("readiness_status") or "blocked")
+        saved_template = research_store.save_template(
+            _guided_auto_freeze_template_payload(
+                selected_trial,
+                payload,
+                source_template,
+                source_kind="guided_pipeline_auto_freeze_validated",
+                validation_trial=selected_trial,
+                validation_run_id=run_id,
+            )
+        )
+        status = "freeze_validated_ready" if readiness_status == "ready_for_paper" else "freeze_validated_blocked"
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": status,
+                "detail": _guided_auto_freeze_completion_detail(status, readiness_status),
+                "source_trial_id": selected_trial.get("id"),
+                "template_id": saved_template.get("id"),
+                "template_name": saved_template.get("name"),
+                "freeze_run_id": run_id,
+                "freeze_run_status": "finished",
+                "validation_trial_id": selected_trial.get("id"),
+                "readiness_status": readiness_status,
+            },
+        )
+        return
+
+    saved_template = research_store.save_template(
+        _guided_auto_freeze_template_payload(
+            selected_trial,
+            payload,
+            source_template,
+            source_kind="guided_pipeline_auto_saved_source",
+        )
+    )
+    freeze_payload = _guided_auto_freeze_validation_payload(payload, selected_trial, source_template, saved_template)
+    freeze_markets = _selected_markets(freeze_payload.market_ids or [freeze_payload.market_id])
+    freeze_run_id = research_store.create_run(
+        market_id=freeze_markets[0].market_id,
+        data_source="eodhd_with_ig_cost_model",
+        status="running",
+        config=_research_run_config(freeze_payload, freeze_markets),
+    )
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": "running_freeze_validation",
+            "detail": "Saved the best eligible lead as a frozen template and started a no-search validation run.",
+            "source_trial_id": selected_trial.get("id"),
+            "template_id": saved_template.get("id"),
+            "template_name": saved_template.get("name"),
+            "freeze_run_id": freeze_run_id,
+        },
+    )
+    try:
+        await _execute_research_run(freeze_run_id, freeze_payload, api_token)
+    except Exception as exc:
+        research_store.update_run_status(freeze_run_id, "error", _public_error(exc))
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "error",
+                "detail": "Frozen validation failed before it could produce evidence.",
+                "source_trial_id": selected_trial.get("id"),
+                "template_id": saved_template.get("id"),
+                "freeze_run_id": freeze_run_id,
+                "error": _public_error(exc),
+            },
+        )
+        return
+
+    freeze_run = research_store.get_run(freeze_run_id)
+    validation_trial = _best_guided_freeze_validation_trial(freeze_run_id)
+    validation_status = str(freeze_run.get("status") if freeze_run else "unknown")
+    readiness_status = ""
+    if validation_trial is not None:
+        readiness = validation_trial.get("promotion_readiness") if isinstance(validation_trial.get("promotion_readiness"), dict) else {}
+        readiness_status = str(readiness.get("status") or validation_trial.get("readiness_status") or "blocked")
+        saved_template = research_store.save_template(
+            _guided_auto_freeze_template_payload(
+                selected_trial,
+                payload,
+                source_template,
+                source_kind="guided_pipeline_auto_freeze_validated",
+                validation_trial=validation_trial,
+                validation_run_id=freeze_run_id,
+            )
+        )
+    status = "freeze_validated_ready" if readiness_status == "ready_for_paper" else "freeze_validated_blocked"
+    if validation_trial is None:
+        status = "freeze_validation_error" if validation_status == "error" else "freeze_validation_finished_without_trial"
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": status,
+            "detail": _guided_auto_freeze_completion_detail(status, readiness_status),
+            "source_trial_id": selected_trial.get("id"),
+            "template_id": saved_template.get("id"),
+            "template_name": saved_template.get("name"),
+            "freeze_run_id": freeze_run_id,
+            "freeze_run_status": validation_status,
+            "validation_trial_id": validation_trial.get("id") if validation_trial else None,
+            "readiness_status": readiness_status,
+        },
+    )
+
+
+async def _maybe_auto_repair_guided_pipeline(
+    run_id: int,
+    payload: ResearchRunPayload,
+    api_token: str,
+    selected_markets: list[MarketMapping],
+    market_statuses: list[dict[str, object]],
+    market_failures: list[dict[str, object]],
+    trials: list[dict[str, object]],
+    freeze_skip_summary: dict[str, int],
+) -> bool:
+    if not _guided_auto_repair_allowed(payload):
+        return False
+    repair_trial, repair_skip_summary = _select_guided_auto_repair_trial(trials)
+    if repair_trial is None:
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "repair_skipped",
+                "reason": "no_repairable_trial",
+                "detail": "No result had enough non-terminal evidence to spend an automatic repair run.",
+                "trial_count": len(trials),
+                "skip_summary": freeze_skip_summary,
+                "repair_skip_summary": repair_skip_summary,
+            },
+        )
+        return False
+    try:
+        repair_payload, repair_plan = _guided_auto_repair_payload(payload, repair_trial, run_id)
+    except ValueError as exc:
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "repair_skipped",
+                "reason": "repair_plan_unavailable",
+                "detail": str(exc),
+                "source_trial_id": repair_trial.get("id"),
+                "skip_summary": freeze_skip_summary,
+                "repair_skip_summary": repair_skip_summary,
+            },
+        )
+        return False
+    repair_markets = _selected_markets(repair_payload.market_ids or [repair_payload.market_id])
+    repair_run_id = research_store.create_run(
+        market_id=repair_markets[0].market_id,
+        data_source="eodhd_with_ig_cost_model",
+        status="running",
+        config=_research_run_config(repair_payload, repair_markets),
+    )
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": "running_repair",
+            "detail": repair_plan.get("detail")
+            or "No result was safe to freeze yet, so the app started one automatic make-tradeable repair run.",
+            "source_trial_id": repair_trial.get("id"),
+            "repair_run_id": repair_run_id,
+            "repair_mode": repair_payload.repair_mode,
+            "repair_attempt": repair_plan.get("repair_attempt"),
+            "repair_steps": repair_plan.get("steps", []),
+            "skip_summary": freeze_skip_summary,
+            "repair_skip_summary": repair_skip_summary,
+        },
+    )
+    try:
+        await _execute_research_run(repair_run_id, repair_payload, api_token)
+    except Exception as exc:
+        research_store.update_run_status(repair_run_id, "error", _public_error(exc))
+        _record_guided_auto_freeze_status(
+            run_id,
+            payload,
+            selected_markets,
+            market_statuses,
+            market_failures,
+            {
+                "status": "repair_error",
+                "detail": "Automatic repair failed before it could produce validation evidence.",
+                "source_trial_id": repair_trial.get("id"),
+                "repair_run_id": repair_run_id,
+                "repair_mode": repair_payload.repair_mode,
+                "error": _public_error(exc),
+            },
+        )
+        return True
+
+    repair_run = research_store.get_run(repair_run_id) or {}
+    repair_config = repair_run.get("config") if isinstance(repair_run.get("config"), dict) else {}
+    repair_pipeline = repair_config.get("pipeline") if isinstance(repair_config.get("pipeline"), dict) else {}
+    repair_auto_freeze = repair_pipeline.get("auto_freeze") if isinstance(repair_pipeline.get("auto_freeze"), dict) else {}
+    downstream_status = str(repair_auto_freeze.get("status") or repair_run.get("status") or "unknown")
+    parent_status = "repair_finished"
+    if downstream_status == "freeze_validated_ready":
+        parent_status = "repair_freeze_validated_ready"
+    elif downstream_status in {"freeze_validated_blocked", "freeze_validation_finished_without_trial", "freeze_validation_error"}:
+        parent_status = "repair_freeze_validated_blocked"
+    _record_guided_auto_freeze_status(
+        run_id,
+        payload,
+        selected_markets,
+        market_statuses,
+        market_failures,
+        {
+            "status": parent_status,
+            "detail": repair_auto_freeze.get("detail")
+            or "Automatic repair finished. Open the repair run to inspect freeze-validation and paper readiness.",
+            "source_trial_id": repair_trial.get("id"),
+            "repair_run_id": repair_run_id,
+            "repair_run_status": repair_run.get("status"),
+            "repair_mode": repair_payload.repair_mode,
+            "repair_attempt": repair_plan.get("repair_attempt"),
+            "downstream_auto_freeze_status": downstream_status,
+            "template_id": repair_auto_freeze.get("template_id"),
+            "template_name": repair_auto_freeze.get("template_name"),
+            "freeze_run_id": repair_auto_freeze.get("freeze_run_id"),
+            "validation_trial_id": repair_auto_freeze.get("validation_trial_id"),
+            "readiness_status": repair_auto_freeze.get("readiness_status"),
+        },
+    )
+    return True
+
+
+def _record_guided_auto_freeze_status(
+    run_id: int,
+    payload: ResearchRunPayload,
+    selected_markets: list[MarketMapping],
+    market_statuses: list[dict[str, object]],
+    market_failures: list[dict[str, object]],
+    auto_freeze: dict[str, object],
+) -> None:
+    if not _is_guided_midcap_design_payload(payload):
+        return
+    pipeline = dict(payload.pipeline if isinstance(payload.pipeline, dict) else {})
+    existing = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    pipeline["auto_freeze"] = {
+        "enabled": True,
+        "policy": "build_repair_once_save_best_freezeable_intraday_lead_then_validate_exact_rules",
+        "strategy_generation_allowed": False,
+        **existing,
+        **auto_freeze,
+    }
+    payload.pipeline = pipeline
+    research_store.update_run_config(
+        run_id,
+        _research_run_config(payload, selected_markets, market_statuses=market_statuses, market_failures=market_failures),
+    )
+
+
+def _select_guided_auto_freeze_trial(trials: list[dict[str, object]]) -> tuple[dict[str, object] | None, dict[str, int]]:
+    skip_counts: dict[str, int] = {}
+    ranked = sorted(trials, key=_guided_auto_freeze_trial_rank, reverse=True)
+    for trial in ranked:
+        rejection = _guided_auto_freeze_rejection(trial)
+        if rejection:
+            skip_counts[rejection] = skip_counts.get(rejection, 0) + 1
+            continue
+        return trial, skip_counts
+    return None, skip_counts
+
+
+def _guided_auto_repair_allowed(payload: ResearchRunPayload) -> bool:
+    if _is_frozen_validation_payload(payload):
+        return False
+    pipeline = payload.pipeline if isinstance(payload.pipeline, dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    if auto_freeze.get("repair_enabled") is False:
+        return False
+    max_runs = max(0, _safe_int(auto_freeze.get("max_auto_repair_runs") or GUIDED_AUTO_REPAIR_MAX_RUNS))
+    current_runs = _safe_int(auto_freeze.get("auto_repair_count"))
+    return current_runs < max_runs
+
+
+def _select_guided_auto_repair_trial(trials: list[dict[str, object]]) -> tuple[dict[str, object] | None, dict[str, int]]:
+    skip_counts: dict[str, int] = {}
+    ranked = sorted(trials, key=_guided_auto_repair_trial_rank, reverse=True)
+    for trial in ranked:
+        rejection = _guided_auto_repair_rejection(trial)
+        if rejection:
+            skip_counts[rejection] = skip_counts.get(rejection, 0) + 1
+            continue
+        return trial, skip_counts
+    return None, skip_counts
+
+
+def _guided_auto_repair_rejection(trial: dict[str, object]) -> str:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    warnings = _guided_trial_warning_set(trial)
+    if warnings & GUIDED_AUTO_REPAIR_TERMINAL_WARNINGS:
+        return sorted(warnings & GUIDED_AUTO_REPAIR_TERMINAL_WARNINGS)[0]
+    if "needs_ig_price_validation" in warnings:
+        return "needs_ig_price_validation"
+    if not str(parameters.get("market_id") or trial.get("market_id") or "").strip():
+        return "missing_market_id"
+    if not _freezeable_parameter_subset(parameters):
+        return "missing_frozen_parameters"
+    if not bool(parameters.get("day_trading_mode")):
+        return "not_day_trading"
+    if not bool(parameters.get("force_flat_before_close")) or not bool(parameters.get("no_overnight")):
+        return "missing_intraday_flat_contract"
+    if int(_safe_number(backtest.get("trade_count"))) < 6:
+        return "too_few_trades_to_repair"
+    if _safe_number(backtest.get("net_profit")) <= 0 and _safe_number(backtest.get("test_profit")) <= 0:
+        return "non_positive_net_and_oos_profit"
+    freeze_rejection = _guided_auto_freeze_rejection(trial)
+    if not freeze_rejection:
+        return "already_freezeable"
+    repairable = {
+        "best_trades_dominate",
+        "costs_overwhelm_edge",
+        "diagnostics_deferred_fast_scan",
+        "fails_higher_slippage",
+        "headline_sharpe_not_regime_robust",
+        "low_oos_trades",
+        "multiple_testing_haircut",
+        "negative_after_costs",
+        "negative_stress_net_profit",
+        "non_positive_regime_gated_oos_profit",
+        "one_fold_dependency",
+        "profit_concentrated_single_month",
+        "profit_concentrated_single_regime",
+        "profits_not_consistent_across_folds",
+        "regime_gated_backtest_negative",
+        "regime_gated_oos_negative",
+        "target_regime_low_oos_trades",
+        "too_few_oos_trades_to_freeze",
+        "too_few_trades",
+        "too_few_trades_to_freeze",
+        "weak_net_cost_efficiency",
+        "weak_oos_evidence",
+    }
+    if freeze_rejection in repairable or warnings & repairable:
+        return ""
+    return freeze_rejection
+
+
+def _guided_auto_repair_trial_rank(trial: dict[str, object]) -> tuple[float, ...]:
+    return (
+        1.0 if _guided_auto_repair_rejection(trial) == "" else 0.0,
+        *_guided_auto_freeze_trial_rank(trial),
+    )
+
+
+def _guided_auto_repair_payload(
+    parent_payload: ResearchRunPayload,
+    source_trial: dict[str, object],
+    parent_run_id: int,
+) -> tuple[ResearchRunPayload, dict[str, object]]:
+    source_template = _guided_auto_freeze_source_template(source_trial)
+    if not source_template.get("parameters"):
+        raise ValueError("The selected repair result did not expose exact parameters to lock.")
+    market_id = str(source_template.get("market_id") or source_trial.get("market_id") or parent_payload.market_id)
+    family = str(source_template.get("family") or source_trial.get("strategy_family") or "")
+    warnings = _guided_trial_warning_set(source_trial)
+    pattern = (
+        (source_trial.get("parameters") if isinstance(source_trial.get("parameters"), dict) else {})
+        .get("bar_pattern_analysis", {})
+    )
+    pattern = pattern if isinstance(pattern, dict) else {}
+    target_regime = str(source_template.get("target_regime") or _guided_auto_repair_target_regime(pattern, warnings) or "")
+    dominant_month = _guided_auto_repair_dominant_month(pattern)
+    pipeline = parent_payload.pipeline if isinstance(parent_payload.pipeline, dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    recipe_id = str(pipeline.get("recipe_id") or "").strip()
+    manual_playbook = str(pipeline.get("manual_playbook") or "").strip()
+    repair_attempt = _safe_int(auto_freeze.get("auto_repair_count")) + 1
+    max_repair_runs = max(repair_attempt, _safe_int(auto_freeze.get("max_auto_repair_runs") or GUIDED_AUTO_REPAIR_MAX_RUNS))
+
+    budget = 54
+    start = parent_payload.start
+    stress = max(2.5, parent_payload.cost_stress_multiplier)
+    objective = "profit_first"
+    risk_profile = parent_payload.risk_profile
+    repair_mode = "auto_refine"
+    include_regime_scans = False
+    regime_scan_budget = None
+    excluded_months: list[str] = []
+    steps = [f"Repair attempt {repair_attempt}/{max_repair_runs}", "Keep market, family, and no-overnight rules locked"]
+
+    cost_blocked = bool(warnings & {"negative_after_costs", "costs_overwhelm_edge", "fails_higher_slippage", "weak_net_cost_efficiency", "negative_stress_net_profit"})
+    capital_blocked = bool(
+        warnings
+        & {
+            "risk_budget_exceeded",
+            "historical_drawdown_too_large",
+            "historical_daily_loss_stop_breached",
+            "margin_too_large",
+            "insufficient_account_for_margin",
+            "below_ig_min_deal_size",
+            "missing_reference_price",
+            "drawdown_too_high",
+        }
+    )
+    trade_count_blocked = bool(warnings & {"too_few_trades", "low_oos_trades", "target_regime_low_oos_trades"})
+    fold_blocked = bool(warnings & {"profits_not_consistent_across_folds", "weak_oos_evidence", "one_fold_dependency"})
+    regime_blocked = bool(
+        warnings
+        & {
+            "headline_sharpe_not_regime_robust",
+            "profit_concentrated_single_regime",
+            "regime_gated_backtest_negative",
+            "regime_gated_oos_negative",
+        }
+    )
+    month_blocked = bool(warnings & {"profit_concentrated_single_month", "best_trades_dominate"})
+    scan_bias = "multiple_testing_haircut" in warnings
+
+    if capital_blocked:
+        budget = 120
+        start = _earlier_date(start, _guided_auto_freeze_validation_start(parent_payload.start, source_template))
+        stress = max(stress, 2.5)
+        objective = "balanced"
+        risk_profile = "conservative"
+        repair_mode = "capital_fit"
+        steps.extend(["Rank by small-account capital fit", "Search smaller stakes and tighter stops before profit"])
+    if trade_count_blocked or fold_blocked:
+        budget = 120
+        start = _earlier_date(start, _guided_auto_freeze_validation_start(parent_payload.start, source_template))
+        if repair_mode == "auto_refine":
+            repair_mode = "more_trades" if trade_count_blocked else "longer_history"
+        steps.append("Run longer-history locked-family evidence")
+    if regime_blocked:
+        if target_regime:
+            steps.append(f"Score only {target_regime} and force flat outside it")
+        else:
+            include_regime_scans = True
+            regime_scan_budget = None
+            steps.append("Run capped regime specialists")
+        if repair_mode == "auto_refine":
+            repair_mode = "regime_repair"
+    if month_blocked and dominant_month:
+        excluded_months = [dominant_month]
+        if repair_mode == "auto_refine":
+            repair_mode = "month_exclusion"
+        steps.append(f"Exclude {dominant_month} and require the edge to survive")
+    if cost_blocked:
+        stress = max(stress, 3.0)
+        if repair_mode == "auto_refine":
+            repair_mode = "cost_stress"
+        steps.append("Stress spread, slippage, and costs before trusting the edge")
+    if scan_bias and not (capital_blocked or trade_count_blocked or fold_blocked or regime_blocked or month_blocked or cost_blocked):
+        budget = 1
+        repair_mode = "frozen_validation"
+        include_regime_scans = False
+        regime_scan_budget = None
+        start = _earlier_date(start, _guided_auto_freeze_validation_start(parent_payload.start, source_template))
+        steps.append("Freeze exact rules immediately to clear parameter hunting")
+
+    repair_pipeline = {
+        "schema": "guided_auto_repair_pipeline_v1",
+        "parent_run_id": parent_run_id,
+        "source_trial_id": source_trial.get("id"),
+        "recipe_id": recipe_id,
+        "manual_playbook": manual_playbook,
+        "daily_mode_source": "active_frozen_template_library_only",
+        "strategy_generation_allowed": False,
+        "auto_freeze": {
+            "enabled": True,
+            "status": "waiting_for_repair_run",
+            "policy": "auto_repair_once_then_save_best_freezeable_intraday_lead_and_validate_exact_rules",
+            "repair_enabled": repair_attempt < max_repair_runs,
+            "auto_repair_count": repair_attempt,
+            "max_auto_repair_runs": max_repair_runs,
+            "repair_steps": steps[:8],
+            "source_design_run_id": parent_run_id,
+            "source_trial_id": source_trial.get("id"),
+        },
+    }
+    payload = ResearchRunPayload(
+        market_id=market_id,
+        market_ids=[market_id],
+        start=start,
+        end=parent_payload.end,
+        interval=str(source_template.get("interval") or parent_payload.interval or "5min"),
+        engine=parent_payload.engine,
+        search_preset="deep" if budget >= 120 else "balanced",
+        trading_style=str(source_template.get("style") or parent_payload.trading_style or "intraday_only"),
+        objective=objective,
+        search_budget=budget,
+        risk_profile=risk_profile,
+        strategy_families=[family] if family else [],
+        product_mode=parent_payload.product_mode,
+        cost_stress_multiplier=stress,
+        include_regime_scans=include_regime_scans and not target_regime,
+        regime_scan_budget_per_regime=regime_scan_budget,
+        diagnostic_limit=None,
+        include_market_context=False,
+        target_regime=target_regime or None,
+        excluded_months=excluded_months,
+        repair_mode=repair_mode,
+        account_size=parent_payload.account_size,
+        source_template={
+            **source_template,
+            "repair_attempt_count": repair_attempt,
+            **({"scenario_recipe": recipe_id} if recipe_id else {}),
+            **({"manual_playbook": manual_playbook} if manual_playbook else {}),
+        },
+        pipeline=repair_pipeline,
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        paper_queue_limit=parent_payload.paper_queue_limit,
+        review_queue_limit=parent_payload.review_queue_limit,
+    )
+    return payload, {
+        "repair_attempt": repair_attempt,
+        "steps": steps[:8],
+        "detail": f"Auto repair started on {market_id}: {', '.join(steps[1:4])}.",
+    }
+
+
+def _guided_trial_warning_set(trial: dict[str, object]) -> set[str]:
+    readiness = trial.get("promotion_readiness") if isinstance(trial.get("promotion_readiness"), dict) else {}
+    warnings = set(str(item) for item in (trial.get("warnings") or []) if item)
+    warnings.update(str(item) for item in (readiness.get("blockers") or []) if item)
+    warnings.update(str(item) for item in (readiness.get("validation_warnings") or []) if item)
+    return warnings
+
+
+def _guided_auto_repair_target_regime(pattern: dict[str, object], warnings: set[str]) -> str:
+    existing = str(pattern.get("target_regime") or "").strip()
+    if existing:
+        return existing
+    if not (
+        warnings
+        & {
+            "headline_sharpe_not_regime_robust",
+            "profit_concentrated_single_regime",
+            "regime_gated_backtest_negative",
+            "regime_gated_oos_negative",
+            "target_regime_low_oos_trades",
+        }
+    ):
+        return ""
+    dominant = pattern.get("dominant_profit_regime") if isinstance(pattern.get("dominant_profit_regime"), dict) else {}
+    return str(dominant.get("key") or "").strip()
+
+
+def _guided_auto_repair_dominant_month(pattern: dict[str, object]) -> str:
+    dominant = pattern.get("dominant_profit_month") if isinstance(pattern.get("dominant_profit_month"), dict) else {}
+    month = str(dominant.get("key") or "").strip()
+    return month if re.fullmatch(r"\d{4}-\d{2}", month) else ""
+
+
+def _earlier_date(left: str, right: str) -> str:
+    left_value = str(left or "").strip()
+    right_value = str(right or "").strip()
+    if not left_value:
+        return right_value
+    if not right_value:
+        return left_value
+    return left_value if left_value <= right_value else right_value
+
+
+def _guided_auto_freeze_rejection(trial: dict[str, object]) -> str:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    gated = pattern.get("regime_gated_backtest") if isinstance(pattern.get("regime_gated_backtest"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    warnings = _guided_trial_warning_set(trial)
+    if warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS:
+        return sorted(warnings & GUIDED_AUTO_FREEZE_TERMINAL_WARNINGS)[0]
+    if warnings & GUIDED_AUTO_FREEZE_STRICT_WARNINGS:
+        return sorted(warnings & GUIDED_AUTO_FREEZE_STRICT_WARNINGS)[0]
+    if not str(parameters.get("market_id") or trial.get("market_id") or "").strip():
+        return "missing_market_id"
+    if not _freezeable_parameter_subset(parameters):
+        return "missing_frozen_parameters"
+    if not bool(parameters.get("day_trading_mode")):
+        return "not_day_trading"
+    if not bool(parameters.get("force_flat_before_close")) or not bool(parameters.get("no_overnight")):
+        return "missing_intraday_flat_contract"
+    if int(_safe_number(backtest.get("trade_count"))) < GUIDED_AUTO_FREEZE_MIN_TRADES:
+        return "too_few_trades_to_freeze"
+    if int(_safe_number(evidence.get("oos_trade_count"), backtest.get("oos_trade_count"))) < GUIDED_AUTO_FREEZE_MIN_OOS_TRADES:
+        return "too_few_oos_trades_to_freeze"
+    if _safe_number(backtest.get("net_profit")) <= 0 or _safe_number(backtest.get("test_profit")) <= 0:
+        return "non_positive_net_or_oos_profit"
+    if "regime_gated_backtest" in pattern and _safe_number(gated.get("test_profit")) <= 0:
+        return "non_positive_regime_gated_oos_profit"
+    if "stress_net_profit" in parameters and _safe_number(parameters.get("stress_net_profit")) <= 0:
+        return "negative_stress_net_profit"
+    return ""
+
+
+def _guided_auto_freeze_trial_rank(trial: dict[str, object]) -> tuple[float, ...]:
+    tier_rank = {
+        "validated_candidate": 5,
+        "paper_candidate": 4,
+        "research_candidate": 3,
+        "incubator": 2,
+        "watchlist": 1,
+        "reject": 0,
+    }.get(str(trial.get("promotion_tier") or "reject"), 0)
+    readiness = trial.get("promotion_readiness") if isinstance(trial.get("promotion_readiness"), dict) else {}
+    readiness_rank = {"ready_for_paper": 3, "needs_ig_validation": 2, "blocked": 1}.get(str(readiness.get("status") or "blocked"), 0)
+    backtest = trial.get("backtest") if isinstance(trial.get("backtest"), dict) else {}
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    return (
+        float(tier_rank),
+        float(readiness_rank),
+        1.0 if _guided_auto_freeze_rejection(trial) == "" else 0.0,
+        _safe_number(evidence.get("oos_net_profit"), backtest.get("test_profit")),
+        _safe_number(parameters.get("stress_net_profit")),
+        _safe_number(backtest.get("net_profit")),
+        _safe_number(trial.get("robustness_score")),
+        _safe_number(backtest.get("net_cost_ratio")),
+        -_safe_number(backtest.get("max_drawdown")),
+        -_safe_number(trial.get("id")),
+    )
+
+
+def _freezeable_parameter_subset(parameters: dict[str, object]) -> dict[str, object]:
+    return {
+        str(key): value
+        for key, value in parameters.items()
+        if str(key) in FROZEN_PARAMETER_KEYS and value not in (None, "")
+    }
+
+
+def _guided_auto_freeze_source_template(trial: dict[str, object]) -> dict[str, object]:
+    parameters = trial.get("parameters") if isinstance(trial.get("parameters"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    market_id = str(trial.get("market_id") or parameters.get("market_id") or "").strip()
+    family = str(trial.get("strategy_family") or parameters.get("family") or "").strip()
+    interval = str(parameters.get("timeframe") or parameters.get("interval") or "5min").strip()
+    target_regime = str(parameters.get("target_regime") or pattern.get("target_regime") or "").strip()
+    return {
+        "name": str(trial.get("strategy_name") or f"{market_id} {family}").strip(),
+        "source_id": trial.get("id"),
+        "market_id": market_id,
+        "family": family,
+        "style": str(parameters.get("style") or trial.get("style") or "intraday_only"),
+        "interval": interval,
+        "target_regime": target_regime,
+        "repair_attempt_count": _safe_int((parameters.get("search_audit") or {}).get("repair_attempt_count"))
+        if isinstance(parameters.get("search_audit"), dict)
+        else 0,
+        "holding_period": "intraday",
+        "force_flat_before_close": True,
+        "no_overnight": True,
+        "parameters": _freezeable_parameter_subset(parameters),
+    }
+
+
+def _guided_auto_freeze_template_payload(
+    source_trial: dict[str, object],
+    parent_payload: ResearchRunPayload,
+    source_template: dict[str, object],
+    *,
+    source_kind: str,
+    validation_trial: dict[str, object] | None = None,
+    validation_run_id: int | None = None,
+) -> dict[str, object]:
+    evidence_trial = validation_trial or source_trial
+    parameters = evidence_trial.get("parameters") if isinstance(evidence_trial.get("parameters"), dict) else {}
+    backtest = evidence_trial.get("backtest") if isinstance(evidence_trial.get("backtest"), dict) else {}
+    readiness = evidence_trial.get("promotion_readiness") if isinstance(evidence_trial.get("promotion_readiness"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    capital_source = _trial_with_capital(evidence_trial)
+    validated = validation_run_id is not None
+    stored_readiness = dict(readiness)
+    if not validated:
+        stored_readiness["status"] = "blocked"
+        blockers = list(stored_readiness.get("blockers") or [])
+        if "pending_frozen_validation" not in blockers:
+            blockers.append("pending_frozen_validation")
+        stored_readiness["blockers"] = blockers
+    validation: dict[str, object] = {}
+    if validation_run_id is not None:
+        validation = {
+            "run_id": validation_run_id,
+            "trial_id": evidence_trial.get("id"),
+            "repair_mode": "frozen_validation",
+            "parameter_hunting": False,
+        }
+    parent_pipeline = parent_payload.pipeline if isinstance(parent_payload.pipeline, dict) else {}
+    recipe_id = str(parent_pipeline.get("recipe_id") or "").strip()
+    manual_playbook = str(parent_pipeline.get("manual_playbook") or "").strip()
+    stored_parameters = dict(parameters)
+    stored_source_template = dict(source_template)
+    if recipe_id:
+        stored_parameters["scenario_recipe"] = recipe_id
+        stored_source_template["scenario_recipe"] = recipe_id
+    if manual_playbook:
+        stored_parameters["manual_playbook"] = manual_playbook
+        stored_source_template["manual_playbook"] = manual_playbook
+    return {
+        "name": source_template.get("name") or source_trial.get("strategy_name") or "Guided frozen template",
+        "market_id": source_template.get("market_id") or parameters.get("market_id") or source_trial.get("market_id") or parent_payload.market_id,
+        "interval": source_template.get("interval") or parameters.get("timeframe") or parent_payload.interval or "5min",
+        "strategy_family": source_template.get("family") or parameters.get("family") or evidence_trial.get("strategy_family") or "",
+        "style": source_template.get("style") or parameters.get("style") or parent_payload.trading_style,
+        "target_regime": source_template.get("target_regime") or parameters.get("target_regime") or pattern.get("target_regime") or "",
+        "status": "active" if validated else "paused",
+        "source_run_id": source_trial.get("run_id"),
+        "source_trial_id": source_trial.get("id"),
+        "source_candidate_id": None,
+        "source_kind": source_kind,
+        "promotion_tier": evidence_trial.get("promotion_tier") if validated else "research_candidate",
+        "readiness_status": stored_readiness.get("status") or "blocked",
+        "robustness_score": _safe_number(evidence_trial.get("robustness_score")),
+        "testing_account_size": parent_payload.account_size,
+        "payload": {
+            "source_template": stored_source_template,
+            "parameters": stored_parameters,
+            "backtest": backtest,
+            "pattern": pattern,
+            "evidence": evidence,
+            "readiness": stored_readiness,
+            "warnings": list(evidence_trial.get("warnings") or []) + ([] if validated else ["pending_frozen_validation"]),
+            "search_audit": search_audit,
+            "capital_scenarios": capital_source.get("capital_scenarios", []),
+            "source_kind": source_kind,
+            "validation": validation,
+            "pipeline": {
+                "schema": "guided_midcap_auto_freeze_template_v1",
+                "recipe_id": recipe_id,
+                "manual_playbook": manual_playbook,
+                "parent_run_id": source_trial.get("run_id"),
+                "validation_run_id": validation_run_id,
+                "strategy_generation_allowed": False,
+            },
+        },
+    }
+
+
+def _guided_auto_freeze_validation_payload(
+    parent_payload: ResearchRunPayload,
+    source_trial: dict[str, object],
+    source_template: dict[str, object],
+    saved_template: dict[str, object],
+) -> ResearchRunPayload:
+    market_id = str(source_template.get("market_id") or source_trial.get("market_id") or parent_payload.market_id)
+    family = str(source_template.get("family") or source_trial.get("strategy_family") or "")
+    target_regime = str(source_template.get("target_regime") or "")
+    parent_pipeline = parent_payload.pipeline if isinstance(parent_payload.pipeline, dict) else {}
+    recipe_id = str(parent_pipeline.get("recipe_id") or "").strip()
+    manual_playbook = str(parent_pipeline.get("manual_playbook") or "").strip()
+    return ResearchRunPayload(
+        market_id=market_id,
+        market_ids=[market_id],
+        start=_guided_auto_freeze_validation_start(parent_payload.start, source_template),
+        end=parent_payload.end,
+        interval=str(source_template.get("interval") or parent_payload.interval or "5min"),
+        engine=parent_payload.engine,
+        search_preset="balanced",
+        trading_style=str(source_template.get("style") or parent_payload.trading_style or "intraday_only"),
+        objective="profit_first",
+        search_budget=1,
+        risk_profile=parent_payload.risk_profile,
+        strategy_families=[family] if family else [],
+        product_mode=parent_payload.product_mode,
+        cost_stress_multiplier=max(2.5, parent_payload.cost_stress_multiplier),
+        include_regime_scans=False,
+        regime_scan_budget_per_regime=None,
+        diagnostic_limit=None,
+        include_market_context=False,
+        target_regime=target_regime or None,
+        excluded_months=[],
+        repair_mode="frozen_validation",
+        account_size=parent_payload.account_size,
+        source_template={
+            **source_template,
+            **({"scenario_recipe": recipe_id} if recipe_id else {}),
+            **({"manual_playbook": manual_playbook} if manual_playbook else {}),
+        },
+        pipeline={
+            "schema": "guided_midcap_auto_freeze_validation_v1",
+            "parent_run_id": source_trial.get("run_id"),
+            "source_trial_id": source_trial.get("id"),
+            "template_id": saved_template.get("id"),
+            "recipe_id": recipe_id,
+            "manual_playbook": manual_playbook,
+            "daily_mode_source": "active_frozen_template_library_only",
+            "strategy_generation_allowed": False,
+        },
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        paper_queue_limit=parent_payload.paper_queue_limit,
+        review_queue_limit=parent_payload.review_queue_limit,
+    )
+
+
+def _guided_auto_freeze_validation_start(current_start: str, source_template: dict[str, object]) -> str:
+    family = str(source_template.get("family") or "")
+    interval = str(source_template.get("interval") or "")
+    target = "2020-01-01" if interval == "1day" or family in {"calendar_turnaround_tuesday", "month_end_seasonality", "everyday_long"} else "2024-01-01"
+    current = str(current_start or "").strip()
+    return current if current and current < target else target
+
+
+def _best_guided_freeze_validation_trial(run_id: int) -> dict[str, object] | None:
+    trials = research_store.list_trials(run_id, limit=5)
+    if not trials:
+        return None
+    return sorted(trials, key=_guided_auto_freeze_trial_rank, reverse=True)[0]
+
+
+def _guided_auto_freeze_completion_detail(status: str, readiness_status: str) -> str:
+    if status == "freeze_validated_ready":
+        return "Frozen validation passed; the template can be considered for daily paper scans."
+    if status == "freeze_validated_blocked":
+        readiness = readiness_status or "blocked"
+        return f"Frozen validation finished, but readiness is {readiness}; keep it out of daily paper until repaired."
+    if status == "freeze_validation_error":
+        return "Frozen validation could not produce a validation trial; the saved template remains paused."
+    return "Frozen validation finished, but no validation trial was saved."
+
+
 def _preset_budget(search_preset: str) -> int:
     return SEARCH_PRESETS.get(search_preset, SEARCH_PRESETS["balanced"])
 
@@ -1555,12 +3324,25 @@ def _research_run_config(
         "cost_stress_multiplier": payload.cost_stress_multiplier,
         "include_regime_scans": payload.include_regime_scans,
         "regime_scan_budget_per_regime": payload.regime_scan_budget_per_regime,
+        "diagnostic_limit": payload.diagnostic_limit,
+        "include_market_context": payload.include_market_context,
         "target_regime": payload.target_regime,
         "excluded_months": sorted(_normalized_excluded_months(payload.excluded_months)),
         "repair_mode": payload.repair_mode,
         "account_size": payload.account_size,
         "source_template": _compact_source_template(payload.source_template),
+        "pipeline": payload.pipeline if isinstance(payload.pipeline, dict) else {},
         "product_mode": payload.product_mode,
+        "day_trading_mode": payload.day_trading_mode,
+        "force_flat_before_close": payload.force_flat_before_close or payload.day_trading_mode,
+        "day_session_start_hour": payload.day_session_start_hour,
+        "day_session_end_hour": payload.day_session_end_hour,
+        "flat_cutoff_hour": payload.flat_cutoff_hour,
+        "paper_queue_limit": payload.paper_queue_limit,
+        "review_queue_limit": payload.review_queue_limit,
+        "daily_factory_policy": _day_trading_policy(payload.paper_queue_limit, payload.review_queue_limit, payload.account_size)
+        if payload.day_trading_mode
+        else {},
         "research_only": True,
         "ig_validation_required": True,
         "data_source_policy": "eodhd_primary_symbol_with_explicit_fmp_daily_fallback",
@@ -1582,30 +3364,13 @@ def _compact_source_template(source_template: dict[str, object]) -> dict[str, ob
         "interval": str(source_template.get("interval") or parameters.get("timeframe") or ""),
         "target_regime": str(source_template.get("target_regime") or parameters.get("target_regime") or ""),
         "repair_attempt_count": _safe_int(source_template.get("repair_attempt_count")),
+        "holding_period": str(source_template.get("holding_period") or parameters.get("holding_period") or ""),
+        "force_flat_before_close": bool(source_template.get("force_flat_before_close") or parameters.get("force_flat_before_close")),
+        "no_overnight": bool(source_template.get("no_overnight") or parameters.get("no_overnight")),
         "parameters": {
             str(key): value
             for key, value in parameters.items()
-            if key
-            in {
-                "confidence_quantile",
-                "direction",
-                "false_breakout_filter",
-                "lookback",
-                "max_hold_bars",
-                "min_hold_bars",
-                "min_trade_spacing",
-                "month_end_window",
-                "month_start_window",
-                "position_size",
-                "previous_day_filter",
-                "regime_filter",
-                "stop_loss_bps",
-                "take_profit_bps",
-                "threshold_bps",
-                "volatility_multiplier",
-                "weekday",
-                "z_threshold",
-            }
+            if str(key) in FROZEN_PARAMETER_KEYS
         },
     }
 
@@ -1615,6 +3380,16 @@ def _safe_int(value: object) -> int:
         return max(0, int(float(value or 0)))
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_hour(value: object, maximum: int) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(maximum, parsed))
 
 
 def _mark_market_failed(
@@ -1651,6 +3426,24 @@ def _market_response(market: MarketMapping) -> dict[str, object]:
         payload["estimated_spread_bps"] = max(market.spread_bps, share_model.dealing_spread_bps)
         payload["estimated_slippage_bps"] = max(market.slippage_bps, share_model.slippage_bps)
     return payload
+
+
+def _market_mapping_from_payload(payload: dict[str, object]) -> MarketMapping:
+    return MarketMapping(
+        str(payload.get("market_id") or ""),
+        str(payload.get("name") or payload.get("market_id") or ""),
+        str(payload.get("asset_class") or "share"),
+        str(payload.get("eodhd_symbol") or payload.get("fmp_symbol") or ""),
+        str(payload.get("ig_epic") or ""),
+        bool(payload.get("enabled", True)),
+        str(payload.get("plugin_id") or ""),
+        str(payload.get("ig_name") or payload.get("name") or ""),
+        str(payload.get("ig_search_terms") or ""),
+        str(payload.get("default_timeframe") or "5min"),
+        _safe_number(payload.get("spread_bps"), payload.get("estimated_spread_bps"), 20.0),
+        _safe_number(payload.get("slippage_bps"), payload.get("estimated_slippage_bps"), 5.0),
+        max(1, int(_safe_number(payload.get("min_backtest_bars"), 750))),
+    )
 
 
 def _cost_profile_for_market(market: MarketMapping) -> IGCostProfile:
@@ -1761,6 +3554,2353 @@ def _risk_summary() -> dict[str, object]:
     }
 
 
+def _day_trading_policy(paper_limit: int = 3, review_limit: int = 10, account_size: float = WORKING_ACCOUNT_SIZE_GBP) -> dict[str, object]:
+    return {
+        "start_mode": "manual_button",
+        "automation_status": "planned_market_open_scheduler",
+        "flow": {
+            "discovery_mode": "Find markets, regimes, and possible ideas; repair, freeze, and validate before reuse.",
+            "template_library": "Store frozen rules only: market type, regime, entry, stop, target, max hold, session rules, capital fit, and cost assumptions.",
+            "daily_paper_mode": "Scan today's eligible markets against active frozen templates only; no parameter search or new strategy invention.",
+            "review_mode": "Compare expected versus actual after close; evidence can trigger a new validation cycle but cannot silently change rules.",
+        },
+        "daily_mode_source": "active_frozen_template_library_only",
+        "strategy_generation_allowed_in_daily_mode": False,
+        "holding_period": "intraday_only",
+        "force_flat_before_close": True,
+        "overnight_positions_allowed": False,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "paper_queue_limit": max(1, min(5, int(paper_limit))),
+        "review_signal_limit": max(1, min(20, int(review_limit))),
+        "library_shape": {
+            "daily_active_paper_trades": "1-3",
+            "daily_review_signals": "5-10",
+            "per_regime_template_target": "1 primary plus 1 backup per major regime and market type",
+            "long_term_template_range": "20-50 frozen templates, with most idle on any given day",
+            "share_template_bias": "Prefer behavior templates such as liquid UK midcap trend-up pullback over one template per stock.",
+        },
+        "account_size": account_size,
+        "capital_checks": [
+            "IG tradability and EPIC match",
+            "recent IG price validation",
+            "spread and slippage",
+            "minimum deal size",
+            "margin percent and minimum margin",
+            "stop distance and planned risk",
+            "35% max margin use for the selected account",
+        ],
+        "execution_policy": "broker-safe previews and paper simulation only",
+    }
+
+
+def _scenario_summary(account_size: float = WORKING_ACCOUNT_SIZE_GBP) -> dict[str, object]:
+    latest = _latest_scenario_scan()
+    latest_config = latest.get("config") if isinstance(latest, dict) and isinstance(latest.get("config"), dict) else {}
+    recipe_cards = latest_config.get("recipe_cards") if isinstance(latest_config.get("recipe_cards"), list) else []
+    templates = [_scenario_template_summary(template) for recipe in SCENARIO_RECIPES.values() for template in _scenario_templates_for_recipe(str(recipe["id"]))]
+    build_runs = _scenario_build_runs()
+    latest_build_by_recipe = {str(item.get("recipe_id")): item for item in reversed(build_runs)}
+    recipes = []
+    for recipe in SCENARIO_RECIPES.values():
+        recipe_payload = _scenario_recipe_payload(recipe)
+        recipe_payload["latest_build"] = latest_build_by_recipe.get(str(recipe["id"]))
+        recipes.append(recipe_payload)
+    return {
+        "schema": "scenario_app_summary_v1",
+        "mode": "two_market_scenario_trainer",
+        "account_size": account_size,
+        "markets": list(SCENARIO_MARKET_IDS),
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed_in_daily_mode": False,
+        "daily_limits": {"paper_trades_total": 1, "review_signals_total": 5},
+        "recipes": recipes,
+        "templates": templates,
+        "build_runs": build_runs,
+        "counts": {
+            "recipes": len(SCENARIO_RECIPES),
+            "active_frozen_templates": len(templates),
+            "daily_paper_queue": len(latest.get("daily_paper_queue", [])) if isinstance(latest, dict) else 0,
+            "review_signals": len(latest.get("review_signals", [])) if isinstance(latest, dict) else 0,
+        },
+        "latest_scan": latest,
+        "recipe_cards": recipe_cards or _scenario_empty_recipe_cards(),
+        "daily_paper_queue": latest.get("daily_paper_queue", []) if isinstance(latest, dict) else [],
+        "review_signals": latest.get("review_signals", []) if isinstance(latest, dict) else [],
+        "paper_review": {
+            "sample_target": 20,
+            "rule": "After-close review updates evidence only; it cannot secretly change frozen rules.",
+        },
+        "reset_policy": {
+            "confirmation": "RESET_SCENARIO_APP",
+            "backs_up_before_clearing": True,
+            "clears": [
+                "research runs",
+                "trials",
+                "candidates",
+                "bars",
+                "schedules",
+                "templates",
+                "day-trading scans",
+                "IG cost profiles",
+            ],
+            "preserves": ["EODHD/FMP/IG credentials", "IG account roles", "settings/provider database", "market registry"],
+        },
+    }
+
+
+def _scenario_build_runs(limit: int = 12) -> list[dict[str, object]]:
+    builds: list[dict[str, object]] = []
+    for summary in research_store.list_runs(include_archived=False):
+        run_id = _safe_int(summary.get("id"))
+        if run_id <= 0:
+            continue
+        run = research_store.get_run(run_id)
+        if not isinstance(run, dict):
+            continue
+        config = run.get("config") if isinstance(run.get("config"), dict) else {}
+        pipeline = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
+        if pipeline.get("schema") != "scenario_recipe_pipeline_v1":
+            continue
+        recipe_id = str(pipeline.get("recipe_id") or "")
+        recipe = SCENARIO_RECIPES.get(recipe_id)
+        if recipe is None:
+            continue
+        builds.append(_scenario_build_run_payload(run, recipe))
+        if len(builds) >= limit:
+            break
+    return builds
+
+
+def _scenario_build_run_payload(run: dict[str, object], recipe: dict[str, object]) -> dict[str, object]:
+    config = run.get("config") if isinstance(run.get("config"), dict) else {}
+    pipeline = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
+    auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    market_statuses = config.get("market_statuses") if isinstance(config.get("market_statuses"), list) else []
+    status = str(run.get("status") or "unknown")
+    progress = _scenario_build_progress(status, market_statuses, auto_freeze)
+    blockers = _scenario_build_blocker_summary(auto_freeze)
+    return {
+        "run_id": run.get("id"),
+        "recipe_id": recipe.get("id"),
+        "label": recipe.get("label"),
+        "market_id": recipe.get("market_id"),
+        "created_at": run.get("created_at"),
+        "status": status,
+        "error": run.get("error") or "",
+        "progress_percent": progress,
+        "step_label": _scenario_build_step_label(status, market_statuses, auto_freeze),
+        "trial_count": run.get("trial_count", 0),
+        "passed_count": run.get("passed_count", 0),
+        "best_score": round(_safe_number(run.get("best_score")), 2),
+        "effective_search_budget": _scenario_effective_search_budget(config, market_statuses),
+        "auto_freeze": _compact_scenario_auto_freeze(auto_freeze),
+        "blocker_summary": blockers,
+        "market_statuses": [_compact_market_status(status_item) for status_item in market_statuses if isinstance(status_item, dict)],
+    }
+
+
+def _scenario_build_progress(status: str, market_statuses: list[object], auto_freeze: dict[str, object]) -> int:
+    if status in {"finished", "finished_with_warnings", "error"}:
+        return 100
+    progress = 8
+    for item in market_statuses:
+        if not isinstance(item, dict):
+            continue
+        market_status = str(item.get("status") or "")
+        if market_status == "loading":
+            progress = max(progress, 18)
+        elif market_status == "evaluating":
+            progress = max(progress, 48)
+        elif market_status == "completed":
+            progress = max(progress, 70)
+    auto_status = str(auto_freeze.get("status") or "")
+    auto_progress = {
+        "waiting_for_design_run": 12,
+        "selecting": 76,
+        "running_repair": 84,
+        "repair_skipped": 92,
+        "repair_error": 100,
+        "repair_finished": 95,
+        "repair_freeze_validated_ready": 100,
+        "repair_freeze_validated_blocked": 100,
+        "running_freeze_validation": 92,
+        "freeze_validated_ready": 100,
+        "freeze_validated_blocked": 100,
+        "freeze_validation_finished_without_trial": 100,
+        "freeze_validation_error": 100,
+        "skipped": 100,
+        "error": 100,
+    }.get(auto_status, 0)
+    return max(progress, auto_progress)
+
+
+def _scenario_build_step_label(status: str, market_statuses: list[object], auto_freeze: dict[str, object]) -> str:
+    if status == "error":
+        return "Run stopped with an error"
+    auto_status = str(auto_freeze.get("status") or "")
+    labels = {
+        "waiting_for_design_run": "Waiting for market data",
+        "selecting": "Selecting a freezeable result",
+        "running_repair": "Repairing the best near-miss",
+        "repair_skipped": "No repairable result found",
+        "repair_error": "Repair stopped with an error",
+        "repair_finished": "Repair finished",
+        "repair_freeze_validated_ready": "Template frozen and paper ready",
+        "repair_freeze_validated_blocked": "Freeze validation blocked paper readiness",
+        "running_freeze_validation": "Freeze-validating exact rules",
+        "freeze_validated_ready": "Template frozen and paper ready",
+        "freeze_validated_blocked": "Template frozen but blocked",
+        "freeze_validation_finished_without_trial": "Freeze validation produced no trial",
+        "freeze_validation_error": "Freeze validation failed",
+        "skipped": "Finished with no template frozen",
+        "error": "Automatic freeze failed",
+    }
+    if auto_status in labels:
+        return labels[auto_status]
+    for item in market_statuses:
+        if not isinstance(item, dict):
+            continue
+        market_status = str(item.get("status") or "")
+        if market_status == "evaluating":
+            budget = item.get("effective_search_budget")
+            return f"Testing {budget} candidate rules" if budget else "Testing candidate rules"
+        if market_status == "loading":
+            return "Loading 5-minute bars"
+    if status in {"finished", "finished_with_warnings"}:
+        return "Finished"
+    return "Starting"
+
+
+def _scenario_effective_search_budget(config: dict[str, object], market_statuses: list[object]) -> int:
+    for item in market_statuses:
+        if isinstance(item, dict) and _safe_int(item.get("effective_search_budget")):
+            return _safe_int(item.get("effective_search_budget"))
+    return _safe_int(config.get("search_budget"))
+
+
+def _compact_scenario_auto_freeze(auto_freeze: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": auto_freeze.get("status", ""),
+        "reason": auto_freeze.get("reason", ""),
+        "detail": auto_freeze.get("detail", ""),
+        "source_trial_id": auto_freeze.get("source_trial_id"),
+        "template_id": auto_freeze.get("template_id"),
+        "template_name": auto_freeze.get("template_name", ""),
+        "repair_run_id": auto_freeze.get("repair_run_id"),
+        "freeze_run_id": auto_freeze.get("freeze_run_id"),
+        "readiness_status": auto_freeze.get("readiness_status", ""),
+        "skip_summary": auto_freeze.get("skip_summary", {}),
+        "repair_skip_summary": auto_freeze.get("repair_skip_summary", {}),
+    }
+
+
+def _scenario_build_blocker_summary(auto_freeze: dict[str, object]) -> list[dict[str, object]]:
+    counts: dict[str, int] = {}
+    for key in ("skip_summary", "repair_skip_summary"):
+        summary = auto_freeze.get(key) if isinstance(auto_freeze.get(key), dict) else {}
+        for reason, count in summary.items():
+            counts[str(reason)] = counts.get(str(reason), 0) + _safe_int(count)
+    return [
+        {"reason": reason, "label": _readable_reason(reason), "count": count}
+        for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]
+        if count > 0
+    ]
+
+
+def _readable_reason(value: object) -> str:
+    text = str(value or "").replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text else ""
+
+
+async def _start_scenario_recipe_build(
+    recipe_id: str,
+    payload: ScenarioRecipeBuildPayload,
+    background_tasks: BackgroundTasks,
+    api_token: str,
+) -> dict[str, object]:
+    recipe = _scenario_recipe(recipe_id)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    market_id = str(recipe["market_id"])
+    cost_sync: dict[str, object] = {"status": "skipped", "profiles": []}
+    if payload.auto_sync_costs:
+        try:
+            cost_sync = await sync_ig_market_costs(
+                IGCostSyncPayload(market_ids=[market_id], product_mode=product_mode, skip_account_status=True)
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            cost_sync = {"status": "error", "error": _public_error(exc), "profiles": []}
+    run_payload = _scenario_recipe_research_payload(recipe, payload, product_mode, cost_sync)
+    selected_markets = _selected_markets([market_id])
+    run_id = research_store.create_run(
+        market_id=market_id,
+        data_source="eodhd_with_scenario_ig_cost_model",
+        status="running",
+        config=_research_run_config(run_payload, selected_markets),
+    )
+    background_tasks.add_task(_run_research_job, run_id, run_payload.model_dump(), api_token)
+    return {
+        "schema": "scenario_recipe_build_v1",
+        "status": "running",
+        "run_id": run_id,
+        "recipe": _scenario_recipe_payload(recipe),
+        "market_id": market_id,
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "cost_sync": cost_sync,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed_in_daily_mode": False,
+        "build_contract": [
+            "Build can search and repair inside discovery mode.",
+            "Only exact active frozen templates for this recipe can be used by the daily scanner.",
+            "Daily paper/live mode cannot change parameters.",
+        ],
+    }
+
+
+def _scenario_recipe_research_payload(
+    recipe: dict[str, object],
+    payload: ScenarioRecipeBuildPayload,
+    product_mode: str,
+    cost_sync: dict[str, object],
+) -> ResearchRunPayload:
+    market_id = str(recipe["market_id"])
+    recipe_id = str(recipe["id"])
+    session_window = recipe.get("session_window") if isinstance(recipe.get("session_window"), dict) else {}
+    return ResearchRunPayload(
+        market_id=market_id,
+        market_ids=[market_id],
+        start=payload.start,
+        end=payload.end,
+        interval="5min",
+        engine="adaptive_ig_v1",
+        search_preset="balanced",
+        trading_style="intraday_only",
+        objective="profit_first",
+        search_budget=max(6, min(500, int(_safe_number(recipe.get("search_budget"), 54)))),
+        risk_profile="conservative",
+        strategy_families=[str(item) for item in recipe.get("families") or [] if item],
+        product_mode=product_mode,
+        cost_stress_multiplier=max(1.0, _safe_number(recipe.get("cost_stress_multiplier"), 2.5)),
+        include_regime_scans=True,
+        regime_scan_budget_per_regime=max(1, min(96, int(_safe_number(recipe.get("regime_scan_budget_per_regime"), 6)))),
+        diagnostic_limit=TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
+        include_market_context=False,
+        target_regime=None,
+        excluded_months=[],
+        repair_mode="standard",
+        account_size=payload.account_size,
+        source_template={},
+        pipeline={
+            "schema": "scenario_recipe_pipeline_v1",
+            "recipe_id": recipe_id,
+            "recipe_label": recipe.get("label"),
+            "market_id": market_id,
+            "manual_playbook": recipe.get("manual_playbook"),
+            "families": list(recipe.get("families") or []),
+            "session": recipe.get("session"),
+            "setup": recipe.get("setup"),
+            "selected_market_ids": [market_id],
+            "cost_sync_status": cost_sync.get("status"),
+            "daily_mode_source": "active_frozen_scenario_templates_only",
+            "strategy_generation_allowed": False,
+            "auto_freeze": {
+                "enabled": True,
+                "status": "waiting_for_design_run",
+                "policy": "build_repair_once_then_freeze_validate_exact_scenario_rules",
+                "repair_enabled": True,
+                "auto_repair_count": 0,
+                "max_auto_repair_runs": 1,
+                "strategy_generation_allowed_in_daily_mode": False,
+            },
+        },
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        day_session_start_hour=_optional_hour(session_window.get("start_hour"), maximum=23),
+        day_session_end_hour=_optional_hour(session_window.get("end_hour"), maximum=24),
+        flat_cutoff_hour=22,
+        paper_queue_limit=1,
+        review_queue_limit=5,
+    )
+
+
+def _scenario_recipe(recipe_id: str) -> dict[str, object]:
+    key = str(recipe_id or "").strip()
+    recipe = SCENARIO_RECIPES.get(key)
+    if recipe is None:
+        valid = ", ".join(sorted(SCENARIO_RECIPES))
+        raise HTTPException(status_code=400, detail=f"Unknown scenario recipe. Choose one of: {valid}")
+    return dict(recipe)
+
+
+def _scenario_recipe_payload(recipe: dict[str, object]) -> dict[str, object]:
+    market_id = str(recipe["market_id"])
+    market = markets.get(market_id)
+    profile = _cost_profile_payload_for_market_id(market_id) or {}
+    templates = _scenario_templates_for_recipe(str(recipe["id"]))
+    return {
+        "id": recipe["id"],
+        "label": recipe["label"],
+        "market_id": market_id,
+        "market_name": market.name if market else market_id,
+        "role": recipe.get("role"),
+        "session": recipe.get("session"),
+        "timeframe": recipe.get("timeframe"),
+        "families": list(recipe.get("families") or []),
+        "manual_playbook": recipe.get("manual_playbook"),
+        "setup": recipe.get("setup"),
+        "session_window": dict(recipe.get("session_window") if isinstance(recipe.get("session_window"), dict) else {}),
+        "strict_gates": {
+            "max_spread_bps": recipe.get("max_spread_bps"),
+            "min_relative_volume": recipe.get("min_relative_volume"),
+            "allowed_scenarios": list(recipe.get("allowed_scenarios") or []),
+        },
+        "template_count": len(templates),
+        "active_template": _scenario_template_summary(templates[0]) if templates else None,
+        "cost_profile": _scenario_cost_summary(profile),
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
+
+
+def _scenario_template_summary(template: dict[str, object]) -> dict[str, object]:
+    parameters = _template_parameters(template)
+    return {
+        "id": template.get("id"),
+        "name": template.get("name"),
+        "recipe_id": _scenario_recipe_id_for_template(template),
+        "market_id": template.get("market_id"),
+        "interval": _template_interval(template),
+        "strategy_family": template.get("strategy_family"),
+        "promotion_tier": template.get("promotion_tier"),
+        "readiness_status": template.get("readiness_status"),
+        "robustness_score": template.get("robustness_score", 0),
+        "paper_readiness_score": (parameters.get("search_audit") or {}).get("paper_readiness_score", template.get("robustness_score", 0))
+        if isinstance(parameters.get("search_audit"), dict)
+        else template.get("robustness_score", 0),
+    }
+
+
+def _scenario_cost_summary(profile: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": "synced" if profile else "missing",
+        "confidence": profile.get("confidence", ""),
+        "validation_status": profile.get("validation_status", ""),
+        "market_status": profile.get("market_status", ""),
+        "spread_bps": profile.get("spread_bps", 0),
+        "spread_points": profile.get("spread_points"),
+        "slippage_bps": profile.get("slippage_bps", 0),
+        "min_deal_size": profile.get("min_deal_size"),
+        "min_stop_distance": profile.get("min_stop_distance"),
+        "margin_percent": profile.get("margin_percent"),
+        "updated_at": profile.get("updated_at", ""),
+    }
+
+
+def _scenario_templates_for_recipe(recipe_id: str) -> list[dict[str, object]]:
+    recipe = _scenario_recipe(recipe_id)
+    templates = [
+        template
+        for template in research_store.list_templates(limit=250)
+        if _scenario_template_matches_recipe(template, recipe)
+    ]
+    return sorted(templates, key=lambda item: (_safe_number(item.get("robustness_score")), str(item.get("updated_at") or "")), reverse=True)
+
+
+def _scenario_template_matches_recipe(template: dict[str, object], recipe: dict[str, object]) -> bool:
+    return bool(
+        template.get("status") == "active"
+        and _is_day_trading_template(template)
+        and _is_frozen_template(template)
+        and str(template.get("market_id") or _template_source_template(template).get("market_id") or "") == str(recipe["market_id"])
+        and _scenario_recipe_id_for_template(template) == str(recipe["id"])
+    )
+
+
+def _scenario_recipe_id_for_template(template: dict[str, object]) -> str:
+    parameters = _template_parameters(template)
+    source = _template_source_template(template)
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    pipeline = payload.get("pipeline") if isinstance(payload.get("pipeline"), dict) else {}
+    return str(
+        parameters.get("scenario_recipe")
+        or parameters.get("recipe_id")
+        or source.get("scenario_recipe")
+        or source.get("recipe_id")
+        or pipeline.get("recipe_id")
+        or ""
+    ).strip()
+
+
+def _latest_scenario_scan() -> dict[str, object] | None:
+    for scan in research_store.list_day_trading_scans(limit=20):
+        config = scan.get("config") if isinstance(scan.get("config"), dict) else {}
+        if config.get("schema") == "scenario_daily_scan_v1":
+            return scan
+    return None
+
+
+def _scenario_empty_recipe_cards() -> list[dict[str, object]]:
+    cards: list[dict[str, object]] = []
+    for recipe in SCENARIO_RECIPES.values():
+        profile = _cost_profile_payload_for_market_id(str(recipe["market_id"])) or {}
+        cards.append(
+            {
+                "recipe_id": recipe["id"],
+                "label": recipe["label"],
+                "market_id": recipe["market_id"],
+                "role": recipe.get("role"),
+                "session": recipe.get("session"),
+                "timeframe": recipe.get("timeframe"),
+                "setup": recipe.get("setup"),
+                "status": "not_scanned",
+                "scenario_state": "not_scanned",
+                "scenario_label": "Not scanned today",
+                "scenario_quality_score": 0,
+                "paper_ready": False,
+                "setup_detected": False,
+                "no_trade_reason": "Press Start on Today to scan current NAS100 and Gold scenarios.",
+                "blockers": [],
+                "today_tape": {},
+                "cost_profile": _scenario_cost_summary(profile),
+            }
+        )
+    return cards
+
+
+def _template_design_payload(design: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(design.get("id") or ""),
+        "label": str(design.get("label") or ""),
+        "market_type": str(design.get("market_type") or "share"),
+        "country": str(design.get("country") or "UK"),
+        "behaviour": str(design.get("behaviour") or ""),
+        "template_goal": str(design.get("template_goal") or ""),
+        "strategy_families": list(design.get("strategy_families") or []),
+        "market_filters": dict(design.get("market_filters") if isinstance(design.get("market_filters"), dict) else {}),
+        "run_defaults": dict(design.get("run_defaults") if isinstance(design.get("run_defaults"), dict) else {}),
+        "session_rules": dict(design.get("session_rules") if isinstance(design.get("session_rules"), dict) else {}),
+        "promotion_contract": list(design.get("promotion_contract") or []),
+    }
+
+
+def _manual_playbook_payload(playbook: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(playbook.get("id") or ""),
+        "label": str(playbook.get("label") or ""),
+        "description": str(playbook.get("description") or ""),
+        "families": list(playbook.get("families") or []),
+        "today_filters": {
+            "min_relative_volume": _safe_number(playbook.get("min_relative_volume")),
+            "max_spread_bps": _safe_number(playbook.get("max_spread_bps")),
+            "min_opening_break_bps": _safe_number(playbook.get("min_opening_break_bps")),
+            "min_trend_bps": _safe_number(playbook.get("min_trend_bps")),
+            "min_sweep_bps": _safe_number(playbook.get("min_sweep_bps")),
+            "max_vwap_distance_against_bps": _safe_number(playbook.get("max_vwap_distance_against_bps")),
+            "require_vwap_alignment": bool(playbook.get("require_vwap_alignment")),
+        },
+    }
+
+
+def _midcap_template_design(design_id: str) -> dict[str, object]:
+    key = str(design_id or "").strip()
+    design = MIDCAP_TEMPLATE_DESIGNS.get(key)
+    if design is None:
+        valid = ", ".join(sorted(MIDCAP_TEMPLATE_DESIGNS))
+        raise HTTPException(status_code=400, detail=f"Unknown template design. Choose one of: {valid}")
+    return _template_design_payload(design)
+
+
+def _midcap_design_country_code(country: object) -> str:
+    _exchange, country_code = country_exchange_hint(str(country or ""))
+    if country_code == "GB":
+        return "UK"
+    return country_code or str(country or "").strip().upper()
+
+
+def _validate_midcap_design_country(design: dict[str, object], country: str) -> str:
+    requested_country = str(country or design.get("country") or "UK")
+    design_country = _midcap_design_country_code(design.get("country"))
+    requested_country_code = _midcap_design_country_code(requested_country)
+    if design_country and requested_country_code and design_country != requested_country_code:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{design.get('label')} is a {design_country} template design. "
+                f"Switch the market universe to {design_country} or choose a {requested_country_code} template design."
+            ),
+        )
+    return requested_country
+
+
+def _midcap_pipeline_market_cap(requested_max_markets: int) -> int:
+    return max(1, min(TWO_VCPU_MIDCAP_MARKET_CAP, int(requested_max_markets or TWO_VCPU_MIDCAP_MARKET_CAP)))
+
+
+def _midcap_pipeline_discovery_limit(requested_limit: int, run_market_cap: int) -> int:
+    target = max(TWO_VCPU_MIDCAP_DISCOVERY_LIMIT, run_market_cap * 8)
+    return max(run_market_cap, min(int(requested_limit or target), target))
+
+
+def _midcap_pipeline_server_profile(
+    requested_max_markets: int,
+    requested_limit: int,
+    run_market_cap: int,
+    discovery_limit: int,
+) -> dict[str, object]:
+    return {
+        "schema": "guided_midcap_2vcpu_profile_v1",
+        "reason": "Keep guided scans responsive on the 2 vCPU server; use repair/freeze for deeper follow-up once a lead is worth it.",
+        "requested_max_markets": requested_max_markets,
+        "run_market_cap": run_market_cap,
+        "requested_discovery_limit": requested_limit,
+        "discovery_limit": discovery_limit,
+        "search_budget_per_market": TWO_VCPU_MIDCAP_SEARCH_BUDGET,
+        "regime_scan_budget_per_regime": TWO_VCPU_MIDCAP_REGIME_BUDGET,
+        "diagnostic_limit_per_market": TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
+        "market_context": "skipped_for_guided_pilot",
+    }
+
+
+def _midcap_broker_validation_mode(value: str) -> str:
+    normalized = str(value or "research_first").strip().lower()
+    if normalized in {"validate_before_research", "strict_ig_first", "ig_first"}:
+        return "validate_before_research"
+    return "research_first"
+
+
+async def _rank_midcap_candidates_for_day_trading(
+    candidates: list[dict[str, object]],
+    api_token: str,
+    end: str,
+    design: dict[str, object],
+    run_market_cap: int,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    if not candidates or not api_token:
+        return candidates, {"status": "skipped", "reason": "missing_candidates_or_eodhd_token"}
+    provider = EODHDProvider(api_token)
+    limit = min(len(candidates), max(run_market_cap * 6, TWO_VCPU_MIDCAP_PREFLIGHT_LIMIT))
+    checked: list[dict[str, object]] = []
+    provider_errors: list[dict[str, object]] = []
+    for candidate in candidates[:limit]:
+        mapping_payload = candidate.get("market_mapping")
+        if not isinstance(mapping_payload, dict):
+            continue
+        mapping = _market_mapping_from_payload(mapping_payload)
+        try:
+            preflight = await _midcap_day_trading_preflight(provider, candidate, mapping, end, design)
+        except Exception as exc:
+            provider_errors.append({"market_id": mapping.market_id, "detail": _public_error(exc)})
+            preflight = {
+                "status": "unavailable",
+                "blockers": [],
+                "warnings": ["day_trading_preflight_unavailable"],
+                "detail": _public_error(exc),
+                "rank_score": _safe_number(candidate.get("score")),
+            }
+        checked.append({**candidate, "day_trading_preflight": preflight, "day_trading_rank_score": preflight.get("rank_score", candidate.get("score", 0))})
+    if not checked:
+        return candidates, {"status": "skipped", "reason": "no_preflight_candidates"}
+    passed = [
+        candidate
+        for candidate in checked
+        if (candidate.get("day_trading_preflight") or {}).get("status") == "passed"
+    ]
+    blocked = [
+        candidate
+        for candidate in checked
+        if (candidate.get("day_trading_preflight") or {}).get("status") == "blocked"
+    ]
+    unavailable_count = sum(1 for candidate in checked if (candidate.get("day_trading_preflight") or {}).get("status") == "unavailable")
+    ranked_pool = passed if passed else checked if unavailable_count == len(checked) else []
+    ranked = sorted(ranked_pool, key=lambda item: (_safe_number(item.get("day_trading_rank_score")), _safe_number(item.get("score"))), reverse=True)
+    summary = {
+        "status": "completed",
+        "checked_count": len(checked),
+        "passed_count": len(passed),
+        "blocked_count": len(blocked),
+        "unavailable_count": unavailable_count,
+        "fallback_used": unavailable_count == len(checked) and len(checked) > 0,
+        "blocked_preview": [
+            {
+                "market_id": candidate.get("market_id"),
+                "name": candidate.get("name"),
+                "blockers": (candidate.get("day_trading_preflight") or {}).get("blockers", []),
+                "avg_range_bps_20d": (candidate.get("day_trading_preflight") or {}).get("avg_range_bps_20d"),
+                "move_to_cost_ratio": (candidate.get("day_trading_preflight") or {}).get("move_to_cost_ratio"),
+                "recent_action_bps": (candidate.get("day_trading_preflight") or {}).get("recent_action_bps"),
+            }
+            for candidate in blocked[:5]
+        ],
+        "provider_errors": provider_errors[:5],
+        "policy": "Require recent action, enough daily range, and enough movement versus stressed public costs before spending a research slot.",
+    }
+    return ranked, summary
+
+
+async def _midcap_day_trading_preflight(
+    provider: EODHDProvider,
+    candidate: dict[str, object],
+    mapping: MarketMapping,
+    end: str,
+    design: dict[str, object],
+) -> dict[str, object]:
+    end_date = _parse_iso_date(end) or date.today()
+    start_date = end_date - timedelta(days=120)
+    bars = await provider.historical_bars(mapping.eodhd_symbol, "1day", start_date.isoformat(), end_date.isoformat())
+    clean = [bar for bar in bars if bar.close > 0 and bar.high >= bar.low]
+    if len(clean) < 35:
+        return {
+            "status": "blocked",
+            "blockers": ["not_enough_recent_daily_bars_for_day_trading_preflight"],
+            "warnings": [],
+            "bar_count": len(clean),
+            "rank_score": _safe_number(candidate.get("score")) - 50.0,
+        }
+    recent = clean[-20:]
+    recent5 = clean[-5:]
+    avg_range_bps = sum(((bar.high - bar.low) / bar.close) * 10_000 for bar in recent) / len(recent)
+    recent_range_bps = sum(((bar.high - bar.low) / bar.close) * 10_000 for bar in recent5) / len(recent5)
+    trend_20d_bps = ((clean[-1].close - clean[-21].close) / clean[-21].close) * 10_000 if clean[-21].close else 0.0
+    trend_5d_bps = ((clean[-1].close - clean[-6].close) / clean[-6].close) * 10_000 if clean[-6].close else 0.0
+    cost_stress = _safe_number((design.get("run_defaults") or {}).get("cost_stress_multiplier"), 2.5) if isinstance(design.get("run_defaults"), dict) else 2.5
+    estimated_spread_bps = _safe_number(candidate.get("estimated_spread_bps"), mapping.spread_bps)
+    estimated_slippage_bps = _safe_number(candidate.get("estimated_slippage_bps"), mapping.slippage_bps)
+    stressed_cost_bps = estimated_spread_bps + estimated_slippage_bps * max(1.0, cost_stress)
+    move_to_cost = avg_range_bps / max(stressed_cost_bps, 1.0)
+    recent_action_bps = max(abs(trend_5d_bps), recent_range_bps)
+    country = str(candidate.get("country") or design.get("country") or "").upper()
+    min_range_bps = 175.0 if country == "US" else 135.0
+    min_move_to_cost = 4.25 if country == "US" else 3.75
+    min_recent_action_bps = 125.0 if country == "US" else 100.0
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if avg_range_bps < min_range_bps:
+        blockers.append("recent_range_too_low_for_day_trading")
+    if move_to_cost < min_move_to_cost:
+        blockers.append("move_to_cost_too_low_for_day_trading")
+    if recent_action_bps < min_recent_action_bps:
+        blockers.append("no_recent_action_for_day_trading")
+    if abs(trend_20d_bps) < 100 and recent_range_bps < min_range_bps:
+        warnings.append("flat_recent_daily_structure")
+    action_score = (
+        min(35.0, avg_range_bps / max(min_range_bps, 1.0) * 16.0)
+        + min(30.0, move_to_cost * 4.0)
+        + min(20.0, abs(trend_20d_bps) / 60.0)
+        + min(15.0, recent_action_bps / max(min_recent_action_bps, 1.0) * 8.0)
+    )
+    blocker_penalty = 80.0 if blockers else 0.0
+    rank_score = _safe_number(candidate.get("score")) + action_score - blocker_penalty
+    return {
+        "status": "passed" if not blockers else "blocked",
+        "blockers": blockers,
+        "warnings": warnings,
+        "bar_count": len(clean),
+        "avg_range_bps_20d": round(avg_range_bps, 4),
+        "recent_range_bps_5d": round(recent_range_bps, 4),
+        "trend_20d_bps": round(trend_20d_bps, 4),
+        "trend_5d_bps": round(trend_5d_bps, 4),
+        "stressed_cost_bps": round(stressed_cost_bps, 4),
+        "move_to_cost_ratio": round(move_to_cost, 4),
+        "recent_action_bps": round(recent_action_bps, 4),
+        "rank_score": round(rank_score, 4),
+    }
+
+
+async def _run_midcap_template_pipeline(
+    payload: MidcapTemplatePipelinePayload,
+    background_tasks: BackgroundTasks,
+    api_token: str,
+) -> dict[str, object]:
+    design = _midcap_template_design(payload.design_id)
+    requested_country = _validate_midcap_design_country(design, payload.country)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    broker_validation_mode = _midcap_broker_validation_mode(payload.broker_validation_mode)
+    research_first = broker_validation_mode == "research_first"
+    run_market_cap = _midcap_pipeline_market_cap(payload.max_markets)
+    discovery_limit = _midcap_pipeline_discovery_limit(payload.limit, run_market_cap)
+    discovery = await discover_midcap_markets(
+        country=requested_country,
+        product_mode=product_mode,
+        limit=discovery_limit,
+        min_market_cap=payload.min_market_cap,
+        max_market_cap=payload.max_market_cap,
+        min_volume=payload.min_volume,
+        max_spread_bps=payload.max_spread_bps,
+        account_size=payload.account_size,
+        verify_ig=not research_first,
+        require_ig_catalogue=not research_first,
+    )
+    candidates = list(discovery.get("candidates") or [])
+    eligible = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and candidate.get("eligible")
+        and (research_first or candidate.get("ig_status") == "ig_matched")
+        and isinstance(candidate.get("market_mapping"), dict)
+    ]
+    eligible = sorted(eligible, key=lambda item: (_safe_number(item.get("score")), _safe_number(item.get("volume"))), reverse=True)
+    day_trading_preflight: dict[str, object] = {"status": "skipped"}
+    if research_first:
+        eligible, day_trading_preflight = await _rank_midcap_candidates_for_day_trading(
+            eligible,
+            api_token,
+            payload.end,
+            design,
+            run_market_cap,
+        )
+    selected_candidates = eligible[:run_market_cap]
+    selected_candidate_ids = {str(candidate.get("market_id") or "") for candidate in selected_candidates if isinstance(candidate, dict)}
+    enriched_candidates_by_id = {
+        str(candidate.get("market_id") or ""): candidate
+        for candidate in eligible
+        if isinstance(candidate, dict) and str(candidate.get("market_id") or "")
+    }
+    installed_markets: list[dict[str, object]] = []
+    selected_market_ids: list[str] = []
+    for candidate in selected_candidates:
+        mapping_payload = candidate.get("market_mapping")
+        if not isinstance(mapping_payload, dict):
+            continue
+        mapping = _market_mapping_from_payload(mapping_payload)
+        if payload.auto_install:
+            markets.upsert(mapping)
+        elif markets.get(mapping.market_id) is None:
+            continue
+        selected_market_ids.append(mapping.market_id)
+        installed_markets.append(
+            {
+                "market_id": mapping.market_id,
+                "name": mapping.name,
+                "score": candidate.get("score", 0),
+                "market_cap": candidate.get("market_cap", 0),
+                "volume": candidate.get("volume", 0),
+                "estimated_spread_bps": candidate.get("estimated_spread_bps", mapping.spread_bps),
+                "estimated_slippage_bps": candidate.get("estimated_slippage_bps", mapping.slippage_bps),
+                "day_trading_preflight": candidate.get("day_trading_preflight", {}),
+                "day_trading_rank_score": candidate.get("day_trading_rank_score", candidate.get("score", 0)),
+                "ig_epic": mapping.ig_epic,
+                "market_mapping": _market_response(mapping),
+            }
+        )
+    existing_validated_market_ids = _price_validated_market_ids_from_store(selected_market_ids)
+    cost_sync: dict[str, object] = {
+        "status": "deferred_research_first" if research_first and selected_market_ids else "skipped",
+        "profile_count": 0,
+        "price_validated_count": len(existing_validated_market_ids),
+        "ig_rate_limited": False,
+        "broker_validation_mode": broker_validation_mode,
+        "note": (
+            "Guided research-first mode does not call IG during discovery. It reuses cached price-validated profiles and leaves new markets research-only until finalist validation."
+            if research_first and selected_market_ids
+            else ""
+        ),
+    }
+    run_ready_market_ids = [market_id for market_id in selected_market_ids if market_id in existing_validated_market_ids]
+    research_market_ids = list(selected_market_ids)
+    if payload.auto_sync_costs and selected_market_ids and not research_first:
+        try:
+            cost_sync_result = await sync_ig_market_costs(
+                IGCostSyncPayload(market_ids=selected_market_ids, product_mode=product_mode, skip_account_status=True)
+            )
+            cost_sync = {
+                "status": cost_sync_result.get("status", "synced"),
+                "profile_count": cost_sync_result.get("profile_count", 0),
+                "price_validated_count": cost_sync_result.get("price_validated_count", 0),
+                "ig_rate_limited": cost_sync_result.get("ig_rate_limited", False),
+                "price_validation_rate_limited": cost_sync_result.get("price_validation_rate_limited", False),
+                "account_status_rate_limited": cost_sync_result.get("account_status_rate_limited", False),
+                "profiles": [
+                    {
+                        "market_id": profile.get("market_id"),
+                        "confidence": profile.get("confidence"),
+                        "validation_status": profile.get("validation_status"),
+                        "spread_bps": profile.get("spread_bps"),
+                        "slippage_bps": profile.get("slippage_bps"),
+                        "min_deal_size": profile.get("min_deal_size"),
+                        "margin_percent": profile.get("margin_percent"),
+                        "notes": list(profile.get("notes") or [])[-3:],
+                    }
+                    for profile in list(cost_sync_result.get("profiles") or [])[: payload.max_markets]
+                    if isinstance(profile, dict)
+                ],
+            }
+            validated_market_ids = _price_validated_cost_profile_market_ids(cost_sync_result)
+            run_ready_market_ids = [market_id for market_id in selected_market_ids if market_id in validated_market_ids]
+            research_market_ids = list(run_ready_market_ids)
+        except HTTPException as exc:
+            cost_sync = {"status": "error", "profile_count": 0, "error": str(exc.detail)}
+            run_ready_market_ids = []
+            research_market_ids = []
+        except Exception as exc:
+            cost_sync = {"status": "error", "profile_count": 0, "error": _public_error(exc)}
+            run_ready_market_ids = []
+            research_market_ids = []
+    research_run_id: int | None = None
+    run_payload: ResearchRunPayload | None = None
+    if payload.auto_start_run and research_market_ids:
+        run_payload = _midcap_template_research_payload(payload, design, research_market_ids, product_mode, cost_sync, run_ready_market_ids)
+        selected_markets = _selected_markets(research_market_ids)
+        run_market_id = selected_markets[0].market_id if len(selected_markets) == 1 else "MULTI"
+        research_run_id = research_store.create_run(
+            market_id=run_market_id,
+            data_source="eodhd_with_ig_cost_model" if run_ready_market_ids else "eodhd_research_first_public_cost_model",
+            status="running",
+            config=_research_run_config(run_payload, selected_markets),
+        )
+        background_tasks.add_task(_run_research_job, research_run_id, run_payload.model_dump(), api_token)
+    rejected: list[dict[str, object]] = []
+    for raw_candidate in candidates:
+        if not isinstance(raw_candidate, dict):
+            continue
+        market_id = str(raw_candidate.get("market_id") or "")
+        if market_id in selected_candidate_ids:
+            continue
+        candidate = enriched_candidates_by_id.get(market_id, raw_candidate)
+        rejected.append(
+            {
+                "market_id": candidate.get("market_id"),
+                "name": candidate.get("name"),
+                "ig_status": candidate.get("ig_status"),
+                "blockers": candidate.get("blockers", []),
+                "warnings": candidate.get("warnings", []),
+                "score": candidate.get("score", 0),
+                "day_trading_preflight": candidate.get("day_trading_preflight", {}),
+                "day_trading_rank_score": candidate.get("day_trading_rank_score", candidate.get("score", 0)),
+            }
+        )
+        if len(rejected) >= 8:
+            break
+    status = (
+        "running"
+        if research_run_id is not None and run_ready_market_ids
+        else "running_research_only"
+        if research_run_id is not None
+        else "blocked_price_validation"
+        if selected_market_ids and payload.auto_sync_costs and not run_ready_market_ids and not research_first
+        else "ready_without_run"
+        if selected_market_ids
+        else "blocked_no_actionable_midcaps"
+        if research_first and day_trading_preflight.get("status") == "completed" and int(_safe_number(day_trading_preflight.get("passed_count"))) == 0
+        else "blocked_no_eligible_midcaps"
+    )
+    return {
+        "schema": "midcap_template_pipeline_v1",
+        "status": status,
+        "design": design,
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "strategy_generation_allowed_in_daily_mode": False,
+        "design_mode": "research_discovery_only",
+        "broker_validation_mode": broker_validation_mode,
+        "research_cost_mode": "public_proxy_until_ig_finalist_validation" if research_first else "ig_price_validated_before_research",
+        "server_profile": _midcap_pipeline_server_profile(payload.max_markets, payload.limit, run_market_cap, discovery_limit),
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "discovery": {
+            "schema": discovery.get("schema"),
+            "country": discovery.get("country"),
+            "data_source": discovery.get("data_source"),
+            "eodhd_error": discovery.get("eodhd_error"),
+            "fmp_error": discovery.get("fmp_error"),
+            "source_errors": discovery.get("source_errors", []),
+            "ig_status": discovery.get("ig_status"),
+            "candidate_count": discovery.get("candidate_count", 0),
+            "eligible_count": discovery.get("eligible_count", 0),
+            "blocked_count": discovery.get("blocked_count", 0),
+            "blocker_counts": discovery.get("blocker_counts", {}),
+            "criteria": discovery.get("criteria", {}),
+        },
+        "day_trading_preflight": day_trading_preflight,
+        "selected_markets": installed_markets,
+        "research_market_ids": research_market_ids,
+        "run_ready_market_ids": run_ready_market_ids,
+        "rejected_candidates": rejected,
+        "cost_sync": cost_sync,
+        "research_run_id": research_run_id,
+        "research_run_payload": run_payload.model_dump() if run_payload is not None else None,
+        "auto_freeze_policy": {
+            "enabled": bool(research_run_id and run_ready_market_ids),
+            "max_freeze_runs": 1,
+            "selection": "best IG-price-validated intraday lead with positive OOS, robust costs, and no fragile-evidence blockers",
+            "validation": "one frozen-validation run with search_budget=1 and no parameter hunting",
+            "blocked_reason": "" if run_ready_market_ids else "research_only_until_top_candidates_are_ig_price_validated",
+        },
+        "promotion_pipeline": _midcap_template_promotion_pipeline(status, research_run_id, str(cost_sync.get("status") or "skipped")),
+        "next_actions": [
+            "Open the research run after it finishes, then IG-validate only the top finalists before Make tradeable/Freeze." if research_run_id and not run_ready_market_ids else "Open the research run after it finishes to see the Auto Freeze status." if research_run_id else "Loosen the watchlist filters or choose a different design.",
+            "If Auto Freeze is blocked, use Make tradeable or Repair remaining on the best non-terminal lead.",
+            "Daily paper mode still uses only active frozen templates; rejected discovery leads will not fire.",
+        ],
+    }
+
+
+def _price_validated_cost_profile_market_ids(cost_sync_result: dict[str, object]) -> set[str]:
+    output: set[str] = set()
+    for profile in cost_sync_result.get("profiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        confidence = str(profile.get("confidence") or "")
+        market_id = str(profile.get("market_id") or "").strip()
+        if market_id and confidence in PRICE_VALIDATED_COST_CONFIDENCES:
+            output.add(market_id)
+    return output
+
+
+def _price_validated_market_ids_from_store(market_ids: list[str]) -> set[str]:
+    output: set[str] = set()
+    for market_id in market_ids:
+        profile = _cost_profile_payload_for_market_id(market_id)
+        if _is_price_validated_cost_profile(profile):
+            output.add(market_id)
+    return output
+
+
+def _midcap_template_research_payload(
+    payload: MidcapTemplatePipelinePayload,
+    design: dict[str, object],
+    market_ids: list[str],
+    product_mode: str,
+    cost_sync: dict[str, object],
+    broker_validated_market_ids: list[str] | None = None,
+) -> ResearchRunPayload:
+    defaults = design.get("run_defaults") if isinstance(design.get("run_defaults"), dict) else {}
+    validated_ids = list(broker_validated_market_ids or [])
+    auto_freeze_enabled = bool(validated_ids)
+    broker_validation_mode = _midcap_broker_validation_mode(payload.broker_validation_mode)
+    return ResearchRunPayload(
+        market_id=market_ids[0],
+        market_ids=market_ids,
+        start=payload.start,
+        end=payload.end,
+        interval=str(defaults.get("interval") or "5min"),
+        engine="adaptive_ig_v1",
+        search_preset=str(defaults.get("search_preset") or "balanced"),
+        trading_style="intraday_only",
+        objective=str(defaults.get("objective") or "profit_first"),
+        search_budget=max(6, min(500, int(_safe_number(defaults.get("search_budget"), 54)))),
+        risk_profile=str(defaults.get("risk_profile") or "conservative"),
+        strategy_families=[str(item) for item in list(design.get("strategy_families") or []) if item],
+        product_mode=product_mode,
+        cost_stress_multiplier=max(1.0, _safe_number(defaults.get("cost_stress_multiplier"), 2.5)),
+        include_regime_scans=True,
+        regime_scan_budget_per_regime=max(1, min(96, int(_safe_number(defaults.get("regime_scan_budget_per_regime"), 12)))),
+        diagnostic_limit=TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
+        include_market_context=False,
+        target_regime=None,
+        excluded_months=[],
+        repair_mode="standard",
+        account_size=payload.account_size,
+        source_template={},
+        pipeline={
+            "schema": "midcap_template_pipeline_v1",
+            "design_id": design.get("id"),
+            "design_label": design.get("label"),
+            "country": _validate_midcap_design_country(design, payload.country),
+            "product_mode": product_mode,
+            "broker_validation_mode": broker_validation_mode,
+            "research_cost_mode": "public_proxy_until_ig_finalist_validation" if broker_validation_mode == "research_first" else "ig_price_validated_before_research",
+            "selected_market_ids": market_ids,
+            "broker_validated_market_ids": validated_ids,
+            "auto_install": payload.auto_install,
+            "auto_sync_costs": payload.auto_sync_costs,
+            "auto_start_run": payload.auto_start_run,
+            "cost_sync_status": cost_sync.get("status"),
+            "server_profile": "guided_midcap_2vcpu_profile_v1",
+            "diagnostic_limit_per_market": TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
+            "auto_freeze": {
+                "enabled": auto_freeze_enabled,
+                "status": "waiting_for_design_run" if auto_freeze_enabled else "research_only_awaiting_ig_finalist_validation",
+                "policy": "save_best_oos_positive_ig_validated_intraday_lead_then_one_trial_frozen_validation",
+                "max_freeze_runs": 1,
+                "strategy_generation_allowed": False,
+                "blocked_reason": "" if auto_freeze_enabled else "No shortlisted market has a cached IG price-validated cost profile yet.",
+            },
+            "promotion_required": ["auto_save_best_freezeable_lead", "freeze_validate_exact_rules", "manual_repair_if_blocked"],
+            "daily_mode_source": "active_frozen_template_library_only",
+        },
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        paper_queue_limit=3,
+        review_queue_limit=10,
+    )
+
+
+def _midcap_template_promotion_pipeline(status: str, research_run_id: int | None, cost_sync_status: str) -> list[dict[str, object]]:
+    no_eligible = status == "blocked_no_eligible_midcaps"
+    price_blocked = status == "blocked_price_validation"
+    research_only = status == "running_research_only"
+    run_started = research_run_id is not None
+    return [
+        {
+            "step": "discover_ig_midcaps",
+            "status": "completed" if not no_eligible else "blocked",
+            "detail": "Provider midcap universe filtered through liquidity, turnover, and account-fit checks; guided research-first mode does not spend IG calls here.",
+        },
+        {
+            "step": "sync_ig_costs",
+            "status": "blocked" if no_eligible or price_blocked else cost_sync_status,
+            "detail": "Reuses cached IG price-validated cost profiles. Fresh IG validation is deferred until only the top finalists need broker checks.",
+        },
+        {
+            "step": "run_intraday_design_search",
+            "status": "running_research_only" if research_only else "running" if run_started else "blocked" if no_eligible or price_blocked else "waiting",
+            "detail": "Runs the selected behaviour design on 5-minute bars with no overnight holding; unvalidated markets remain research-only.",
+            "run_id": research_run_id,
+        },
+        {
+            "step": "ig_validate_finalists",
+            "status": "waiting_for_research_leads" if research_only else "completed" if run_started else "waiting",
+            "detail": "After research ranks the shortlist, validate only the best 1-3 finalists with IG EPIC, recent price, min size, margin, and stop-distance checks.",
+        },
+        {
+            "step": "auto_save_best_freezeable_lead",
+            "status": "blocked_until_ig_validation" if research_only else "waiting_for_finished_run" if run_started else "waiting",
+            "detail": "When the design run finishes, the backend only saves leads with positive OOS, robust costs, and no fragile-evidence blockers.",
+        },
+        {
+            "step": "auto_freeze_validate_exact_rules",
+            "status": "blocked_until_ig_validation" if research_only else "waiting_for_saved_template" if run_started else "waiting",
+            "detail": "Launches one no-search frozen-validation run; failed or blocked templates stay out of daily paper.",
+        },
+    ]
+
+
+async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_token: str) -> dict[str, object]:
+    trading_date = _scanner_trading_date(payload.trading_date)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    selected_markets = _selected_markets(payload.market_ids) if payload.market_ids else []
+    templates = [
+        template
+        for template in research_store.list_templates(limit=250)
+        if template.get("status") == "active" and _is_day_trading_template(template) and _is_frozen_template(template)
+    ]
+    provider = EODHDProvider(api_token)
+    bars_cache: dict[tuple[str, str], list[object]] = {}
+    review_candidates: list[dict[str, object]] = []
+    unsuitable: list[dict[str, object]] = []
+    no_setup: list[dict[str, object]] = []
+    scanned_pairs = 0
+    seen_pairs: set[tuple[int, str]] = set()
+    market_statuses: list[dict[str, object]] = []
+    playbook_counts: dict[str, int] = {}
+    tape_blocker_counts: dict[str, int] = {}
+    for template in templates:
+        for market in _scanner_markets_for_template(template, selected_markets, payload.max_markets):
+            pair_key = (int(template.get("id") or 0), market.market_id)
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            scanned_pairs += 1
+            row = await _evaluate_daily_template_match(
+                provider,
+                template,
+                market,
+                trading_date,
+                payload.lookback_days,
+                payload.account_size,
+                product_mode,
+                bars_cache,
+            )
+            playbook = row.get("manual_playbook") if isinstance(row.get("manual_playbook"), dict) else {}
+            playbook_id = str(playbook.get("id") or "unknown")
+            playbook_counts[playbook_id] = playbook_counts.get(playbook_id, 0) + 1
+            for blocker in row.get("today_filter_blockers") or []:
+                key = str(blocker or "")
+                if key:
+                    tape_blocker_counts[key] = tape_blocker_counts.get(key, 0) + 1
+            market_statuses.append(
+                {
+                    "template_id": template.get("id"),
+                    "template_name": template.get("name"),
+                    "market_id": market.market_id,
+                    "status": row.get("status"),
+                    "bar_count": row.get("bar_count", 0),
+                    "reason": row.get("unsuitable_reason") or row.get("no_setup_reason") or "",
+                }
+            )
+            if row.get("unsuitable"):
+                unsuitable.append(row)
+            elif row.get("setup_detected"):
+                review_candidates.append(row)
+            else:
+                no_setup.append(row)
+    review_signals = sorted(review_candidates, key=_daily_scan_signal_rank, reverse=True)[: payload.review_limit]
+    daily_paper_queue = [item for item in review_signals if item.get("paper_ready")][: payload.paper_limit]
+    scan_status = "ready_queue" if daily_paper_queue else "no_paper_setups"
+    config: dict[str, object] = {
+        "schema": "daily_template_scanner_config_v1",
+        "trading_date": trading_date.isoformat(),
+        "market_ids": [market.market_id for market in selected_markets],
+        "product_mode": product_mode,
+        "account_size": payload.account_size,
+        "paper_limit": payload.paper_limit,
+        "review_limit": payload.review_limit,
+        "lookback_days": payload.lookback_days,
+        "max_markets": payload.max_markets,
+        "template_count": len(templates),
+        "scanned_template_market_pairs": scanned_pairs,
+        "no_setup_count": len(no_setup),
+        "manual_playbook_counts": playbook_counts,
+        "today_filter_blocker_counts": tape_blocker_counts,
+        "no_setup_sample": no_setup[: min(10, payload.review_limit)],
+        "market_statuses": market_statuses,
+        "strategy_generation_allowed": False,
+    }
+    saved = research_store.save_day_trading_scan(
+        trading_date=trading_date.isoformat(),
+        status=scan_status,
+        account_size=payload.account_size,
+        product_mode=product_mode,
+        config=config,
+        daily_paper_queue=daily_paper_queue,
+        review_signals=review_signals,
+        unsuitable=unsuitable[: payload.review_limit],
+    )
+    return {
+        "schema": "daily_template_scanner_v1",
+        "scan_id": saved["id"],
+        "created_at": saved["created_at"],
+        "trading_date": trading_date.isoformat(),
+        "status": scan_status,
+        "mode": "manual",
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_template_library_only",
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "counts": {
+            "active_frozen_templates": len(templates),
+            "scanned_template_market_pairs": scanned_pairs,
+            "daily_paper_queue": len(daily_paper_queue),
+            "review_signals": len(review_signals),
+            "unsuitable": len(unsuitable),
+            "no_setup": len(no_setup),
+            "manual_playbooks": len([key for key, count in playbook_counts.items() if count > 0]),
+            "today_filter_blockers": len(tape_blocker_counts),
+        },
+        "daily_paper_queue": daily_paper_queue,
+        "review_signals": review_signals,
+        "unsuitable": unsuitable[: payload.review_limit],
+        "no_setup_sample": no_setup[: min(10, payload.review_limit)],
+        "manual_playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
+        "latest_scan": saved,
+    }
+
+
+async def _run_scenario_scanner(payload: ScenarioScannerPayload, api_token: str) -> dict[str, object]:
+    trading_date = _scanner_trading_date(payload.trading_date)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    paper_limit = 1
+    review_limit = max(1, min(5, int(payload.review_limit)))
+    provider = EODHDProvider(api_token)
+    bars_cache: dict[tuple[str, str], list[object]] = {}
+    recipe_cards: list[dict[str, object]] = []
+    review_candidates: list[dict[str, object]] = []
+    unsuitable: list[dict[str, object]] = []
+    no_setup: list[dict[str, object]] = []
+    blocker_counts: dict[str, int] = {}
+    scanned_pairs = 0
+
+    for recipe in SCENARIO_RECIPES.values():
+        market = markets.get(str(recipe["market_id"]))
+        if market is None:
+            row = _scenario_missing_market_row(recipe, trading_date, product_mode)
+        else:
+            templates = _scenario_templates_for_recipe(str(recipe["id"]))
+            template = templates[0] if templates else None
+            if template is None:
+                row = await _scenario_no_template_row(provider, recipe, market, trading_date, payload.lookback_days, product_mode, bars_cache)
+            else:
+                scanned_pairs += 1
+                row = await _evaluate_daily_template_match(
+                    provider,
+                    template,
+                    market,
+                    trading_date,
+                    payload.lookback_days,
+                    payload.account_size,
+                    product_mode,
+                    bars_cache,
+                )
+                row = _scenario_apply_daily_gate(row, recipe, market)
+        recipe_cards.append(_scenario_card_from_row(recipe, row))
+        for blocker in row.get("scenario_blockers") or row.get("today_filter_blockers") or []:
+            key = str(blocker or "")
+            if key:
+                blocker_counts[key] = blocker_counts.get(key, 0) + 1
+        if row.get("unsuitable"):
+            unsuitable.append(row)
+        elif row.get("setup_detected") or row.get("eligible_for_review"):
+            review_candidates.append(row)
+        else:
+            no_setup.append(row)
+
+    review_signals = sorted(review_candidates, key=_scenario_signal_rank, reverse=True)[:review_limit]
+    daily_paper_queue = [item for item in review_signals if item.get("paper_ready")][:paper_limit]
+    paper_ids = {id(item) for item in daily_paper_queue}
+    for item in review_signals:
+        if id(item) not in paper_ids and item.get("paper_ready"):
+            item["paper_ready"] = False
+            item["paper_queue_status"] = "review_only_daily_limit"
+            item["no_setup_reason"] = "Only one paper preview is allowed per day; this was kept for review."
+
+    scan_status = "ready_queue" if daily_paper_queue else "review_only_no_paper" if review_signals else "no_trade_day"
+    config: dict[str, object] = {
+        "schema": "scenario_daily_scan_v1",
+        "trading_date": trading_date.isoformat(),
+        "market_ids": list(SCENARIO_MARKET_IDS),
+        "product_mode": product_mode,
+        "account_size": payload.account_size,
+        "paper_limit": paper_limit,
+        "review_limit": review_limit,
+        "lookback_days": payload.lookback_days,
+        "recipe_count": len(SCENARIO_RECIPES),
+        "scanned_template_market_pairs": scanned_pairs,
+        "recipe_cards": recipe_cards,
+        "no_setup_count": len(no_setup),
+        "scenario_blocker_counts": blocker_counts,
+        "no_setup_sample": no_setup[:review_limit],
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_scenario_templates_only",
+    }
+    saved = research_store.save_day_trading_scan(
+        trading_date=trading_date.isoformat(),
+        status=scan_status,
+        account_size=payload.account_size,
+        product_mode=product_mode,
+        config=config,
+        daily_paper_queue=daily_paper_queue,
+        review_signals=review_signals,
+        unsuitable=unsuitable[:review_limit],
+    )
+    return {
+        "schema": "scenario_daily_scanner_v1",
+        "scan_id": saved["id"],
+        "created_at": saved["created_at"],
+        "trading_date": trading_date.isoformat(),
+        "status": scan_status,
+        "mode": "manual",
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_scenario_templates_only",
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "counts": {
+            "recipes": len(SCENARIO_RECIPES),
+            "active_frozen_templates": sum(1 for recipe in SCENARIO_RECIPES.values() if _scenario_templates_for_recipe(str(recipe["id"]))),
+            "scanned_template_market_pairs": scanned_pairs,
+            "daily_paper_queue": len(daily_paper_queue),
+            "review_signals": len(review_signals),
+            "unsuitable": len(unsuitable),
+            "no_setup": len(no_setup),
+            "scenario_blockers": len(blocker_counts),
+        },
+        "recipe_cards": recipe_cards,
+        "daily_paper_queue": daily_paper_queue,
+        "review_signals": review_signals,
+        "unsuitable": unsuitable[:review_limit],
+        "no_setup_sample": no_setup[:review_limit],
+        "latest_scan": saved,
+    }
+
+
+async def _scenario_no_template_row(
+    provider: EODHDProvider,
+    recipe: dict[str, object],
+    market: MarketMapping,
+    trading_date: date,
+    lookback_days: int,
+    product_mode: str,
+    bars_cache: dict[tuple[str, str], list[object]],
+) -> dict[str, object]:
+    base = _scenario_base_row(recipe, market, trading_date, product_mode)
+    typed_bars, tape, error = await _scenario_tape(provider, market, trading_date, lookback_days, bars_cache)
+    profile = _cost_profile_payload_for_market(market) or public_ig_cost_profile(market).as_dict()
+    scenario = _scenario_state_for_recipe(recipe, tape, "FLAT", profile)
+    if error:
+        return {
+            **base,
+            "status": "no_trade_day",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "today_tape": tape,
+            "scenario": scenario,
+            "scenario_state": scenario["state"],
+            "scenario_label": scenario["label"],
+            "scenario_quality_score": scenario["score"],
+            "scenario_checks": scenario["checks"],
+            "scenario_blockers": scenario["blockers"],
+            "no_setup_reason": error,
+        }
+    return {
+        **base,
+        "status": "needs_template",
+        "setup_detected": False,
+        "bar_count": len(typed_bars),
+        "today_tape": tape,
+        "scenario": scenario,
+        "scenario_state": scenario["state"],
+        "scenario_label": scenario["label"],
+        "scenario_quality_score": scenario["score"],
+        "scenario_checks": scenario["checks"],
+        "scenario_blockers": [*scenario["blockers"], "missing_active_frozen_template"],
+        "no_setup_reason": f"{recipe['label']} needs an active frozen template before daily paper previews can be produced.",
+    }
+
+
+async def _scenario_tape(
+    provider: EODHDProvider,
+    market: MarketMapping,
+    trading_date: date,
+    lookback_days: int,
+    bars_cache: dict[tuple[str, str], list[object]],
+) -> tuple[list[object], dict[str, object], str]:
+    interval = "5min"
+    cache_key = (market.market_id, interval)
+    try:
+        bars = bars_cache.get(cache_key)
+        if bars is None:
+            start = (trading_date - timedelta(days=lookback_days)).isoformat()
+            bars = await provider.historical_bars(market.eodhd_symbol, interval, start, trading_date.isoformat())
+            bars_cache[cache_key] = bars
+    except Exception as exc:
+        return [], {"schema": "today_tape_snapshot_v1", "has_session_bars": False, "requested_date": trading_date.isoformat()}, f"EODHD latest 5min bars failed: {_public_error(exc)}"
+    typed_bars = [bar for bar in bars if hasattr(bar, "timestamp") and hasattr(bar, "close")]
+    tape = _today_tape_snapshot(typed_bars, trading_date)
+    if not tape.get("has_session_bars"):
+        return typed_bars, tape, "No same-day 5-minute bars are available."
+    if str(tape.get("active_session_date") or "") != trading_date.isoformat():
+        return typed_bars, tape, f"Latest intraday bars are from {tape.get('active_session_date')}, not {trading_date.isoformat()}."
+    if int(_safe_number(tape.get("bar_count"))) < 12:
+        return typed_bars, tape, "Not enough session bars yet for a clean scenario read."
+    return typed_bars, tape, ""
+
+
+def _scenario_missing_market_row(recipe: dict[str, object], trading_date: date, product_mode: str) -> dict[str, object]:
+    return {
+        "source_type": "scenario_daily_scan",
+        "recipe_id": recipe["id"],
+        "recipe_label": recipe["label"],
+        "market_id": recipe["market_id"],
+        "trading_date": trading_date.isoformat(),
+        "product_mode": product_mode,
+        "status": "unsuitable",
+        "unsuitable": True,
+        "setup_detected": False,
+        "paper_ready": False,
+        "scenario_state": "no_trade",
+        "scenario_label": "No trade",
+        "scenario_quality_score": 0,
+        "scenario_blockers": ["market_not_installed"],
+        "unsuitable_reason": f"{recipe['market_id']} is not installed in the market registry.",
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
+
+
+def _scenario_apply_daily_gate(row: dict[str, object], recipe: dict[str, object], market: MarketMapping) -> dict[str, object]:
+    profile = _cost_profile_payload_for_market(market) or public_ig_cost_profile(market).as_dict()
+    side = str(row.get("side") or "FLAT")
+    scenario = _scenario_state_for_recipe(recipe, row.get("today_tape") if isinstance(row.get("today_tape"), dict) else {}, side, profile)
+    checks = list(scenario["checks"])
+    blockers = list(scenario["blockers"])
+
+    signal_state = str(row.get("signal_state") or "")
+    signal_age = _safe_int(row.get("signal_age_bars"))
+    fresh_signal = signal_state in {"new_entry", "reversal"} and signal_age <= 1
+    checks.append(
+        {
+            "code": "fresh_signal",
+            "passed": fresh_signal or not row.get("setup_detected"),
+            "detail": "Daily paper can only use a new or immediate reversal signal, not a stale hold.",
+            "value": signal_state or "none",
+            "threshold": "new_entry/reversal with age <= 1 bar",
+        }
+    )
+    if row.get("setup_detected") and not fresh_signal:
+        blockers.append("stale_signal_hold")
+
+    profile_status = str(profile.get("market_status") or "").upper()
+    tradeable_status = profile_status in {"", "UNKNOWN", "TRADEABLE"}
+    checks.append(
+        {
+            "code": "ig_market_tradeable_now",
+            "passed": tradeable_status,
+            "detail": "IG market status must be tradeable for a broker-safe paper preview.",
+            "value": profile_status or "UNKNOWN",
+            "threshold": "TRADEABLE",
+        }
+    )
+    if not tradeable_status:
+        blockers.append("ig_market_not_tradeable_now")
+
+    scenario_passed = not blockers and bool(row.get("paper_ready"))
+    updated = {
+        **row,
+        "recipe_id": recipe["id"],
+        "recipe_label": recipe["label"],
+        "scenario": scenario,
+        "scenario_state": scenario["state"],
+        "scenario_label": scenario["label"],
+        "scenario_quality_score": scenario["score"],
+        "scenario_checks": checks,
+        "scenario_blockers": list(dict.fromkeys(blockers)),
+        "cost_profile": _scenario_cost_summary(profile),
+        "daily_mode_source": "active_frozen_scenario_templates_only",
+    }
+    if row.get("paper_ready") and not scenario_passed:
+        updated["paper_ready"] = False
+        updated["eligible_for_review"] = True
+        updated["status"] = "no_setup_today"
+        updated["no_setup_reason"] = _scenario_blocker_reason(recipe, updated["scenario_blockers"])
+    elif row.get("paper_ready"):
+        updated["paper_queue_status"] = "eligible"
+    return updated
+
+
+def _scenario_state_for_recipe(
+    recipe: dict[str, object],
+    tape: dict[str, object],
+    side: str,
+    profile_payload: dict[str, object],
+) -> dict[str, object]:
+    checks: list[dict[str, object]] = []
+    blockers: list[str] = []
+
+    def add(code: str, passed: bool, detail: str, value: object = None, threshold: object = None) -> None:
+        checks.append({"code": code, "passed": bool(passed), "detail": detail, "value": value, "threshold": threshold})
+        if not passed:
+            blockers.append(code)
+
+    same_day = bool(tape.get("has_session_bars")) and str(tape.get("active_session_date") or "") == str(tape.get("requested_date") or "")
+    add("same_day_bars", same_day, "Same-day 5-minute bars must be available.", tape.get("active_session_date"), tape.get("requested_date"))
+    bar_count = int(_safe_number(tape.get("bar_count")))
+    add("enough_session_bars", bar_count >= 12, "At least 12 same-day 5-minute bars are needed before the scenario is usable.", bar_count, 12)
+
+    spread_bps = _safe_number(profile_payload.get("spread_bps"))
+    max_spread = _safe_number(recipe.get("max_spread_bps")) or 10.0
+    add("spread_gate", spread_bps <= max_spread, "Spread must fit this specialist recipe.", round(spread_bps, 4), round(max_spread, 4))
+
+    relative_volume = _safe_number(tape.get("relative_volume"))
+    min_rvol = _safe_number(recipe.get("min_relative_volume")) or 0.75
+    add("participation_gate", relative_volume >= min_rvol, "Relative volume/participation must be high enough.", round(relative_volume, 4), round(min_rvol, 4))
+
+    distance = _safe_number(tape.get("distance_from_vwap_bps"))
+    trend = _safe_number(tape.get("session_trend_bps"))
+    opening_break = _safe_number(tape.get("opening_range_break_bps"))
+    high_sweep = _safe_number(tape.get("session_high_vs_opening_high_bps"))
+    low_sweep = _safe_number(tape.get("session_low_vs_opening_low_bps"))
+    side = side.upper()
+    recipe_id = str(recipe.get("id") or "")
+    state = "no_trade"
+    label = "No trade"
+    quality = 0.0
+    scenario_ok = False
+    if not same_day:
+        state = "no_same_day_bars"
+        label = "No same-day bars"
+    elif bar_count < 12:
+        state = "not_enough_session_bars"
+        label = "Not enough session bars"
+    elif abs(distance) <= 5.0 and abs(trend) < 8.0:
+        state = "chop_balance_near_vwap"
+        label = "Chop/balance near VWAP"
+        quality = max(0.0, 35.0 - abs(trend))
+    elif recipe_id == "xauusd_vwap_rejection":
+        sweep_bps = _safe_number(recipe.get("min_sweep_bps")) or 1.0
+        swept_high = high_sweep >= sweep_bps
+        swept_low = low_sweep <= -sweep_bps
+        reversal_confirmed = (side == "SELL" and swept_high and distance <= 0) or (side == "BUY" and swept_low and distance >= 0)
+        neutral_rejection = side == "FLAT" and (swept_high or swept_low) and abs(distance) >= 0
+        if reversal_confirmed or neutral_rejection:
+            state = "opening_range_sweep"
+            label = "Opening range sweep"
+            quality = 58.0 + min(22.0, abs(opening_break)) + min(15.0, abs(distance)) + min(10.0, relative_volume * 4.0)
+            scenario_ok = True
+        elif (swept_high and distance < 0) or (swept_low and distance > 0):
+            state = "vwap_rejection"
+            label = "VWAP rejection"
+            quality = 55.0 + min(25.0, abs(distance)) + min(10.0, relative_volume * 4.0)
+            scenario_ok = True
+    else:
+        min_trend = _safe_number(recipe.get("min_trend_bps")) or 8.0
+        long_ok = side in {"BUY", "FLAT"} and trend >= min_trend and distance >= -12.0
+        short_ok = side in {"SELL", "FLAT"} and trend <= -min_trend and distance <= 12.0
+        if long_ok or short_ok:
+            state = "vwap_acceptance" if abs(distance) >= 5.0 else "vwap_pullback"
+            label = "VWAP acceptance" if state == "vwap_acceptance" else "VWAP pullback"
+            quality = 60.0 + min(20.0, abs(trend) / 2.0) + min(10.0, relative_volume * 4.0) - min(12.0, spread_bps * 2.0)
+            scenario_ok = True
+
+    allowed = state in set(str(item) for item in recipe.get("allowed_scenarios") or [])
+    add("scenario_confirmation", scenario_ok and allowed, f"{recipe['label']} requires one of: {', '.join(recipe.get('allowed_scenarios') or [])}.", state, recipe.get("allowed_scenarios"))
+    return {
+        "state": state,
+        "label": label,
+        "score": round(max(0.0, min(100.0, quality)), 4),
+        "passed": scenario_ok and allowed and not blockers,
+        "checks": checks,
+        "blockers": list(dict.fromkeys(blockers)),
+    }
+
+
+def _scenario_base_row(recipe: dict[str, object], market: MarketMapping, trading_date: date, product_mode: str) -> dict[str, object]:
+    return {
+        "source_type": "scenario_daily_scan",
+        "recipe_id": recipe["id"],
+        "recipe_label": recipe["label"],
+        "strategy_generation_allowed": False,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "broker_preview_only": True,
+        "frozen_rules": True,
+        "daily_rule": "apply_exact_scenario_template_without_parameter_changes",
+        "trading_date": trading_date.isoformat(),
+        "market_id": market.market_id,
+        "market_name": market.name,
+        "market_type": market.asset_class,
+        "interval": "5min",
+        "product_mode": product_mode,
+        "setup": recipe.get("setup"),
+        "session": recipe.get("session"),
+        "unsuitable": False,
+        "setup_detected": False,
+        "paper_ready": False,
+        "eligible_for_review": False,
+    }
+
+
+def _scenario_card_from_row(recipe: dict[str, object], row: dict[str, object]) -> dict[str, object]:
+    return {
+        "recipe_id": recipe["id"],
+        "label": recipe["label"],
+        "market_id": recipe["market_id"],
+        "role": recipe.get("role"),
+        "session": recipe.get("session"),
+        "timeframe": recipe.get("timeframe"),
+        "setup": recipe.get("setup"),
+        "status": row.get("status"),
+        "scenario_state": row.get("scenario_state", "no_trade"),
+        "scenario_label": row.get("scenario_label", "No trade"),
+        "scenario_quality_score": row.get("scenario_quality_score", 0),
+        "paper_ready": bool(row.get("paper_ready")),
+        "setup_detected": bool(row.get("setup_detected")),
+        "no_trade_reason": row.get("no_setup_reason") or row.get("unsuitable_reason") or "",
+        "blockers": list(row.get("scenario_blockers") or row.get("today_filter_blockers") or []),
+        "today_tape": row.get("today_tape") if isinstance(row.get("today_tape"), dict) else {},
+        "cost_profile": row.get("cost_profile") if isinstance(row.get("cost_profile"), dict) else _scenario_cost_summary(_cost_profile_payload_for_market_id(str(recipe["market_id"])) or {}),
+    }
+
+
+def _scenario_signal_rank(signal: dict[str, object]) -> tuple[float, ...]:
+    cost = signal.get("cost_profile") if isinstance(signal.get("cost_profile"), dict) else {}
+    return (
+        _safe_number(signal.get("scenario_quality_score")),
+        *_daily_scan_signal_rank(signal),
+        -_safe_number(cost.get("spread_bps")),
+    )
+
+
+def _scenario_blocker_reason(recipe: dict[str, object], blockers: list[object]) -> str:
+    labels = [str(blocker).replace("_", " ") for blocker in blockers if blocker]
+    if not labels:
+        return f"{recipe['label']} did not confirm today's scenario."
+    return f"{recipe['label']} blocked paper preview: {', '.join(labels[:4])}."
+
+
+def _scanner_trading_date(value: object) -> date:
+    if value in (None, ""):
+        return date.today()
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="trading_date must be YYYY-MM-DD") from exc
+
+
+def _scanner_markets_for_template(
+    template: dict[str, object],
+    selected_markets: list[MarketMapping],
+    max_markets: int,
+) -> list[MarketMapping]:
+    if selected_markets:
+        candidates = selected_markets
+    else:
+        scope = _template_match_scope(template)
+        market_type = _market_type_for_template(template)
+        if scope == "share_behavior" and market_type == "share":
+            candidates = [market for market in markets.list(enabled_only=True) if market.asset_class == "share"]
+        else:
+            market = markets.get(str(template.get("market_id") or _template_source_template(template).get("market_id") or ""))
+            candidates = [market] if market is not None else []
+    output: list[MarketMapping] = []
+    seen: set[str] = set()
+    for market in candidates:
+        if market.market_id in seen or not market.enabled or not market.eodhd_symbol:
+            continue
+        seen.add(market.market_id)
+        output.append(market)
+        if len(output) >= max_markets:
+            break
+    return output
+
+
+async def _evaluate_daily_template_match(
+    provider: EODHDProvider,
+    template: dict[str, object],
+    market: MarketMapping,
+    trading_date: date,
+    lookback_days: int,
+    account_size: float,
+    product_mode: str,
+    bars_cache: dict[tuple[str, str], list[object]],
+) -> dict[str, object]:
+    interval = "5min"
+    base = _daily_scan_base_payload(template, market, trading_date, interval, product_mode)
+    profile = _cost_profile_for_market(market)
+    profile_payload = profile.as_dict()
+    epic = str(market.ig_epic or profile_payload.get("epic") or "").strip()
+    if not epic:
+        return {**base, "status": "unsuitable", "unsuitable": True, "unsuitable_reason": "IG EPIC is missing; sync/bind IG costs before daily scanning."}
+    cache_key = (market.market_id, interval)
+    try:
+        bars = bars_cache.get(cache_key)
+        if bars is None:
+            start = (trading_date - timedelta(days=lookback_days)).isoformat()
+            bars = provider and await provider.historical_bars(market.eodhd_symbol, interval, start, trading_date.isoformat())
+            bars_cache[cache_key] = bars
+    except Exception as exc:
+        return {**base, "status": "unsuitable", "unsuitable": True, "unsuitable_reason": f"EODHD latest 5min bars failed: {_public_error(exc)}"}
+    typed_bars = [bar for bar in bars if hasattr(bar, "timestamp") and hasattr(bar, "close")]
+    minimum_bars = _daily_scanner_minimum_bars(template)
+    if len(typed_bars) < minimum_bars:
+        return {
+            **base,
+            "status": "no_setup_today",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "no_setup_reason": f"Need at least {minimum_bars} latest 5min bars for this frozen template.",
+        }
+    try:
+        signal_result = apply_frozen_template_rules(
+            typed_bars,
+            market.market_id,
+            interval,
+            profile,
+            _template_source_template(template),
+            family=str(template.get("strategy_family") or ""),
+            risk_profile="conservative",
+            target_regime=str(template.get("target_regime") or ""),
+            account_size=account_size,
+        )
+    except Exception as exc:
+        return {**base, "status": "unsuitable", "unsuitable": True, "bar_count": len(typed_bars), "unsuitable_reason": f"Frozen template application failed: {_public_error(exc)}"}
+    latest_bar = typed_bars[-1]
+    if signal_result.current_signal == 0:
+        tape_gate = _manual_setup_gate(template, market, typed_bars, trading_date, 0, profile_payload)
+        return {
+            **base,
+            "status": "no_setup_today",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "latest_bar": _bar_payload(latest_bar),
+            "current_regime": signal_result.current_regime,
+            "target_regime": signal_result.target_regime,
+            "regime_allowed": signal_result.regime_allowed,
+            "manual_playbook": tape_gate["manual_playbook"],
+            "today_tape": tape_gate["today_tape"],
+            "today_filter_checks": tape_gate["checks"],
+            "today_filter_blockers": tape_gate["blockers"],
+            "signal_explainer": _daily_signal_explainer(
+                template,
+                market,
+                signal_result,
+                tape_gate,
+                "Frozen rules did not produce an active setup on the latest 5min bar.",
+            ),
+            "no_setup_reason": "Frozen rules did not produce an active setup on the latest 5min bar.",
+        }
+    side = "BUY" if signal_result.current_signal > 0 else "SELL"
+    tape_gate = _manual_setup_gate(template, market, typed_bars, trading_date, signal_result.current_signal, profile_payload)
+    if not tape_gate["passed"]:
+        reason = _today_filter_rejection_reason(tape_gate)
+        return {
+            **base,
+            "status": "no_setup_today",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "latest_bar": _bar_payload(latest_bar),
+            "current_regime": signal_result.current_regime,
+            "target_regime": signal_result.target_regime,
+            "regime_allowed": signal_result.regime_allowed,
+            "side": side,
+            "signal": signal_result.current_signal,
+            "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
+            "signal_age_bars": signal_result.signal_age_bars,
+            "manual_playbook": tape_gate["manual_playbook"],
+            "today_tape": tape_gate["today_tape"],
+            "today_filter_checks": tape_gate["checks"],
+            "today_filter_blockers": tape_gate["blockers"],
+            "manual_setup_score": tape_gate["score"],
+            "signal_explainer": _daily_signal_explainer(template, market, signal_result, tape_gate, reason),
+            "no_setup_reason": reason,
+        }
+    stop, limit = _daily_scanner_stop_limit(float(latest_bar.close), side, signal_result.parameters)
+    stake = _safe_number(signal_result.parameters.get("position_size")) or 1.0
+    preview = broker_order_preview(
+        _market_response(market),
+        profile_payload,
+        side,
+        stake,
+        account_size,
+        entry_price=float(latest_bar.close),
+        stop=stop,
+        limit=limit,
+    )
+    rule_violations = [str(item) for item in preview.get("rule_violations", []) if item]
+    terminal = _has_terminal_capital_blocker(rule_violations, {"violations": rule_violations})
+    if rule_violations:
+        return {
+            **base,
+            "status": "unsuitable",
+            "unsuitable": True,
+            "setup_detected": True,
+            "bar_count": len(typed_bars),
+            "latest_bar": _bar_payload(latest_bar),
+            "current_regime": signal_result.current_regime,
+            "target_regime": signal_result.target_regime,
+            "side": side,
+            "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
+            "manual_playbook": tape_gate["manual_playbook"],
+            "today_tape": tape_gate["today_tape"],
+            "today_filter_checks": tape_gate["checks"],
+            "today_filter_blockers": tape_gate["blockers"],
+            "manual_setup_score": tape_gate["score"],
+            "signal_explainer": _daily_signal_explainer(template, market, signal_result, tape_gate, "Broker preview blocked the setup for this account."),
+            "broker_preview": preview,
+            "rule_violations": rule_violations,
+            "unsuitable_reason": _unsuitable_reason(rule_violations, {"violations": rule_violations}) if terminal else f"Broker preview failed: {', '.join(rule_violations)}.",
+        }
+    search_audit = _template_parameters(template).get("search_audit")
+    search_audit = search_audit if isinstance(search_audit, dict) else {}
+    backtest_summary = _summary_backtest(asdict(signal_result.backtest))
+    return {
+        **base,
+        "status": "paper_preview",
+        "unsuitable": False,
+        "setup_detected": True,
+        "paper_ready": True,
+        "eligible_for_review": True,
+        "bar_count": len(typed_bars),
+        "latest_bar": _bar_payload(latest_bar),
+        "current_regime": signal_result.current_regime,
+        "target_regime": signal_result.target_regime,
+        "regime_allowed": signal_result.regime_allowed,
+        "side": side,
+        "signal": signal_result.current_signal,
+        "signal_state": _daily_signal_state(signal_result.previous_signal, signal_result.current_signal),
+        "signal_age_bars": signal_result.signal_age_bars,
+        "manual_playbook": tape_gate["manual_playbook"],
+        "today_tape": tape_gate["today_tape"],
+        "today_filter_checks": tape_gate["checks"],
+        "today_filter_blockers": tape_gate["blockers"],
+        "manual_setup_score": tape_gate["score"],
+        "signal_explainer": _daily_signal_explainer(template, market, signal_result, tape_gate, "Frozen template fired and today's tape filters passed."),
+        "broker_preview": preview,
+        "rule_violations": [],
+        "paper_readiness_score": search_audit.get("paper_readiness_score", template.get("robustness_score", 0)),
+        "net_profit": backtest_summary.get("net_profit", 0),
+        "oos_net_profit": _safe_number(_template_evidence(template).get("oos_net_profit"), backtest_summary.get("test_profit")),
+        "trade_count": int(_safe_number(backtest_summary.get("trade_count"))),
+        "cost_to_gross_ratio": backtest_summary.get("cost_to_gross_ratio", 0),
+        "backtest_window": backtest_summary,
+    }
+
+
+def _daily_scan_base_payload(
+    template: dict[str, object],
+    market: MarketMapping,
+    trading_date: date,
+    interval: str,
+    product_mode: str,
+) -> dict[str, object]:
+    playbook = _manual_playbook_for_template(template)
+    return {
+        "source_type": "daily_frozen_template_scan",
+        "strategy_generation_allowed": False,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "broker_preview_only": True,
+        "frozen_rules": True,
+        "daily_rule": "apply_frozen_template_without_parameter_changes",
+        "trading_date": trading_date.isoformat(),
+        "template_id": template.get("id"),
+        "strategy_name": template.get("name"),
+        "market_id": market.market_id,
+        "market_name": market.name,
+        "market_type": market.asset_class,
+        "match_scope": _template_match_scope(template),
+        "interval": interval,
+        "product_mode": product_mode,
+        "strategy_family": template.get("strategy_family") or _template_source_template(template).get("family"),
+        "promotion_tier": template.get("promotion_tier"),
+        "readiness_status": template.get("readiness_status"),
+        "robustness_score": template.get("robustness_score", 0),
+        "warnings": _template_warning_codes(template),
+        "manual_playbook": _manual_playbook_payload(playbook),
+        "unsuitable": False,
+        "setup_detected": False,
+        "paper_ready": False,
+        "eligible_for_review": False,
+    }
+
+
+def _daily_scanner_minimum_bars(template: dict[str, object]) -> int:
+    parameters = _template_parameters(template)
+    lookback = max(2, _safe_int(parameters.get("lookback")) or 2)
+    max_hold = max(1, _safe_int(parameters.get("max_hold_bars")) or 1)
+    return max(lookback + max_hold + 2, 20)
+
+
+def _daily_scanner_stop_limit(entry: float, side: str, parameters: dict[str, object]) -> tuple[float | None, float | None]:
+    stop_bps = _safe_number(parameters.get("stop_loss_bps")) or 50.0
+    target_bps = _safe_number(parameters.get("take_profit_bps")) or 80.0
+    if side == "SELL":
+        return round(entry * (1 + stop_bps / 10_000), 8), round(entry * (1 - target_bps / 10_000), 8)
+    return round(entry * (1 - stop_bps / 10_000), 8), round(entry * (1 + target_bps / 10_000), 8)
+
+
+def _daily_signal_state(previous_signal: int, current_signal: int) -> str:
+    if current_signal == 0:
+        return "flat"
+    if previous_signal == 0:
+        return "new_entry"
+    if previous_signal == current_signal:
+        return "active_hold"
+    return "reversal"
+
+
+def _manual_setup_gate(
+    template: dict[str, object],
+    market: MarketMapping,
+    bars: list[object],
+    trading_date: date,
+    signal: int,
+    profile_payload: dict[str, object],
+) -> dict[str, object]:
+    playbook = _manual_playbook_for_template(template)
+    tape = _today_tape_snapshot(bars, trading_date)
+    side = "BUY" if signal > 0 else "SELL" if signal < 0 else "FLAT"
+    checks: list[dict[str, object]] = []
+
+    def add_check(code: str, passed: bool, detail: str, value: object = None, threshold: object = None) -> None:
+        checks.append({"code": code, "passed": bool(passed), "detail": detail, "value": value, "threshold": threshold})
+
+    if not tape.get("has_session_bars"):
+        add_check("no_same_day_bars", False, "No same-day 5-minute bars are available for the scanner date.")
+    elif str(tape.get("active_session_date") or "") != trading_date.isoformat():
+        add_check(
+            "stale_intraday_bars",
+            False,
+            f"Latest intraday bars are from {tape.get('active_session_date')}, not {trading_date.isoformat()}.",
+            tape.get("active_session_date"),
+            trading_date.isoformat(),
+        )
+    else:
+        add_check("same_day_bars", True, "Latest 5-minute bars are from the scanner date.", tape.get("active_session_date"), trading_date.isoformat())
+
+    spread_bps = _safe_number(profile_payload.get("spread_bps"), profile_payload.get("estimated_spread_bps"))
+    max_spread = _safe_number(playbook.get("max_spread_bps")) or 75.0
+    add_check(
+        "spread_within_playbook",
+        spread_bps <= max_spread,
+        f"Spread {round(spread_bps, 2)} bps must be at or below {round(max_spread, 2)} bps for this playbook.",
+        round(spread_bps, 4),
+        round(max_spread, 4),
+    )
+
+    relative_volume = _safe_number(tape.get("relative_volume"))
+    min_relative_volume = _safe_number(playbook.get("min_relative_volume")) or 0.5
+    add_check(
+        "relative_volume",
+        relative_volume >= min_relative_volume,
+        f"Relative volume {round(relative_volume, 2)}x must be at least {round(min_relative_volume, 2)}x.",
+        round(relative_volume, 4),
+        round(min_relative_volume, 4),
+    )
+
+    if signal == 0:
+        add_check("frozen_signal_active", False, "Frozen template did not fire on the latest bar.")
+    else:
+        add_check("frozen_signal_active", True, f"Frozen template produced a {side} signal.")
+
+    playbook_id = str(playbook.get("id") or "")
+    if playbook_id == "opening_range_breakout":
+        _add_opening_range_breakout_checks(checks, tape, side, playbook)
+    elif playbook_id == "vwap_trend_pullback":
+        _add_vwap_trend_checks(checks, tape, side, playbook)
+    elif playbook_id == "failed_breakout_reversal":
+        _add_failed_breakout_reversal_checks(checks, tape, side, playbook)
+    elif playbook_id == "high_relative_volume_trend":
+        _add_high_relative_volume_trend_checks(checks, tape, side, playbook)
+    else:
+        _add_frozen_signal_confirmation_checks(checks, tape, side, playbook)
+
+    blockers = [str(check["code"]) for check in checks if not check.get("passed")]
+    return {
+        "passed": not blockers,
+        "score": _manual_setup_score(checks, tape),
+        "manual_playbook": _manual_playbook_payload(playbook),
+        "today_tape": tape,
+        "checks": checks,
+        "blockers": blockers,
+        "market_id": market.market_id,
+    }
+
+
+def _add_opening_range_breakout_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    min_break = _safe_number(playbook.get("min_opening_break_bps"))
+    break_bps = _safe_number(tape.get("opening_range_break_bps"))
+    trend_bps = _safe_number(tape.get("session_trend_bps"))
+    if side == "SELL":
+        passed_break = break_bps <= -min_break
+        passed_trend = trend_bps <= -_safe_number(playbook.get("min_trend_bps"))
+        vwap_passed = _safe_number(tape.get("distance_from_vwap_bps")) <= 0
+    else:
+        passed_break = break_bps >= min_break
+        passed_trend = trend_bps >= _safe_number(playbook.get("min_trend_bps"))
+        vwap_passed = _safe_number(tape.get("distance_from_vwap_bps")) >= 0
+    _append_gate_check(checks, "opening_range_break", passed_break, "Price must break the first 30-minute range in the trade direction.", round(break_bps, 4), round(min_break, 4))
+    _append_gate_check(checks, "session_trend_alignment", passed_trend, "Session trend must point in the trade direction.", round(trend_bps, 4), round(_safe_number(playbook.get("min_trend_bps")), 4))
+    _append_gate_check(checks, "vwap_alignment", vwap_passed, "Price must be on the correct side of VWAP.", round(_safe_number(tape.get("distance_from_vwap_bps")), 4), 0)
+
+
+def _add_vwap_trend_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    trend_bps = _safe_number(tape.get("session_trend_bps"))
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    min_trend = _safe_number(playbook.get("min_trend_bps"))
+    max_against = _safe_number(playbook.get("max_vwap_distance_against_bps")) or 12.0
+    if side == "SELL":
+        trend_passed = trend_bps <= -min_trend
+        vwap_passed = distance_bps <= max_against
+    else:
+        trend_passed = trend_bps >= min_trend
+        vwap_passed = distance_bps >= -max_against
+    _append_gate_check(checks, "session_trend_alignment", trend_passed, "Session trend must support the frozen signal.", round(trend_bps, 4), round(min_trend, 4))
+    _append_gate_check(checks, "vwap_reclaim_or_hold", vwap_passed, "Price must be near or on the correct side of VWAP.", round(distance_bps, 4), round(max_against, 4))
+
+
+def _add_failed_breakout_reversal_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    sweep_bps = _safe_number(playbook.get("min_sweep_bps")) or 1.0
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    low_sweep = _safe_number(tape.get("session_low_vs_opening_low_bps")) <= -sweep_bps
+    high_sweep = _safe_number(tape.get("session_high_vs_opening_high_bps")) >= sweep_bps
+    if side == "SELL":
+        sweep_passed = high_sweep
+        vwap_passed = distance_bps <= 0
+    else:
+        sweep_passed = low_sweep
+        vwap_passed = distance_bps >= 0
+    _append_gate_check(checks, "opening_range_sweep", sweep_passed, "Session must reject one side of the opening range before the reversal fires.", True if sweep_passed else False, True)
+    _append_gate_check(checks, "vwap_reversal_confirmation", vwap_passed, "Reversal must reclaim or lose VWAP in the trade direction.", round(distance_bps, 4), 0)
+
+
+def _add_high_relative_volume_trend_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    trend_bps = _safe_number(tape.get("session_trend_bps"))
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    min_trend = _safe_number(playbook.get("min_trend_bps"))
+    if side == "SELL":
+        trend_passed = trend_bps <= -min_trend
+        vwap_passed = distance_bps <= 0
+    else:
+        trend_passed = trend_bps >= min_trend
+        vwap_passed = distance_bps >= 0
+    _append_gate_check(checks, "high_volume_trend_alignment", trend_passed, "High-volume setups must move in the trade direction.", round(trend_bps, 4), round(min_trend, 4))
+    _append_gate_check(checks, "vwap_alignment", vwap_passed, "Price must be on the correct side of VWAP.", round(distance_bps, 4), 0)
+
+
+def _add_frozen_signal_confirmation_checks(
+    checks: list[dict[str, object]],
+    tape: dict[str, object],
+    side: str,
+    playbook: dict[str, object],
+) -> None:
+    if side == "FLAT":
+        return
+    distance_bps = _safe_number(tape.get("distance_from_vwap_bps"))
+    max_against = _safe_number(playbook.get("max_vwap_distance_against_bps")) or 25.0
+    if side == "SELL":
+        passed = distance_bps <= max_against
+    else:
+        passed = distance_bps >= -max_against
+    _append_gate_check(checks, "no_obvious_vwap_conflict", passed, "Fallback playbook rejects only obvious VWAP conflicts.", round(distance_bps, 4), round(max_against, 4))
+
+
+def _append_gate_check(
+    checks: list[dict[str, object]],
+    code: str,
+    passed: bool,
+    detail: str,
+    value: object = None,
+    threshold: object = None,
+) -> None:
+    checks.append({"code": code, "passed": bool(passed), "detail": detail, "value": value, "threshold": threshold})
+
+
+def _manual_setup_score(checks: list[dict[str, object]], tape: dict[str, object]) -> float:
+    if not checks:
+        return 0.0
+    pass_rate = sum(1 for check in checks if check.get("passed")) / len(checks)
+    relative_volume = min(2.0, max(0.0, _safe_number(tape.get("relative_volume")))) / 2.0
+    vwap_strength = min(1.0, abs(_safe_number(tape.get("distance_from_vwap_bps"))) / 80.0)
+    break_strength = min(1.0, abs(_safe_number(tape.get("opening_range_break_bps"))) / 80.0)
+    return round(100 * (0.62 * pass_rate + 0.18 * relative_volume + 0.10 * vwap_strength + 0.10 * break_strength), 4)
+
+
+def _today_filter_rejection_reason(tape_gate: dict[str, object]) -> str:
+    playbook = tape_gate.get("manual_playbook") if isinstance(tape_gate.get("manual_playbook"), dict) else {}
+    blockers = [readable for readable in (_today_filter_blocker_label(code) for code in tape_gate.get("blockers") or []) if readable]
+    if not blockers:
+        return "Today's tape filters did not confirm the frozen setup."
+    return f"{playbook.get('label') or 'Manual playbook'} blocked this setup: {', '.join(blockers[:3])}."
+
+
+def _today_filter_blocker_label(code: object) -> str:
+    labels = {
+        "no_same_day_bars": "no same-day bars",
+        "stale_intraday_bars": "stale intraday bars",
+        "spread_within_playbook": "spread too wide",
+        "relative_volume": "relative volume too low",
+        "frozen_signal_active": "frozen signal inactive",
+        "opening_range_break": "opening range not broken",
+        "session_trend_alignment": "session trend disagrees",
+        "vwap_alignment": "VWAP disagrees",
+        "vwap_reclaim_or_hold": "VWAP not reclaimed/held",
+        "opening_range_sweep": "no opening range rejection",
+        "vwap_reversal_confirmation": "VWAP did not confirm reversal",
+        "high_volume_trend_alignment": "trend not strong enough",
+        "no_obvious_vwap_conflict": "obvious VWAP conflict",
+    }
+    return labels.get(str(code or ""), str(code or "").replace("_", " "))
+
+
+def _daily_signal_explainer(
+    template: dict[str, object],
+    market: MarketMapping,
+    signal_result: object,
+    tape_gate: dict[str, object],
+    headline: str,
+) -> dict[str, object]:
+    playbook = tape_gate.get("manual_playbook") if isinstance(tape_gate.get("manual_playbook"), dict) else {}
+    tape = tape_gate.get("today_tape") if isinstance(tape_gate.get("today_tape"), dict) else {}
+    passed = [check for check in tape_gate.get("checks", []) if isinstance(check, dict) and check.get("passed")]
+    failed = [check for check in tape_gate.get("checks", []) if isinstance(check, dict) and not check.get("passed")]
+    side = "BUY" if getattr(signal_result, "current_signal", 0) > 0 else "SELL" if getattr(signal_result, "current_signal", 0) < 0 else "FLAT"
+    return {
+        "headline": headline,
+        "playbook": playbook.get("label") or "",
+        "market": market.market_id,
+        "template": template.get("name"),
+        "side": side,
+        "why_it_passed": [str(check.get("detail") or check.get("code")) for check in passed[:5]],
+        "why_it_failed": [str(check.get("detail") or check.get("code")) for check in failed[:5]],
+        "today_context": [
+            f"Relative volume {round(_safe_number(tape.get('relative_volume')), 2)}x",
+            f"VWAP distance {round(_safe_number(tape.get('distance_from_vwap_bps')), 1)} bps",
+            f"Opening range break {round(_safe_number(tape.get('opening_range_break_bps')), 1)} bps",
+            f"Session trend {round(_safe_number(tape.get('session_trend_bps')), 1)} bps",
+        ],
+        "rule_change_allowed": False,
+    }
+
+
+def _today_tape_snapshot(bars: list[object], trading_date: date) -> dict[str, object]:
+    dated_bars = sorted(
+        [bar for bar in bars if _bar_session_date(bar) is not None],
+        key=lambda item: getattr(item, "timestamp", None),
+    )
+    if not dated_bars:
+        return {"schema": "today_tape_snapshot_v1", "has_session_bars": False, "requested_date": trading_date.isoformat()}
+    sessions: dict[date, list[object]] = {}
+    for bar in dated_bars:
+        session_date = _bar_session_date(bar)
+        if session_date is None:
+            continue
+        sessions.setdefault(session_date, []).append(bar)
+    active_date = trading_date if trading_date in sessions else max((day for day in sessions if day <= trading_date), default=max(sessions))
+    session_bars = sessions.get(active_date, [])
+    if not session_bars:
+        return {"schema": "today_tape_snapshot_v1", "has_session_bars": False, "requested_date": trading_date.isoformat()}
+    previous_dates = sorted(day for day in sessions if day < active_date)
+    previous_date = previous_dates[-1] if previous_dates else None
+    previous_close = _safe_number(getattr(sessions[previous_date][-1], "close", None)) if previous_date is not None else 0.0
+    opening_count = min(6, len(session_bars))
+    opening_bars = session_bars[:opening_count]
+    opening_high = max(_safe_number(getattr(bar, "high", None), getattr(bar, "close", None)) for bar in opening_bars)
+    opening_low = min(_safe_number(getattr(bar, "low", None), getattr(bar, "close", None)) for bar in opening_bars)
+    session_high = max(_safe_number(getattr(bar, "high", None), getattr(bar, "close", None)) for bar in session_bars)
+    session_low = min(_safe_number(getattr(bar, "low", None), getattr(bar, "close", None)) for bar in session_bars)
+    first_bar = session_bars[0]
+    latest_bar = session_bars[-1]
+    first_open = _safe_number(getattr(first_bar, "open", None), getattr(first_bar, "close", None))
+    latest_close = _safe_number(getattr(latest_bar, "close", None))
+    vwap = _session_vwap(session_bars)
+    relative_volume, relative_volume_source = _relative_session_volume(sessions, active_date, len(session_bars))
+    opening_break_bps = 0.0
+    if latest_close > opening_high and opening_high > 0:
+        opening_break_bps = ((latest_close / opening_high) - 1.0) * 10_000
+    elif latest_close < opening_low and opening_low > 0:
+        opening_break_bps = -((opening_low / latest_close) - 1.0) * 10_000
+    return {
+        "schema": "today_tape_snapshot_v1",
+        "requested_date": trading_date.isoformat(),
+        "active_session_date": active_date.isoformat(),
+        "has_session_bars": bool(session_bars),
+        "bar_count": len(session_bars),
+        "opening_range_bars": opening_count,
+        "opening_high": round(opening_high, 8),
+        "opening_low": round(opening_low, 8),
+        "session_high": round(session_high, 8),
+        "session_low": round(session_low, 8),
+        "latest_close": round(latest_close, 8),
+        "vwap": round(vwap, 8),
+        "distance_from_vwap_bps": round(((latest_close / vwap) - 1.0) * 10_000, 4) if vwap > 0 else 0.0,
+        "opening_range_break_bps": round(opening_break_bps, 4),
+        "session_trend_bps": round(((latest_close / first_open) - 1.0) * 10_000, 4) if first_open > 0 else 0.0,
+        "gap_bps": round(((first_open / previous_close) - 1.0) * 10_000, 4) if previous_close > 0 else 0.0,
+        "relative_volume": round(relative_volume, 4),
+        "relative_volume_source": relative_volume_source,
+        "session_volume": round(sum(_safe_number(getattr(bar, "volume", None)) for bar in session_bars), 4),
+        "session_high_vs_opening_high_bps": round(((session_high / opening_high) - 1.0) * 10_000, 4) if opening_high > 0 else 0.0,
+        "session_low_vs_opening_low_bps": round(((session_low / opening_low) - 1.0) * 10_000, 4) if opening_low > 0 else 0.0,
+        "latest_bar": _bar_payload(latest_bar),
+    }
+
+
+def _bar_session_date(bar: object) -> date | None:
+    timestamp = getattr(bar, "timestamp", None)
+    if timestamp is None or not hasattr(timestamp, "date"):
+        return None
+    return timestamp.date()
+
+
+def _session_vwap(bars: list[object]) -> float:
+    weighted = 0.0
+    volume_total = 0.0
+    for bar in bars:
+        volume = _safe_number(getattr(bar, "volume", None))
+        high = _safe_number(getattr(bar, "high", None), getattr(bar, "close", None))
+        low = _safe_number(getattr(bar, "low", None), getattr(bar, "close", None))
+        close = _safe_number(getattr(bar, "close", None))
+        typical = (high + low + close) / 3.0 if high and low and close else close
+        weighted += typical * max(0.0, volume)
+        volume_total += max(0.0, volume)
+    if volume_total <= 0:
+        closes = [_safe_number(getattr(bar, "close", None)) for bar in bars]
+        return sum(closes) / max(1, len(closes))
+    return weighted / volume_total
+
+
+def _relative_session_volume(sessions: dict[date, list[object]], active_date: date, active_count: int) -> tuple[float, str]:
+    active_bars = sessions.get(active_date, [])
+    active_volume = sum(_safe_number(getattr(bar, "volume", None)) for bar in active_bars)
+    comparison: list[float] = []
+    for day in sorted(day for day in sessions if day < active_date)[-8:]:
+        bars = sessions[day][:active_count]
+        if bars:
+            comparison.append(sum(_safe_number(getattr(bar, "volume", None)) for bar in bars))
+    if not comparison:
+        return 1.0, "fallback_no_prior_sessions"
+    average = sum(comparison) / max(1, len(comparison))
+    if average <= 0:
+        return 1.0, "fallback_zero_prior_volume"
+    return active_volume / average, f"{len(comparison)} prior sessions"
+
+
+def _manual_playbook_for_template(template: dict[str, object]) -> dict[str, object]:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    requested = str(
+        parameters.get("manual_playbook")
+        or parameters.get("setup_playbook")
+        or source_template.get("manual_playbook")
+        or source_template.get("setup_playbook")
+        or ""
+    ).strip()
+    if requested in MANUAL_TRADER_PLAYBOOKS:
+        return MANUAL_TRADER_PLAYBOOKS[requested]
+    family = str(template.get("strategy_family") or source_template.get("family") or parameters.get("family") or "").strip()
+    name = str(template.get("name") or source_template.get("name") or "").lower()
+    if family == "liquidity_sweep_reversal" or "failed" in name or "reversal" in name or "sweep" in name:
+        return MANUAL_TRADER_PLAYBOOKS["failed_breakout_reversal"]
+    if family in {"breakout"} or "breakout" in name or "opening range" in name:
+        return MANUAL_TRADER_PLAYBOOKS["opening_range_breakout"]
+    if family in {"volatility_expansion", "scalping"} or "relative volume" in name or "momentum" in name:
+        return MANUAL_TRADER_PLAYBOOKS["high_relative_volume_trend"]
+    if family in {"intraday_trend", "mean_reversion"} or "pullback" in name or "vwap" in name or "trend" in name:
+        return MANUAL_TRADER_PLAYBOOKS["vwap_trend_pullback"]
+    return MANUAL_TRADER_PLAYBOOKS["frozen_signal_confirmation"]
+
+
+def _daily_scan_signal_rank(signal: dict[str, object]) -> tuple[float, ...]:
+    state_rank = {"new_entry": 3, "reversal": 2, "active_hold": 1}.get(str(signal.get("signal_state") or ""), 0)
+    preview = signal.get("broker_preview") if isinstance(signal.get("broker_preview"), dict) else {}
+    margin = _safe_number(preview.get("estimated_margin"))
+    account_size = _safe_number(preview.get("account_size")) or WORKING_ACCOUNT_SIZE_GBP
+    margin_headroom = 1.0 - min(1.0, margin / max(1.0, account_size * 0.35))
+    tape = signal.get("today_tape") if isinstance(signal.get("today_tape"), dict) else {}
+    return (
+        state_rank,
+        _safe_number(signal.get("manual_setup_score")),
+        _safe_number(tape.get("relative_volume")),
+        _safe_number(signal.get("paper_readiness_score")),
+        _safe_number(signal.get("oos_net_profit")),
+        _safe_number(signal.get("robustness_score")),
+        margin_headroom,
+        abs(_safe_number(tape.get("opening_range_break_bps"))),
+        -_safe_number(signal.get("cost_to_gross_ratio")),
+        -_safe_number(signal.get("signal_age_bars")),
+    )
+
+
+def _bar_payload(bar: object) -> dict[str, object]:
+    return {
+        "timestamp": getattr(bar, "timestamp", None).isoformat() if getattr(bar, "timestamp", None) is not None else "",
+        "open": round(_safe_number(getattr(bar, "open", None)), 8),
+        "high": round(_safe_number(getattr(bar, "high", None)), 8),
+        "low": round(_safe_number(getattr(bar, "low", None)), 8),
+        "close": round(_safe_number(getattr(bar, "close", None)), 8),
+        "volume": round(_safe_number(getattr(bar, "volume", None)), 4),
+    }
+
+
 def _paper_track_candidates(limit: int = 50) -> list[dict[str, object]]:
     tracked: list[dict[str, object]] = []
     for candidate in (_candidate_with_capital(item) for item in research_store.list_candidates(limit=limit)):
@@ -1788,6 +5928,382 @@ def _paper_track_candidates(limit: int = 50) -> list[dict[str, object]]:
             }
         )
     return tracked
+
+
+def _is_day_trading_source(candidate: dict[str, object]) -> bool:
+    parameters = _candidate_parameters(candidate)
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    return bool(
+        parameters.get("day_trading_mode")
+        or search_audit.get("day_trading_mode")
+        or parameters.get("holding_period") == "intraday"
+        or parameters.get("force_flat_before_close")
+        or parameters.get("no_overnight")
+    )
+
+
+def _is_day_trading_template(template: dict[str, object]) -> bool:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    return bool(
+        parameters.get("day_trading_mode")
+        or parameters.get("holding_period") == "intraday"
+        or parameters.get("force_flat_before_close")
+        or parameters.get("no_overnight")
+        or source_template.get("holding_period") == "intraday"
+        or source_template.get("force_flat_before_close")
+        or source_template.get("no_overnight")
+    )
+
+
+def _is_overnight_template(template: dict[str, object]) -> bool:
+    backtest = _template_backtest(template)
+    family = str(template.get("strategy_family") or "").strip()
+    interval = _template_interval(template)
+    funding_cost = _safe_number(backtest.get("funding_cost"))
+    return family in {"swing_trend", "calendar_turnaround_tuesday", "month_end_seasonality", "everyday_long"} or interval in {"1day", "1d", "daily"} or funding_cost > 0
+
+
+def _is_frozen_template(template: dict[str, object]) -> bool:
+    source_template = _template_source_template(template)
+    parameters = source_template.get("parameters") if isinstance(source_template.get("parameters"), dict) else {}
+    return bool(parameters)
+
+
+def _day_trading_signal_payload(candidate: dict[str, object], account_size: float) -> dict[str, object] | None:
+    parameters = _candidate_parameters(candidate)
+    backtest = _candidate_backtest(candidate)
+    readiness = _candidate_readiness(candidate)
+    warnings = _candidate_warning_codes(candidate)
+    scenario = _scenario_for_account(candidate.get("capital_scenarios"), account_size)
+    if not parameters or not backtest:
+        return None
+    terminal = _has_terminal_capital_blocker(warnings, scenario)
+    tier = str(candidate.get("promotion_tier") or _candidate_audit(candidate).get("promotion_tier") or "watchlist")
+    paper_ready = readiness.get("status") == "ready_for_paper" or tier in {"paper_candidate", "validated_candidate"}
+    eligible_for_review = tier in {"watchlist", "incubator", "research_candidate", "paper_candidate", "validated_candidate"} or _safe_number(backtest.get("net_profit")) > 0
+    evidence = parameters.get("evidence_profile") if isinstance(parameters.get("evidence_profile"), dict) else {}
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    return {
+        "id": candidate.get("id"),
+        "run_id": candidate.get("run_id"),
+        "strategy_name": candidate.get("strategy_name"),
+        "market_id": candidate.get("market_id") or parameters.get("market_id"),
+        "interval": parameters.get("timeframe") or parameters.get("interval") or "5min",
+        "strategy_family": parameters.get("family"),
+        "target_regime": parameters.get("target_regime") or pattern.get("target_regime"),
+        "promotion_tier": tier,
+        "readiness_status": readiness.get("status", "blocked"),
+        "robustness_score": candidate.get("robustness_score", 0),
+        "paper_readiness_score": search_audit.get("paper_readiness_score", 0),
+        "net_profit": round(_safe_number(backtest.get("net_profit")), 4),
+        "oos_net_profit": round(_safe_number(evidence.get("oos_net_profit"), backtest.get("test_profit")), 4),
+        "trade_count": int(_safe_number(backtest.get("trade_count"))),
+        "oos_trade_count": int(_safe_number(evidence.get("oos_trade_count"))),
+        "cost_to_gross_ratio": round(_safe_number(backtest.get("cost_to_gross_ratio")), 6),
+        "funding_cost": round(_safe_number(backtest.get("funding_cost")), 4),
+        "warnings": warnings,
+        "capital_scenario": scenario,
+        "paper_ready": paper_ready and not terminal,
+        "eligible_for_review": eligible_for_review and not terminal,
+        "unsuitable": terminal,
+        "unsuitable_reason": _unsuitable_reason(warnings, scenario) if terminal else "",
+        "broker_preview_only": True,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
+
+
+def _day_trading_template_payload(template: dict[str, object], account_size: float) -> dict[str, object] | None:
+    parameters = _template_parameters(template)
+    backtest = _template_backtest(template)
+    evidence = _template_evidence(template)
+    readiness = _template_readiness(template)
+    warnings = _template_warning_codes(template)
+    scenario = _scenario_for_account(template.get("capital_scenarios"), account_size)
+    if not parameters and not _template_source_template(template):
+        return None
+    terminal = _has_terminal_capital_blocker(warnings, scenario)
+    tier = str(template.get("promotion_tier") or "research_candidate")
+    readiness_status = str(template.get("readiness_status") or readiness.get("status") or "blocked")
+    interval = _template_interval(template)
+    intraday_interval = _is_intraday_interval(interval)
+    frozen = _is_frozen_template(template)
+    active = template.get("status") == "active"
+    overnight = _is_overnight_template(template)
+    has_flat_policy = _template_has_flat_policy(template)
+    blockers: list[str] = []
+    if not active:
+        blockers.append("template_not_active")
+    if not frozen:
+        blockers.append("template_not_frozen")
+    if not intraday_interval:
+        blockers.append("day_trade_requires_intraday_bars")
+    if overnight:
+        blockers.append("overnight_or_swing_template")
+    if not has_flat_policy:
+        blockers.append("day_trade_missing_flat_policy")
+    if terminal:
+        blockers.extend([warning for warning in warnings if warning in {"ig_minimum_margin_too_large_for_account", "ig_minimum_risk_too_large_for_account"}])
+    structural_ready = active and frozen and intraday_interval and not overnight and has_flat_policy and not terminal
+    readiness_ready = readiness_status == "ready_for_paper" or tier in {"paper_candidate", "validated_candidate"}
+    paper_ready = structural_ready and readiness_ready
+    source_template = _template_source_template(template)
+    search_audit = parameters.get("search_audit") if isinstance(parameters.get("search_audit"), dict) else {}
+    return {
+        "id": template.get("id"),
+        "template_id": template.get("id"),
+        "source_type": "frozen_template",
+        "strategy_name": template.get("name"),
+        "name": template.get("name"),
+        "market_id": template.get("market_id") or source_template.get("market_id") or parameters.get("market_id"),
+        "market_type": _market_type_for_template(template),
+        "match_scope": _template_match_scope(template),
+        "interval": interval,
+        "strategy_family": template.get("strategy_family") or source_template.get("family") or parameters.get("family"),
+        "target_regime": template.get("target_regime") or source_template.get("target_regime") or parameters.get("target_regime"),
+        "promotion_tier": tier,
+        "readiness_status": readiness_status,
+        "robustness_score": template.get("robustness_score", 0),
+        "paper_readiness_score": search_audit.get("paper_readiness_score", template.get("robustness_score", 0)),
+        "net_profit": round(_safe_number(backtest.get("net_profit")), 4),
+        "oos_net_profit": round(_safe_number(evidence.get("oos_net_profit"), backtest.get("test_profit")), 4),
+        "trade_count": int(_safe_number(backtest.get("trade_count"))),
+        "oos_trade_count": int(_safe_number(evidence.get("oos_trade_count"))),
+        "cost_to_gross_ratio": round(_safe_number(backtest.get("cost_to_gross_ratio")), 6),
+        "funding_cost": round(_safe_number(backtest.get("funding_cost")), 4),
+        "warnings": list(dict.fromkeys([*warnings, *blockers])),
+        "capital_scenario": scenario,
+        "frozen_rules": True,
+        "strategy_generation_allowed": False,
+        "paper_ready": paper_ready,
+        "eligible_for_review": paper_ready,
+        "unsuitable": terminal,
+        "unsuitable_reason": _unsuitable_reason(warnings, scenario) if terminal else "",
+        "broker_preview_only": True,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "daily_rule": "match_frozen_template_only",
+    }
+
+
+def _template_queue_payload(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    warnings = _template_warning_codes(template)
+    return {
+        "id": template.get("id"),
+        "name": template.get("name"),
+        "market_id": template.get("market_id"),
+        "market_type": _market_type_for_template(template),
+        "match_scope": _template_match_scope(template),
+        "interval": _template_interval(template),
+        "strategy_family": template.get("strategy_family"),
+        "target_regime": template.get("target_regime"),
+        "promotion_tier": template.get("promotion_tier"),
+        "readiness_status": template.get("readiness_status"),
+        "robustness_score": template.get("robustness_score", 0),
+        "warnings": warnings,
+        "frozen_rules": _is_frozen_template(template),
+        "holding_period": "intraday" if _is_day_trading_template(template) else "overnight_or_swing",
+        "live_ordering_enabled": False,
+        "strategy_generation_allowed": False,
+    }
+
+
+def _day_trading_signal_rank(candidate: dict[str, object]) -> tuple[float, ...]:
+    tier_rank = {
+        "validated_candidate": 5,
+        "paper_candidate": 4,
+        "research_candidate": 3,
+        "incubator": 2,
+        "watchlist": 1,
+    }.get(str(candidate.get("promotion_tier") or ""), 0)
+    scenario = candidate.get("capital_scenario") if isinstance(candidate.get("capital_scenario"), dict) else {}
+    capital_rank = 1.0 if scenario.get("feasible") else 0.0
+    cost_penalty = 1.0 if _safe_number(candidate.get("cost_to_gross_ratio")) > 0.65 else 0.0
+    return (
+        tier_rank,
+        capital_rank,
+        _safe_number(candidate.get("paper_readiness_score")),
+        _safe_number(candidate.get("oos_net_profit")),
+        _safe_number(candidate.get("net_profit")),
+        _safe_number(candidate.get("oos_trade_count")),
+        _safe_number(candidate.get("robustness_score")),
+        -cost_penalty,
+    )
+
+
+def _candidate_parameters(candidate: dict[str, object]) -> dict[str, object]:
+    audit = _candidate_audit(candidate)
+    candidate_payload = audit.get("candidate") if isinstance(audit.get("candidate"), dict) else {}
+    parameters = candidate_payload.get("parameters") if isinstance(candidate_payload.get("parameters"), dict) else {}
+    return parameters
+
+
+def _candidate_backtest(candidate: dict[str, object]) -> dict[str, object]:
+    audit = _candidate_audit(candidate)
+    return audit.get("backtest") if isinstance(audit.get("backtest"), dict) else {}
+
+
+def _candidate_readiness(candidate: dict[str, object]) -> dict[str, object]:
+    audit = _candidate_audit(candidate)
+    readiness = audit.get("promotion_readiness") if isinstance(audit.get("promotion_readiness"), dict) else {}
+    return readiness
+
+
+def _candidate_audit(candidate: dict[str, object]) -> dict[str, object]:
+    return candidate.get("audit") if isinstance(candidate.get("audit"), dict) else {}
+
+
+def _candidate_warning_codes(candidate: dict[str, object]) -> list[str]:
+    audit = _candidate_audit(candidate)
+    readiness = _candidate_readiness(candidate)
+    parameters = _candidate_parameters(candidate)
+    pattern = parameters.get("bar_pattern_analysis") if isinstance(parameters.get("bar_pattern_analysis"), dict) else {}
+    warnings = [
+        *list(candidate.get("warnings") or []),
+        *list(audit.get("warnings") or []),
+        *list(readiness.get("blockers") or []),
+        *list(readiness.get("validation_warnings") or []),
+        *list(pattern.get("warnings") or []),
+    ]
+    return list(dict.fromkeys(str(warning) for warning in warnings if warning))
+
+
+def _template_source_template(template: dict[str, object]) -> dict[str, object]:
+    source_template = template.get("source_template") if isinstance(template.get("source_template"), dict) else {}
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    payload_source = payload.get("source_template") if isinstance(payload.get("source_template"), dict) else {}
+    return {**payload_source, **source_template}
+
+
+def _template_parameters(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    payload_parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    parameters = template.get("parameters") if isinstance(template.get("parameters"), dict) else {}
+    source_template = _template_source_template(template)
+    source_parameters = source_template.get("parameters") if isinstance(source_template.get("parameters"), dict) else {}
+    return {**source_parameters, **payload_parameters, **parameters}
+
+
+def _template_backtest(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    if isinstance(template.get("backtest"), dict):
+        return template["backtest"]
+    return payload.get("backtest") if isinstance(payload.get("backtest"), dict) else {}
+
+
+def _template_evidence(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    return payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+
+
+def _template_readiness(template: dict[str, object]) -> dict[str, object]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    readiness = template.get("readiness") if isinstance(template.get("readiness"), dict) else {}
+    payload_readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+    return {**payload_readiness, **readiness}
+
+
+def _template_warning_codes(template: dict[str, object]) -> list[str]:
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    readiness = _template_readiness(template)
+    parameters = _template_parameters(template)
+    pattern = template.get("pattern") if isinstance(template.get("pattern"), dict) else payload.get("pattern") if isinstance(payload.get("pattern"), dict) else {}
+    if not isinstance(pattern, dict):
+        pattern = {}
+    warnings = [
+        *list(template.get("warnings") or []),
+        *list(payload.get("warnings") or []),
+        *list(readiness.get("blockers") or []),
+        *list(readiness.get("validation_warnings") or []),
+        *list(pattern.get("warnings") or []),
+        *list(parameters.get("warnings") or []),
+    ]
+    return list(dict.fromkeys(str(warning) for warning in warnings if warning))
+
+
+def _template_interval(template: dict[str, object]) -> str:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    return str(template.get("interval") or source_template.get("interval") or parameters.get("timeframe") or parameters.get("interval") or "5min")
+
+
+def _template_has_flat_policy(template: dict[str, object]) -> bool:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    return bool(
+        parameters.get("force_flat_before_close")
+        or parameters.get("no_overnight")
+        or source_template.get("force_flat_before_close")
+        or source_template.get("no_overnight")
+    )
+
+
+def _is_intraday_interval(interval: object) -> bool:
+    return str(interval or "").strip().lower().replace(" ", "") in INTRADAY_INTERVALS
+
+
+def _market_type_for_template(template: dict[str, object]) -> str:
+    market_id = str(template.get("market_id") or _template_source_template(template).get("market_id") or "").strip()
+    if market_id:
+        market = markets.get(market_id)
+        if market is not None:
+            return market.asset_class
+    parameters = _template_parameters(template)
+    return str(parameters.get("market_type") or parameters.get("asset_class") or "").strip()
+
+
+def _template_match_scope(template: dict[str, object]) -> str:
+    parameters = _template_parameters(template)
+    source_template = _template_source_template(template)
+    scope = str(parameters.get("template_scope") or source_template.get("template_scope") or "").strip()
+    if scope:
+        return scope
+    market_type = _market_type_for_template(template)
+    if market_type == "share":
+        return "share_behavior"
+    return "single_market"
+
+
+def _scenario_for_account(scenarios: object, account_size: float) -> dict[str, object]:
+    if not isinstance(scenarios, list):
+        return {}
+    selected = next((item for item in scenarios if isinstance(item, dict) and _safe_number(item.get("account_size")) == float(account_size)), None)
+    if selected is None:
+        selected = next((item for item in scenarios if isinstance(item, dict)), None)
+    return selected or {}
+
+
+def _has_terminal_capital_blocker(warnings: list[str], scenario: dict[str, object]) -> bool:
+    violations = list(scenario.get("violations") or []) if isinstance(scenario, dict) else []
+    codes = set(warnings) | {str(item) for item in violations if item}
+    return bool(codes & {"ig_minimum_margin_too_large_for_account", "ig_minimum_risk_too_large_for_account"})
+
+
+def _unsuitable_reason(warnings: list[str], scenario: dict[str, object]) -> str:
+    violations = list(scenario.get("violations") or []) if isinstance(scenario, dict) else []
+    codes = [*warnings, *(str(item) for item in violations if item)]
+    if "ig_minimum_margin_too_large_for_account" in codes:
+        return "IG minimum margin is too large for the selected account."
+    if "ig_minimum_risk_too_large_for_account" in codes:
+        return "IG minimum risk is too large for the selected account."
+    return "Capital fit failed for the selected account."
+
+
+def _safe_number(*values: object) -> float:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if isfinite(number):
+            return number
+    return 0.0
+
 
 
 def _candidate_queue_summary(candidates: list[dict[str, object]]) -> dict[str, int]:
@@ -2076,6 +6592,48 @@ def _ig_provider_blocker(product_mode: str | None = None) -> tuple[str, str]:
     if not _account_id_for_product_mode(mode):
         return f"ig_{mode}_demo_account_required", "ig_demo_account_role_required"
     return "ig_credentials_required", "ig_catalogue_required"
+
+
+def _candidate_issue_counts(candidates: list[dict[str, object]], field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        for value in list(candidate.get(field) or []):
+            key = str(value or "").strip()
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _eodhd_midcap_rows(rows: list[dict[str, object]], criteria: MidcapDiscoveryCriteria, country_hint: str) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for row in rows:
+        code = str(row.get("code") or row.get("Code") or row.get("symbol") or "").strip()
+        if not code or not code[0].isalpha():
+            continue
+        market_cap = _safe_number(row.get("market_capitalization"), row.get("marketCap"), row.get("market_cap"))
+        price = _safe_number(row.get("adjusted_close"), row.get("price"), row.get("close"))
+        volume = _safe_number(row.get("avgvol_200d"), row.get("avgvol_1d"), row.get("volume"))
+        if market_cap < criteria.min_market_cap or market_cap > criteria.max_market_cap:
+            continue
+        if price <= 0 or volume < criteria.min_volume:
+            continue
+        if country_hint == "GB":
+            currency = str(row.get("currency_symbol") or row.get("currency") or "").strip().lower()
+            if currency not in {"p", "gbp", "gbx", "£"}:
+                continue
+            if _eodhd_row_looks_like_fund(row):
+                continue
+        if country_hint == "US":
+            currency = str(row.get("currency_symbol") or row.get("currency") or "").strip().lower()
+            if currency and currency not in {"$", "usd"}:
+                continue
+        output.append(row)
+    return output
+
+
+def _eodhd_row_looks_like_fund(row: dict[str, object]) -> bool:
+    text = " ".join(str(row.get(key) or "") for key in ("name", "Name", "industry", "sector")).lower()
+    return any(term in text for term in (" etf", "ucits", " etn", " etc", "investment trust", "fund", "physical "))
 
 
 def _public_error(exc: Exception) -> str:

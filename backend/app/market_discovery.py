@@ -13,8 +13,24 @@ DEFAULT_MAX_MARKET_CAP = 10_000_000_000.0
 DEFAULT_MIN_VOLUME = 100_000.0
 DEFAULT_MAX_SPREAD_BPS = 60.0
 DEFAULT_STAKE_PROBE = 1.0
+DEFAULT_MAX_MARGIN_FRACTION = 0.35
+MIN_INTRADAY_TURNOVER_BY_COUNTRY = {
+    "GB": 10_000_000.0,
+    "US": 75_000_000.0,
+}
 DISCOVERED_SHARE_DEFAULT_TIMEFRAME = "5min"
 DISCOVERED_SHARE_MIN_BACKTEST_BARS = 750
+SPECULATIVE_SHARE_TERMS = (
+    "biotechnology",
+    "biopharmaceutical",
+    "blockchain",
+    "cannabis",
+    "crypto",
+    "cryptocurrency",
+    "mining inc",
+    "pharmaceutical",
+    "therapeutics",
+)
 
 COUNTRY_EXCHANGE_HINTS = {
     "uk": ("LSE", "GB"),
@@ -67,6 +83,7 @@ class MidcapDiscoveryCandidate:
     market_cap: float
     price: float
     volume: float
+    turnover: float
     product_mode: str
     estimated_spread_bps: float
     estimated_slippage_bps: float
@@ -109,7 +126,7 @@ class MidcapDiscoveryCandidate:
             warnings = (*warnings, "ig_availability_unconfirmed")
             if "ig_market_not_found" not in blockers:
                 blockers = (*blockers, "ig_market_not_found")
-        return replace(self, ig_status=status, ig_epic=epic, ig_name=name, blockers=blockers, eligible=not blockers)
+        return replace(self, ig_status=status, ig_epic=epic, ig_name=name, blockers=blockers, warnings=warnings, eligible=not blockers)
 
     def with_ig_blocker(self, status: str, blocker: str, warning: str = "") -> "MidcapDiscoveryCandidate":
         blockers = self.blockers if blocker in self.blockers else (*self.blockers, blocker)
@@ -149,12 +166,15 @@ def build_midcap_candidates(rows: list[dict[str, Any]], criteria: MidcapDiscover
             continue
         seen.add(candidate.market_id)
         candidates.append(candidate)
-    return sorted(candidates, key=lambda item: (item.eligible, item.score, item.volume), reverse=True)
+    return sorted(candidates, key=lambda item: (item.eligible, item.score, item.turnover, item.volume), reverse=True)
 
 
 def _candidate_from_row(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, source: str) -> MidcapDiscoveryCandidate | None:
-    symbol = str(row.get("symbol") or row.get("ticker") or "").strip()
-    name = str(row.get("companyName") or row.get("company_name") or row.get("name") or symbol).strip()
+    symbol = str(row.get("symbol") or row.get("ticker") or row.get("code") or row.get("Code") or "").strip()
+    exchange = str(row.get("exchangeShortName") or row.get("exchange") or row.get("Exchange") or "").strip()
+    if symbol and "." not in symbol and exchange:
+        symbol = f"{symbol}.{exchange}"
+    name = str(row.get("companyName") or row.get("company_name") or row.get("name") or row.get("Name") or symbol).strip()
     if not symbol or not name:
         return None
     market_id = _market_id_from_symbol(symbol)
@@ -179,9 +199,10 @@ def _candidate_from_row(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, 
     share_model = share_spread_bet_model(market)
     if share_model is None:
         return None
-    market_cap = _float(row.get("marketCap"), row.get("market_cap"), row.get("mktCap"))
-    price = _float(row.get("price"), row.get("lastSale"), row.get("last"))
-    volume = _float(row.get("volume"), row.get("avgVolume"), row.get("averageVolume"))
+    market_cap = _float(row.get("marketCap"), row.get("market_cap"), row.get("mktCap"), row.get("market_capitalization"))
+    price = _float(row.get("price"), row.get("lastSale"), row.get("last"), row.get("adjusted_close"), row.get("close"))
+    volume = _float(row.get("volume"), row.get("avgVolume"), row.get("averageVolume"), row.get("avgvol_200d"), row.get("avgvol_1d"))
+    turnover = _estimated_turnover(price, volume, row, criteria)
     spread_bps = max(market.spread_bps, share_model.dealing_spread_bps)
     slippage_bps = max(market.slippage_bps, share_model.slippage_bps)
     margin_percent = share_model.margin_percent
@@ -195,33 +216,42 @@ def _candidate_from_row(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, 
         blockers.append("below_midcap_market_cap_floor")
     elif market_cap > criteria.max_market_cap:
         blockers.append("above_midcap_market_cap_ceiling")
+    _exchange, country_code = country_exchange_hint(criteria.country)
     if price <= 0:
         blockers.append("missing_price")
     if volume < criteria.min_volume:
         blockers.append("low_liquidity")
+    if price > 0 and volume > 0 and turnover < _minimum_intraday_turnover(criteria):
+        blockers.append("turnover_too_low_for_day_trading_watchlist")
     if spread_bps > criteria.max_spread_bps:
         blockers.append("spread_too_wide_for_scan")
     feasible = True
-    if price > 0 and estimated_margin > criteria.account_size * 0.5:
+    if price > 0 and estimated_margin > criteria.account_size * DEFAULT_MAX_MARGIN_FRACTION:
         feasible = False
         blockers.append("probe_stake_margin_too_large")
     if criteria.product_mode == "cfd":
         warnings.append("cfd_cost_model_not_yet_enabled")
     if source.startswith("built_in"):
         warnings.append("starter_universe_not_live_constituents")
-    score = _score_candidate(market_cap, price, volume, spread_bps, estimated_margin, criteria)
+    quality_penalty, quality_warnings = _quality_penalty(row, criteria, price)
+    warnings.extend(quality_warnings)
+    for warning in quality_warnings:
+        if warning in {"speculative_share_profile", "low_priced_us_share"} and warning not in blockers:
+            blockers.append(warning)
+    score = max(0.0, _score_candidate(market_cap, price, volume, turnover, spread_bps, estimated_margin, criteria) - quality_penalty)
     return MidcapDiscoveryCandidate(
         market_id=market_id,
         name=name,
         symbol=symbol,
         fmp_symbol=symbol,
         eodhd_symbol=eodhd_symbol,
-        exchange=str(row.get("exchangeShortName") or row.get("exchange") or ""),
+        exchange=exchange,
         country=str(row.get("country") or country_exchange_hint(criteria.country)[1]),
-        currency=str(row.get("currency") or ""),
+        currency=str(row.get("currency") or row.get("currency_symbol") or ""),
         market_cap=round(market_cap, 2),
         price=round(price, 6),
         volume=round(volume, 2),
+        turnover=round(turnover, 2),
         product_mode=criteria.product_mode,
         estimated_spread_bps=round(spread_bps, 6),
         estimated_slippage_bps=round(slippage_bps, 6),
@@ -266,28 +296,84 @@ def _score_candidate(
     market_cap: float,
     price: float,
     volume: float,
+    turnover: float,
     spread_bps: float,
     estimated_margin: float,
     criteria: MidcapDiscoveryCriteria,
 ) -> float:
-    liquidity_score = min(35.0, volume / max(criteria.min_volume, 1.0) * 7.0)
+    liquidity_score = min(25.0, volume / max(criteria.min_volume, 1.0) * 5.0)
+    turnover_score = min(25.0, turnover / max(_minimum_intraday_turnover(criteria), 1.0) * 18.0)
     cap_midpoint = (criteria.min_market_cap + criteria.max_market_cap) / 2
     cap_distance = abs(market_cap - cap_midpoint) / max(cap_midpoint, 1.0) if market_cap > 0 else 1.0
     cap_score = max(0.0, 25.0 * (1.0 - min(1.0, cap_distance)))
     cost_score = max(0.0, 20.0 * (1.0 - min(1.0, spread_bps / max(criteria.max_spread_bps, 1.0))))
-    margin_score = max(0.0, 20.0 * (1.0 - min(1.0, estimated_margin / max(criteria.account_size * 0.5, 1.0))))
+    margin_score = max(0.0, 20.0 * (1.0 - min(1.0, estimated_margin / max(criteria.account_size * DEFAULT_MAX_MARGIN_FRACTION, 1.0))))
     price_score = 5.0 if price > 0 else 0.0
-    return liquidity_score + cap_score + cost_score + margin_score + price_score
+    return liquidity_score + turnover_score + cap_score + cost_score + margin_score + price_score
+
+
+def _estimated_turnover(price: float, volume: float, row: dict[str, Any], criteria: MidcapDiscoveryCriteria) -> float:
+    if price <= 0 or volume <= 0:
+        return 0.0
+    currency = str(row.get("currency") or row.get("currency_symbol") or "").strip().lower()
+    _exchange, country_code = country_exchange_hint(criteria.country)
+    price_units = price / 100.0 if country_code == "GB" and currency in {"p", "gbp", "gbx", "gbpence", "gbp pence", "£", "gbp"} and price > 20 else price
+    return price_units * volume
+
+
+def _minimum_intraday_turnover(criteria: MidcapDiscoveryCriteria) -> float:
+    _exchange, country_code = country_exchange_hint(criteria.country)
+    return MIN_INTRADAY_TURNOVER_BY_COUNTRY.get(country_code, 10_000_000.0)
+
+
+def _quality_penalty(row: dict[str, Any], criteria: MidcapDiscoveryCriteria, price: float) -> tuple[float, list[str]]:
+    warnings: list[str] = []
+    penalty = 0.0
+    _exchange, country_code = country_exchange_hint(criteria.country)
+    text = _normal_key(" ".join(str(row.get(key) or "") for key in ("name", "Name", "companyName", "industry", "sector")))
+    if any(term.replace(" ", "_") in text for term in SPECULATIVE_SHARE_TERMS):
+        warnings.append("speculative_share_profile")
+        penalty += 22.0
+    earnings = _optional_float(row.get("earnings_share"), row.get("eps"), row.get("epsTTM"))
+    dividend_yield = _optional_float(row.get("dividend_yield"), row.get("lastDiv"), row.get("dividendYield"))
+    if earnings is not None and earnings < 0:
+        warnings.append("negative_earnings_share")
+        penalty += 10.0
+    if country_code == "US" and (earnings is not None and earnings <= 0) and (dividend_yield is None or dividend_yield <= 0):
+        warnings.append("no_profit_or_dividend_anchor")
+        penalty += 6.0
+    one_day_move = abs(_float(row.get("refund_1d_p"), row.get("change_p"), row.get("changesPercentage")))
+    five_day_move = abs(_float(row.get("refund_5d_p")))
+    if one_day_move >= 8.0 or five_day_move >= 15.0:
+        warnings.append("high_recent_move")
+        penalty += 10.0
+    if country_code == "US" and 0 < price < 10.0:
+        warnings.append("low_priced_us_share")
+        penalty += 8.0
+    return penalty, warnings
 
 
 def _normal_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
 
 
+def _optional_float(*values: object) -> float | None:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _float(*values: object) -> float:
     for value in values:
+        if value in (None, ""):
+            continue
         try:
-            return float(value or 0.0)
+            return float(value)
         except (TypeError, ValueError):
             continue
     return 0.0

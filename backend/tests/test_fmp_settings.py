@@ -189,6 +189,406 @@ def test_recent_ig_price_snapshot_tries_daily_for_share_epics():
     assert calls == ["MINUTE_5", "DAY"]
 
 
+def test_sync_ig_costs_still_uses_recent_price_when_account_status_fails(monkeypatch):
+    market = MarketMapping(
+        "PEGA",
+        "Pegasystems Inc",
+        "share",
+        "PEGA.US",
+        "UC.D.PEGAUS.CASH.IP",
+        True,
+        "discovered-pega",
+        "Pegasystems Inc",
+        "PEGA,Pegasystems Inc",
+        "5min",
+        15.0,
+        7.5,
+        750,
+    )
+    saved_profiles: list[dict[str, object]] = []
+
+    class FakeSettings:
+        def get_secret(self, provider: str, key: str) -> str | None:
+            values = {
+                ("ig", "api_key"): "demo-api",
+                ("ig", "username"): "demo-user",
+                ("ig", "password"): "demo-pass",
+                ("ig_accounts", "cfd_account_id"): "CFD98765",
+            }
+            return values.get((provider, key))
+
+    class FakeMarkets:
+        def get(self, market_id: str):
+            return market if market_id == "PEGA" else None
+
+    class FakeStore:
+        def get_cost_profile(self, market_id: str):
+            return None
+
+        def save_cost_profile(self, profile) -> None:
+            saved_profiles.append(profile.as_dict())
+
+    class FakeIGProvider:
+        def __init__(self, api_key: str, username: str, password: str, account_id: str = "") -> None:
+            self.account_id = account_id
+
+        async def account_status(self):
+            raise RuntimeError("error.public-api.exceeded-API key allowance")
+
+        async def market_details(self, epic: str) -> dict[str, object]:
+            return {
+                "instrument": {"epic": epic, "name": "Pegasystems Inc", "type": "SHARES"},
+                "snapshot": {"marketStatus": "CLOSED"},
+                "dealingRules": {"minDealSize": {"value": 1}},
+            }
+
+        async def recent_price_snapshot(
+            self,
+            epic: str,
+            resolution: str = "MINUTE_5",
+            max_points: int = 10,
+        ) -> dict[str, object] | None:
+            return {"reference_price": 36.79, "snapshot_time": "2026-05-05T20:00:00", "resolution": resolution}
+
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "research_store", FakeStore())
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    result = asyncio.run(main.sync_ig_market_costs(main.IGCostSyncPayload(market_ids=["PEGA"], product_mode="cfd")))
+
+    assert result["status"] == "synced"
+    assert result["price_validated_count"] == 1
+    assert result["ig_rate_limited"] is False
+    assert result["account_status_rate_limited"] is True
+    assert result["profiles"][0]["confidence"] == "ig_recent_epic_reference_profile"
+    assert result["profiles"][0]["validation_status"] == "ig_price_validated"
+    assert "account status check failed" in " ".join(result["profiles"][0]["notes"])
+    assert saved_profiles[0]["confidence"] == "ig_recent_epic_reference_profile"
+
+
+def test_sync_ig_costs_reports_price_validation_rate_limit(monkeypatch):
+    market = MarketMapping(
+        "PEGA",
+        "Pegasystems Inc",
+        "share",
+        "PEGA.US",
+        "UC.D.PEGAUS.CASH.IP",
+        True,
+        "discovered-pega",
+        "Pegasystems Inc",
+        "PEGA,Pegasystems Inc",
+        "5min",
+        15.0,
+        7.5,
+        750,
+    )
+    saved_profiles: list[dict[str, object]] = []
+
+    class Account:
+        currency = "GBP"
+
+    class FakeSettings:
+        def get_secret(self, provider: str, key: str) -> str | None:
+            values = {
+                ("ig", "api_key"): "demo-api",
+                ("ig", "username"): "demo-user",
+                ("ig", "password"): "demo-pass",
+                ("ig_accounts", "cfd_account_id"): "CFD98765",
+            }
+            return values.get((provider, key))
+
+    class FakeMarkets:
+        def get(self, market_id: str):
+            return market if market_id == "PEGA" else None
+
+    class FakeStore:
+        def get_cost_profile(self, market_id: str):
+            return None
+
+        def save_cost_profile(self, profile) -> None:
+            saved_profiles.append(profile.as_dict())
+
+    class FakeIGProvider:
+        def __init__(self, api_key: str, username: str, password: str, account_id: str = "") -> None:
+            self.account_id = account_id
+
+        async def account_status(self):
+            return Account()
+
+        async def market_details(self, epic: str) -> dict[str, object]:
+            raise RuntimeError("error.public-api.exceeded-API key allowance")
+
+        async def recent_price_snapshot(
+            self,
+            epic: str,
+            resolution: str = "MINUTE_5",
+            max_points: int = 10,
+        ) -> dict[str, object] | None:
+            raise RuntimeError("error.public-api.exceeded-API key allowance")
+
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "research_store", FakeStore())
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    result = asyncio.run(main.sync_ig_market_costs(main.IGCostSyncPayload(market_ids=["PEGA"], product_mode="cfd")))
+
+    assert result["status"] == "ig_rate_limited"
+    assert result["price_validated_count"] == 0
+    assert result["ig_rate_limited"] is True
+    assert result["price_validation_rate_limited"] is True
+    assert result["account_status_rate_limited"] is False
+    assert "price validation was rate-limited" in " ".join(result["profiles"][0]["notes"])
+    assert saved_profiles[0]["confidence"] == "ig_public_spread_baseline"
+
+
+def test_sync_ig_costs_can_skip_account_status_for_guided_builder(monkeypatch):
+    market = MarketMapping(
+        "PEGA",
+        "Pegasystems Inc",
+        "share",
+        "PEGA.US",
+        "UC.D.PEGAUS.CASH.IP",
+        True,
+        "discovered-pega",
+        "Pegasystems Inc",
+        "PEGA,Pegasystems Inc",
+        "5min",
+        15.0,
+        7.5,
+        750,
+    )
+
+    class FakeSettings:
+        def get_secret(self, provider: str, key: str) -> str | None:
+            values = {
+                ("ig", "api_key"): "demo-api",
+                ("ig", "username"): "demo-user",
+                ("ig", "password"): "demo-pass",
+                ("ig_accounts", "cfd_account_id"): "CFD98765",
+            }
+            return values.get((provider, key))
+
+    class FakeMarkets:
+        def get(self, market_id: str):
+            return market if market_id == "PEGA" else None
+
+    class FakeStore:
+        def get_cost_profile(self, market_id: str):
+            return None
+
+        def save_cost_profile(self, profile) -> None:
+            pass
+
+    class FakeIGProvider:
+        def __init__(self, api_key: str, username: str, password: str, account_id: str = "") -> None:
+            self.account_id = account_id
+
+        async def account_status(self):
+            raise AssertionError("guided builder should not spend an IG call on account status")
+
+        async def market_details(self, epic: str) -> dict[str, object]:
+            return {
+                "instrument": {"epic": epic, "name": "Pegasystems Inc", "type": "SHARES"},
+                "snapshot": {"marketStatus": "CLOSED"},
+                "dealingRules": {"minDealSize": {"value": 1}},
+            }
+
+        async def recent_price_snapshot(
+            self,
+            epic: str,
+            resolution: str = "MINUTE_5",
+            max_points: int = 10,
+        ) -> dict[str, object] | None:
+            return {"reference_price": 36.79, "snapshot_time": "2026-05-05T20:00:00", "resolution": resolution}
+
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "research_store", FakeStore())
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    result = asyncio.run(
+        main.sync_ig_market_costs(main.IGCostSyncPayload(market_ids=["PEGA"], product_mode="cfd", skip_account_status=True))
+    )
+
+    assert result["status"] == "synced"
+    assert result["price_validated_count"] == 1
+    assert result["ig_rate_limited"] is False
+    assert result["account_status_rate_limited"] is False
+    assert "account status check failed" not in " ".join(result["profiles"][0]["notes"])
+
+
+def test_sync_ig_costs_reuses_stored_price_validated_profiles(monkeypatch):
+    market = MarketMapping(
+        "PEGA",
+        "Pegasystems Inc",
+        "share",
+        "PEGA.US",
+        "UC.D.PEGAUS.CASH.IP",
+        True,
+        "discovered-pega",
+        "Pegasystems Inc",
+        "PEGA,Pegasystems Inc",
+        "5min",
+        15.0,
+        7.5,
+        750,
+    )
+    stored_profile = {
+        "market_id": "PEGA",
+        "epic": "UC.D.PEGAUS.CASH.IP",
+        "confidence": "ig_recent_epic_reference_profile",
+        "validation_status": "ig_price_validated",
+        "spread_bps": 15.0,
+        "slippage_bps": 7.5,
+        "notes": ["Stored validated profile."],
+    }
+    saved_profiles: list[dict[str, object]] = []
+
+    class FakeSettings:
+        def get_secret(self, provider: str, key: str) -> str | None:
+            values = {
+                ("ig", "api_key"): "demo-api",
+                ("ig", "username"): "demo-user",
+                ("ig", "password"): "demo-pass",
+                ("ig_accounts", "cfd_account_id"): "CFD98765",
+            }
+            return values.get((provider, key))
+
+    class FakeMarkets:
+        def get(self, market_id: str):
+            return market if market_id == "PEGA" else None
+
+    class FakeStore:
+        def get_cost_profile(self, market_id: str):
+            return dict(stored_profile) if market_id == "PEGA" else None
+
+        def save_cost_profile(self, profile) -> None:
+            saved_profiles.append(profile.as_dict() if hasattr(profile, "as_dict") else dict(profile))
+
+    class FakeIGProvider:
+        def __init__(self, api_key: str, username: str, password: str, account_id: str = "") -> None:
+            self.account_id = account_id
+
+        async def account_status(self):
+            raise AssertionError("stored validated profile should avoid account status when skipped")
+
+        async def market_details(self, epic: str) -> dict[str, object]:
+            raise AssertionError("stored validated profile should avoid IG market calls")
+
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "research_store", FakeStore())
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    result = asyncio.run(
+        main.sync_ig_market_costs(main.IGCostSyncPayload(market_ids=["PEGA"], product_mode="cfd", skip_account_status=True))
+    )
+
+    assert result["status"] == "synced"
+    assert result["price_validated_count"] == 1
+    assert result["profiles"][0]["confidence"] == "ig_recent_epic_reference_profile"
+    assert "Reused an existing IG price-validated cost profile" in " ".join(result["profiles"][0]["notes"])
+    assert saved_profiles == []
+
+
+def test_sync_ig_costs_stops_after_first_price_validation_rate_limit(monkeypatch):
+    markets_by_id = {
+        "PEGA": MarketMapping(
+            "PEGA",
+            "Pegasystems Inc",
+            "share",
+            "PEGA.US",
+            "UC.D.PEGAUS.CASH.IP",
+            True,
+            "discovered-pega",
+            "Pegasystems Inc",
+            "PEGA,Pegasystems Inc",
+            "5min",
+            15.0,
+            7.5,
+            750,
+        ),
+        "TEST": MarketMapping(
+            "TEST",
+            "Test Software",
+            "share",
+            "TEST.US",
+            "UC.D.TESTUS.CASH.IP",
+            True,
+            "discovered-test",
+            "Test Software",
+            "TEST,Test Software",
+            "5min",
+            15.0,
+            7.5,
+            750,
+        ),
+    }
+    saved_profiles: list[dict[str, object]] = []
+    market_detail_calls: list[str] = []
+    price_calls: list[str] = []
+
+    class FakeSettings:
+        def get_secret(self, provider: str, key: str) -> str | None:
+            values = {
+                ("ig", "api_key"): "demo-api",
+                ("ig", "username"): "demo-user",
+                ("ig", "password"): "demo-pass",
+                ("ig_accounts", "cfd_account_id"): "CFD98765",
+            }
+            return values.get((provider, key))
+
+    class FakeMarkets:
+        def get(self, market_id: str):
+            return markets_by_id.get(market_id)
+
+    class FakeStore:
+        def get_cost_profile(self, market_id: str):
+            return None
+
+        def save_cost_profile(self, profile) -> None:
+            saved_profiles.append(profile.as_dict() if hasattr(profile, "as_dict") else dict(profile))
+
+    class FakeIGProvider:
+        def __init__(self, api_key: str, username: str, password: str, account_id: str = "") -> None:
+            self.account_id = account_id
+
+        async def account_status(self):
+            raise AssertionError("guided builder should skip account status")
+
+        async def market_details(self, epic: str) -> dict[str, object]:
+            market_detail_calls.append(epic)
+            raise RuntimeError("error.public-api.exceeded-API key allowance")
+
+        async def recent_price_snapshot(
+            self,
+            epic: str,
+            resolution: str = "MINUTE_5",
+            max_points: int = 10,
+        ) -> dict[str, object] | None:
+            price_calls.append(f"{epic}:{resolution}")
+            raise RuntimeError("error.public-api.exceeded-API key allowance")
+
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "research_store", FakeStore())
+    monkeypatch.setattr(main, "IGDemoProvider", FakeIGProvider)
+
+    result = asyncio.run(
+        main.sync_ig_market_costs(main.IGCostSyncPayload(market_ids=["PEGA", "TEST"], product_mode="cfd", skip_account_status=True))
+    )
+
+    assert result["status"] == "ig_rate_limited"
+    assert result["price_validated_count"] == 0
+    assert result["ig_rate_limited"] is True
+    assert market_detail_calls == ["UC.D.PEGAUS.CASH.IP"]
+    assert price_calls == ["UC.D.PEGAUS.CASH.IP:MINUTE_5"]
+    assert "Skipped IG price validation" in " ".join(result["profiles"][1]["notes"])
+    assert [profile["market_id"] for profile in saved_profiles] == ["PEGA", "TEST"]
+
+
 def test_midcap_endpoint_blocks_candidates_until_ig_catalogue_is_checked(tmp_path, monkeypatch):
     store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
     monkeypatch.setattr(main, "settings", store)
@@ -212,3 +612,101 @@ def test_midcap_endpoint_blocks_candidates_until_ig_catalogue_is_checked(tmp_pat
     assert result["eligible_count"] == 0
     assert result["ig_status"] == "ig_required_not_checked"
     assert "ig_catalogue_not_checked" in result["candidates"][0]["blockers"]
+
+
+def test_midcap_endpoint_prefers_eodhd_screener_when_available(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("eodhd", "api_token", "eodhd-token")
+    monkeypatch.setattr(main, "settings", store)
+
+    class FakeEODHDProvider:
+        def __init__(self, api_token: str) -> None:
+            self.api_token = api_token
+
+        async def stock_screener(self, **kwargs):
+            return [
+                {
+                    "code": "MKS",
+                    "name": "Marks and Spencer Group",
+                    "exchange": "LSE",
+                    "currency_symbol": "GBp",
+                    "market_capitalization": 6_500_000_000,
+                    "adjusted_close": 323.95,
+                    "avgvol_200d": 2_000_000,
+                }
+            ]
+
+    monkeypatch.setattr(main, "EODHDProvider", FakeEODHDProvider)
+
+    result = asyncio.run(
+        main.discover_midcap_markets(
+            country="UK",
+            product_mode="spread_bet",
+            limit=3,
+            min_market_cap=250_000_000,
+            max_market_cap=10_000_000_000,
+            min_volume=100_000,
+            max_spread_bps=60,
+            account_size=3000,
+            verify_ig=False,
+            require_ig_catalogue=False,
+        )
+    )
+
+    assert result["data_source"] == "eodhd_stock_screener"
+    assert result["candidate_count"] == 1
+    assert result["eligible_count"] == 1
+    assert result["candidates"][0]["eodhd_symbol"] == "MKS.LSE"
+
+
+def test_midcap_endpoint_checks_all_us_exchanges_before_ranking(tmp_path, monkeypatch):
+    store = SettingsStore(tmp_path / "settings.sqlite3", ReverseCipher())
+    store.set_secret("eodhd", "api_token", "eodhd-token")
+    monkeypatch.setattr(main, "settings", store)
+    calls: list[str] = []
+
+    class FakeEODHDProvider:
+        def __init__(self, api_token: str) -> None:
+            self.api_token = api_token
+
+        async def stock_screener(self, **kwargs):
+            exchange = str(kwargs.get("exchange") or "")
+            calls.append(exchange)
+            return [
+                {
+                    "code": f"{exchange[:3]}A",
+                    "name": f"{exchange} Test Software",
+                    "exchange": exchange,
+                    "currency_symbol": "$",
+                    "market_capitalization": 5_000_000_000,
+                    "adjusted_close": 25.0,
+                    "avgvol_200d": 1_000_000,
+                    "earnings_share": 1.0,
+                }
+            ]
+
+    monkeypatch.setattr(main, "EODHDProvider", FakeEODHDProvider)
+
+    result = asyncio.run(
+        main.discover_midcap_markets(
+            country="US",
+            product_mode="cfd",
+            limit=1,
+            min_market_cap=250_000_000,
+            max_market_cap=10_000_000_000,
+            min_volume=100_000,
+            max_spread_bps=60,
+            account_size=3000,
+            verify_ig=False,
+            require_ig_catalogue=False,
+        )
+    )
+
+    assert result["data_source"] == "eodhd_stock_screener"
+    assert {"NASDAQ", "NYSE", "AMEX"}.issubset(set(calls))
+    assert result["candidate_count"] == 1
+
+
+def test_ig_rate_limit_text_is_reported_as_cost_sync_status():
+    assert main._looks_like_ig_rate_limit("IG login failed: error.public-api.exceeded-API key hidden")
+    assert not main._looks_like_ig_rate_limit("IG market not found")

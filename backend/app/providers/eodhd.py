@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -17,6 +18,7 @@ class EODHDProvider:
     BASE_URL = "https://eodhd.com/api"
     QUOTE_TTL_SECONDS = 60
     SEARCH_TTL_SECONDS = 7 * 24 * 60 * 60
+    STOCK_SCREENER_TTL_SECONDS = 6 * 60 * 60
     CLOSED_HISTORY_TTL_SECONDS = 180 * 24 * 60 * 60
     LIVE_HISTORY_TTL_SECONDS = 15 * 60
     NEGATIVE_ERROR_TTL_SECONDS = 2 * 60
@@ -126,6 +128,45 @@ class EODHDProvider:
             }
             for item in payload
         ]
+
+    async def stock_screener(
+        self,
+        *,
+        exchange: str = "",
+        market_cap_more_than: float | int | None = None,
+        market_cap_lower_than: float | int | None = None,
+        min_volume: float | int | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        filters: list[list[object]] = []
+        if exchange:
+            filters.append(["exchange", "=", exchange])
+        if market_cap_more_than is not None:
+            filters.append(["market_capitalization", ">", max(0.0, float(market_cap_more_than))])
+        if market_cap_lower_than is not None:
+            filters.append(["market_capitalization", "<", max(0.0, float(market_cap_lower_than))])
+        if min_volume is not None:
+            filters.append(["avgvol_200d", ">", max(0.0, float(min_volume))])
+        params: dict[str, object] = {
+            "sort": "market_capitalization.desc",
+            "limit": max(1, min(100, int(limit))),
+            "offset": max(0, min(999, int(offset))),
+        }
+        if filters:
+            params["filters"] = json.dumps(filters, separators=(",", ":"))
+        payload = await self._get_json(
+            "eodhd_stock_screener",
+            "/screener",
+            params,
+            ttl_seconds=self.STOCK_SCREENER_TTL_SECONDS,
+            use_cache=True,
+            timeout_seconds=20.0,
+            timeout_message="EODHD stock screener timed out after 20 seconds",
+            operation="stock screener",
+            symbol_for_error=exchange or "stocks",
+        )
+        return _screening_rows(payload)
 
     async def validate(self) -> bool:
         await self.quote("AAPL.US", use_cache=False)
@@ -405,6 +446,17 @@ def _raise_status_error(exc: object, operation: str, symbol: str) -> None:
 def _status_code(exc: object) -> int | str:
     response = getattr(exc, "response", None)
     return getattr(response, "status_code", "unknown")
+
+
+def _screening_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "results", "stocks", "items"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
 
 
 def _cached_error_status(payload: object) -> str:
