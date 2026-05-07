@@ -113,6 +113,7 @@ GUIDED_AUTO_REPAIR_MAX_RUNS = 1
 GUIDED_AUTO_FREEZE_PIPELINE_SCHEMAS = {
     "midcap_template_pipeline_v1",
     "index_template_pipeline_v1",
+    "scenario_recipe_pipeline_v1",
     "guided_auto_repair_pipeline_v1",
 }
 GUIDED_AUTO_FREEZE_REPAIR_MODES = {
@@ -208,6 +209,45 @@ MANUAL_TRADER_PLAYBOOKS: dict[str, dict[str, object]] = {
         "max_spread_bps": 75.0,
         "max_vwap_distance_against_bps": 25.0,
         "require_vwap_alignment": False,
+    },
+}
+SCENARIO_MARKET_IDS = ("NAS100", "XAUUSD")
+SCENARIO_RECIPES: dict[str, dict[str, object]] = {
+    "nas100_vwap_pullback": {
+        "id": "nas100_vwap_pullback",
+        "label": "NAS100 VWAP Pullback",
+        "market_id": "NAS100",
+        "role": "primary",
+        "session": "US open",
+        "timeframe": "5min",
+        "families": ["intraday_trend", "mean_reversion"],
+        "manual_playbook": "vwap_trend_pullback",
+        "setup": "VWAP hold/reclaim, pullback, continuation",
+        "max_spread_bps": 2.5,
+        "min_relative_volume": 0.75,
+        "min_trend_bps": 8.0,
+        "allowed_scenarios": ["vwap_acceptance", "vwap_pullback"],
+        "cost_stress_multiplier": 2.5,
+        "search_budget": 54,
+        "regime_scan_budget_per_regime": 6,
+    },
+    "xauusd_vwap_rejection": {
+        "id": "xauusd_vwap_rejection",
+        "label": "XAUUSD VWAP Rejection",
+        "market_id": "XAUUSD",
+        "role": "secondary",
+        "session": "London/NY overlap and US open",
+        "timeframe": "5min",
+        "families": ["liquidity_sweep_reversal", "mean_reversion", "volatility_expansion"],
+        "manual_playbook": "failed_breakout_reversal",
+        "setup": "Opening range sweep, VWAP reclaim/loss, rejection confirmation",
+        "max_spread_bps": 14.0,
+        "min_relative_volume": 0.8,
+        "min_sweep_bps": 1.0,
+        "allowed_scenarios": ["opening_range_sweep", "vwap_rejection"],
+        "cost_stress_multiplier": 3.0,
+        "search_budget": 54,
+        "regime_scan_budget_per_regime": 6,
     },
 }
 MIDCAP_TEMPLATE_DESIGNS: dict[str, dict[str, object]] = {
@@ -515,6 +555,27 @@ class DailyTemplateScannerPayload(BaseModel):
 class DailyTemplateAfterClosePayload(BaseModel):
     results: dict[str, object] = Field(default_factory=dict)
     status: str = "reviewed"
+
+
+class ScenarioRecipeBuildPayload(BaseModel):
+    product_mode: str = "spread_bet"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    start: str = "2025-01-01"
+    end: str = Field(default_factory=lambda: date.today().isoformat())
+    auto_sync_costs: bool = True
+
+
+class ScenarioScannerPayload(BaseModel):
+    trading_date: str | None = None
+    product_mode: str = "spread_bet"
+    account_size: float = Field(default=WORKING_ACCOUNT_SIZE_GBP, gt=0)
+    paper_limit: int = Field(default=1, ge=1, le=3)
+    review_limit: int = Field(default=5, ge=1, le=10)
+    lookback_days: int = Field(default=10, ge=1, le=30)
+
+
+class ScenarioResetPayload(BaseModel):
+    confirm: str = ""
 
 
 class MidcapTemplatePipelinePayload(BaseModel):
@@ -991,6 +1052,66 @@ async def start_midcap_template_pipeline(
     if payload.auto_start_run and api_token is None:
         raise HTTPException(status_code=400, detail="EODHD API token is required before starting a midcap template-design run")
     return await _run_midcap_template_pipeline(payload, background_tasks, api_token or "")
+
+
+@app.get("/scenario/summary")
+def scenario_summary(
+    account_size: float = Query(default=WORKING_ACCOUNT_SIZE_GBP, gt=0),
+) -> dict[str, object]:
+    return _scenario_summary(account_size)
+
+
+@app.post("/scenario/recipes/{recipe_id}/build")
+async def start_scenario_recipe_build(
+    recipe_id: str,
+    payload: ScenarioRecipeBuildPayload,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before building a scenario recipe")
+    return await _start_scenario_recipe_build(recipe_id, payload, background_tasks, api_token)
+
+
+@app.post("/scenario/scanner/start")
+async def start_scenario_scanner(payload: ScenarioScannerPayload) -> dict[str, object]:
+    api_token = settings.get_secret("eodhd", "api_token")
+    if api_token is None:
+        raise HTTPException(status_code=400, detail="EODHD API token is required before starting the scenario scanner")
+    return await _run_scenario_scanner(payload, api_token)
+
+
+@app.get("/scenario/scanner/latest")
+def latest_scenario_scan() -> dict[str, object]:
+    latest = research_store.latest_day_trading_scan()
+    if latest is None:
+        return {"status": "not_started", "latest_scan": None}
+    config = latest.get("config") if isinstance(latest.get("config"), dict) else {}
+    if config.get("schema") != "scenario_daily_scan_v1":
+        return {"status": "not_started", "latest_scan": None}
+    return {"status": latest.get("status", "unknown"), "latest_scan": latest}
+
+
+@app.post("/scenario/scanner/{scan_id}/after-close")
+def record_scenario_after_close(scan_id: int, payload: DailyTemplateAfterClosePayload) -> dict[str, object]:
+    return record_daily_template_after_close(scan_id, payload)
+
+
+@app.post("/scenario/reset")
+async def reset_scenario_research(payload: ScenarioResetPayload) -> dict[str, object]:
+    if payload.confirm != "RESET_SCENARIO_APP":
+        raise HTTPException(status_code=400, detail="Type RESET_SCENARIO_APP to back up and clear research data")
+    reset_result = research_store.backup_and_reset_research()
+    cost_sync = await sync_ig_market_costs(
+        IGCostSyncPayload(market_ids=list(SCENARIO_MARKET_IDS), product_mode="spread_bet", skip_account_status=True)
+    )
+    return {
+        "schema": "scenario_research_reset_v1",
+        **reset_result,
+        "cost_sync": cost_sync,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
 
 
 @app.get("/broker/summary")
@@ -2599,6 +2720,8 @@ def _guided_auto_repair_payload(
     dominant_month = _guided_auto_repair_dominant_month(pattern)
     pipeline = parent_payload.pipeline if isinstance(parent_payload.pipeline, dict) else {}
     auto_freeze = pipeline.get("auto_freeze") if isinstance(pipeline.get("auto_freeze"), dict) else {}
+    recipe_id = str(pipeline.get("recipe_id") or "").strip()
+    manual_playbook = str(pipeline.get("manual_playbook") or "").strip()
     repair_attempt = _safe_int(auto_freeze.get("auto_repair_count")) + 1
     max_repair_runs = max(repair_attempt, _safe_int(auto_freeze.get("max_auto_repair_runs") or GUIDED_AUTO_REPAIR_MAX_RUNS))
 
@@ -2686,6 +2809,8 @@ def _guided_auto_repair_payload(
         "schema": "guided_auto_repair_pipeline_v1",
         "parent_run_id": parent_run_id,
         "source_trial_id": source_trial.get("id"),
+        "recipe_id": recipe_id,
+        "manual_playbook": manual_playbook,
         "daily_mode_source": "active_frozen_template_library_only",
         "strategy_generation_allowed": False,
         "auto_freeze": {
@@ -2723,7 +2848,12 @@ def _guided_auto_repair_payload(
         excluded_months=excluded_months,
         repair_mode=repair_mode,
         account_size=parent_payload.account_size,
-        source_template={**source_template, "repair_attempt_count": repair_attempt},
+        source_template={
+            **source_template,
+            "repair_attempt_count": repair_attempt,
+            **({"scenario_recipe": recipe_id} if recipe_id else {}),
+            **({"manual_playbook": manual_playbook} if manual_playbook else {}),
+        },
         pipeline=repair_pipeline,
         day_trading_mode=True,
         force_flat_before_close=True,
@@ -2906,6 +3036,17 @@ def _guided_auto_freeze_template_payload(
             "repair_mode": "frozen_validation",
             "parameter_hunting": False,
         }
+    parent_pipeline = parent_payload.pipeline if isinstance(parent_payload.pipeline, dict) else {}
+    recipe_id = str(parent_pipeline.get("recipe_id") or "").strip()
+    manual_playbook = str(parent_pipeline.get("manual_playbook") or "").strip()
+    stored_parameters = dict(parameters)
+    stored_source_template = dict(source_template)
+    if recipe_id:
+        stored_parameters["scenario_recipe"] = recipe_id
+        stored_source_template["scenario_recipe"] = recipe_id
+    if manual_playbook:
+        stored_parameters["manual_playbook"] = manual_playbook
+        stored_source_template["manual_playbook"] = manual_playbook
     return {
         "name": source_template.get("name") or source_trial.get("strategy_name") or "Guided frozen template",
         "market_id": source_template.get("market_id") or parameters.get("market_id") or source_trial.get("market_id") or parent_payload.market_id,
@@ -2923,8 +3064,8 @@ def _guided_auto_freeze_template_payload(
         "robustness_score": _safe_number(evidence_trial.get("robustness_score")),
         "testing_account_size": parent_payload.account_size,
         "payload": {
-            "source_template": source_template,
-            "parameters": parameters,
+            "source_template": stored_source_template,
+            "parameters": stored_parameters,
             "backtest": backtest,
             "pattern": pattern,
             "evidence": evidence,
@@ -2936,6 +3077,8 @@ def _guided_auto_freeze_template_payload(
             "validation": validation,
             "pipeline": {
                 "schema": "guided_midcap_auto_freeze_template_v1",
+                "recipe_id": recipe_id,
+                "manual_playbook": manual_playbook,
                 "parent_run_id": source_trial.get("run_id"),
                 "validation_run_id": validation_run_id,
                 "strategy_generation_allowed": False,
@@ -2953,6 +3096,9 @@ def _guided_auto_freeze_validation_payload(
     market_id = str(source_template.get("market_id") or source_trial.get("market_id") or parent_payload.market_id)
     family = str(source_template.get("family") or source_trial.get("strategy_family") or "")
     target_regime = str(source_template.get("target_regime") or "")
+    parent_pipeline = parent_payload.pipeline if isinstance(parent_payload.pipeline, dict) else {}
+    recipe_id = str(parent_pipeline.get("recipe_id") or "").strip()
+    manual_playbook = str(parent_pipeline.get("manual_playbook") or "").strip()
     return ResearchRunPayload(
         market_id=market_id,
         market_ids=[market_id],
@@ -2976,12 +3122,18 @@ def _guided_auto_freeze_validation_payload(
         excluded_months=[],
         repair_mode="frozen_validation",
         account_size=parent_payload.account_size,
-        source_template=source_template,
+        source_template={
+            **source_template,
+            **({"scenario_recipe": recipe_id} if recipe_id else {}),
+            **({"manual_playbook": manual_playbook} if manual_playbook else {}),
+        },
         pipeline={
             "schema": "guided_midcap_auto_freeze_validation_v1",
             "parent_run_id": source_trial.get("run_id"),
             "source_trial_id": source_trial.get("id"),
             "template_id": saved_template.get("id"),
+            "recipe_id": recipe_id,
+            "manual_playbook": manual_playbook,
             "daily_mode_source": "active_frozen_template_library_only",
             "strategy_generation_allowed": False,
         },
@@ -3415,6 +3567,307 @@ def _day_trading_policy(paper_limit: int = 3, review_limit: int = 10, account_si
         ],
         "execution_policy": "broker-safe previews and paper simulation only",
     }
+
+
+def _scenario_summary(account_size: float = WORKING_ACCOUNT_SIZE_GBP) -> dict[str, object]:
+    latest = _latest_scenario_scan()
+    latest_config = latest.get("config") if isinstance(latest, dict) and isinstance(latest.get("config"), dict) else {}
+    recipe_cards = latest_config.get("recipe_cards") if isinstance(latest_config.get("recipe_cards"), list) else []
+    templates = [_scenario_template_summary(template) for recipe in SCENARIO_RECIPES.values() for template in _scenario_templates_for_recipe(str(recipe["id"]))]
+    return {
+        "schema": "scenario_app_summary_v1",
+        "mode": "two_market_scenario_trainer",
+        "account_size": account_size,
+        "markets": list(SCENARIO_MARKET_IDS),
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed_in_daily_mode": False,
+        "daily_limits": {"paper_trades_total": 1, "review_signals_total": 5},
+        "recipes": [_scenario_recipe_payload(recipe) for recipe in SCENARIO_RECIPES.values()],
+        "templates": templates,
+        "counts": {
+            "recipes": len(SCENARIO_RECIPES),
+            "active_frozen_templates": len(templates),
+            "daily_paper_queue": len(latest.get("daily_paper_queue", [])) if isinstance(latest, dict) else 0,
+            "review_signals": len(latest.get("review_signals", [])) if isinstance(latest, dict) else 0,
+        },
+        "latest_scan": latest,
+        "recipe_cards": recipe_cards or _scenario_empty_recipe_cards(),
+        "daily_paper_queue": latest.get("daily_paper_queue", []) if isinstance(latest, dict) else [],
+        "review_signals": latest.get("review_signals", []) if isinstance(latest, dict) else [],
+        "paper_review": {
+            "sample_target": 20,
+            "rule": "After-close review updates evidence only; it cannot secretly change frozen rules.",
+        },
+        "reset_policy": {
+            "confirmation": "RESET_SCENARIO_APP",
+            "backs_up_before_clearing": True,
+            "clears": [
+                "research runs",
+                "trials",
+                "candidates",
+                "bars",
+                "schedules",
+                "templates",
+                "day-trading scans",
+                "IG cost profiles",
+            ],
+            "preserves": ["EODHD/FMP/IG credentials", "IG account roles", "settings/provider database", "market registry"],
+        },
+    }
+
+
+async def _start_scenario_recipe_build(
+    recipe_id: str,
+    payload: ScenarioRecipeBuildPayload,
+    background_tasks: BackgroundTasks,
+    api_token: str,
+) -> dict[str, object]:
+    recipe = _scenario_recipe(recipe_id)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    market_id = str(recipe["market_id"])
+    cost_sync: dict[str, object] = {"status": "skipped", "profiles": []}
+    if payload.auto_sync_costs:
+        try:
+            cost_sync = await sync_ig_market_costs(
+                IGCostSyncPayload(market_ids=[market_id], product_mode=product_mode, skip_account_status=True)
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            cost_sync = {"status": "error", "error": _public_error(exc), "profiles": []}
+    run_payload = _scenario_recipe_research_payload(recipe, payload, product_mode, cost_sync)
+    selected_markets = _selected_markets([market_id])
+    run_id = research_store.create_run(
+        market_id=market_id,
+        data_source="eodhd_with_scenario_ig_cost_model",
+        status="running",
+        config=_research_run_config(run_payload, selected_markets),
+    )
+    background_tasks.add_task(_run_research_job, run_id, run_payload.model_dump(), api_token)
+    return {
+        "schema": "scenario_recipe_build_v1",
+        "status": "running",
+        "run_id": run_id,
+        "recipe": _scenario_recipe_payload(recipe),
+        "market_id": market_id,
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "cost_sync": cost_sync,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed_in_daily_mode": False,
+        "build_contract": [
+            "Build can search and repair inside discovery mode.",
+            "Only exact active frozen templates for this recipe can be used by the daily scanner.",
+            "Daily paper/live mode cannot change parameters.",
+        ],
+    }
+
+
+def _scenario_recipe_research_payload(
+    recipe: dict[str, object],
+    payload: ScenarioRecipeBuildPayload,
+    product_mode: str,
+    cost_sync: dict[str, object],
+) -> ResearchRunPayload:
+    market_id = str(recipe["market_id"])
+    recipe_id = str(recipe["id"])
+    return ResearchRunPayload(
+        market_id=market_id,
+        market_ids=[market_id],
+        start=payload.start,
+        end=payload.end,
+        interval="5min",
+        engine="adaptive_ig_v1",
+        search_preset="balanced",
+        trading_style="intraday_only",
+        objective="profit_first",
+        search_budget=max(6, min(500, int(_safe_number(recipe.get("search_budget"), 54)))),
+        risk_profile="conservative",
+        strategy_families=[str(item) for item in recipe.get("families") or [] if item],
+        product_mode=product_mode,
+        cost_stress_multiplier=max(1.0, _safe_number(recipe.get("cost_stress_multiplier"), 2.5)),
+        include_regime_scans=True,
+        regime_scan_budget_per_regime=max(1, min(96, int(_safe_number(recipe.get("regime_scan_budget_per_regime"), 6)))),
+        diagnostic_limit=TWO_VCPU_MIDCAP_DIAGNOSTIC_LIMIT,
+        include_market_context=False,
+        target_regime=None,
+        excluded_months=[],
+        repair_mode="standard",
+        account_size=payload.account_size,
+        source_template={},
+        pipeline={
+            "schema": "scenario_recipe_pipeline_v1",
+            "recipe_id": recipe_id,
+            "recipe_label": recipe.get("label"),
+            "market_id": market_id,
+            "manual_playbook": recipe.get("manual_playbook"),
+            "families": list(recipe.get("families") or []),
+            "session": recipe.get("session"),
+            "setup": recipe.get("setup"),
+            "selected_market_ids": [market_id],
+            "cost_sync_status": cost_sync.get("status"),
+            "daily_mode_source": "active_frozen_scenario_templates_only",
+            "strategy_generation_allowed": False,
+            "auto_freeze": {
+                "enabled": True,
+                "status": "waiting_for_design_run",
+                "policy": "build_repair_once_then_freeze_validate_exact_scenario_rules",
+                "repair_enabled": True,
+                "auto_repair_count": 0,
+                "max_auto_repair_runs": 1,
+                "strategy_generation_allowed_in_daily_mode": False,
+            },
+        },
+        day_trading_mode=True,
+        force_flat_before_close=True,
+        paper_queue_limit=1,
+        review_queue_limit=5,
+    )
+
+
+def _scenario_recipe(recipe_id: str) -> dict[str, object]:
+    key = str(recipe_id or "").strip()
+    recipe = SCENARIO_RECIPES.get(key)
+    if recipe is None:
+        valid = ", ".join(sorted(SCENARIO_RECIPES))
+        raise HTTPException(status_code=400, detail=f"Unknown scenario recipe. Choose one of: {valid}")
+    return dict(recipe)
+
+
+def _scenario_recipe_payload(recipe: dict[str, object]) -> dict[str, object]:
+    market_id = str(recipe["market_id"])
+    market = markets.get(market_id)
+    profile = _cost_profile_payload_for_market_id(market_id) or {}
+    templates = _scenario_templates_for_recipe(str(recipe["id"]))
+    return {
+        "id": recipe["id"],
+        "label": recipe["label"],
+        "market_id": market_id,
+        "market_name": market.name if market else market_id,
+        "role": recipe.get("role"),
+        "session": recipe.get("session"),
+        "timeframe": recipe.get("timeframe"),
+        "families": list(recipe.get("families") or []),
+        "manual_playbook": recipe.get("manual_playbook"),
+        "setup": recipe.get("setup"),
+        "strict_gates": {
+            "max_spread_bps": recipe.get("max_spread_bps"),
+            "min_relative_volume": recipe.get("min_relative_volume"),
+            "allowed_scenarios": list(recipe.get("allowed_scenarios") or []),
+        },
+        "template_count": len(templates),
+        "active_template": _scenario_template_summary(templates[0]) if templates else None,
+        "cost_profile": _scenario_cost_summary(profile),
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
+
+
+def _scenario_template_summary(template: dict[str, object]) -> dict[str, object]:
+    parameters = _template_parameters(template)
+    return {
+        "id": template.get("id"),
+        "name": template.get("name"),
+        "recipe_id": _scenario_recipe_id_for_template(template),
+        "market_id": template.get("market_id"),
+        "interval": _template_interval(template),
+        "strategy_family": template.get("strategy_family"),
+        "promotion_tier": template.get("promotion_tier"),
+        "readiness_status": template.get("readiness_status"),
+        "robustness_score": template.get("robustness_score", 0),
+        "paper_readiness_score": (parameters.get("search_audit") or {}).get("paper_readiness_score", template.get("robustness_score", 0))
+        if isinstance(parameters.get("search_audit"), dict)
+        else template.get("robustness_score", 0),
+    }
+
+
+def _scenario_cost_summary(profile: dict[str, object]) -> dict[str, object]:
+    return {
+        "status": "synced" if profile else "missing",
+        "confidence": profile.get("confidence", ""),
+        "validation_status": profile.get("validation_status", ""),
+        "market_status": profile.get("market_status", ""),
+        "spread_bps": profile.get("spread_bps", 0),
+        "spread_points": profile.get("spread_points"),
+        "slippage_bps": profile.get("slippage_bps", 0),
+        "min_deal_size": profile.get("min_deal_size"),
+        "min_stop_distance": profile.get("min_stop_distance"),
+        "margin_percent": profile.get("margin_percent"),
+        "updated_at": profile.get("updated_at", ""),
+    }
+
+
+def _scenario_templates_for_recipe(recipe_id: str) -> list[dict[str, object]]:
+    recipe = _scenario_recipe(recipe_id)
+    templates = [
+        template
+        for template in research_store.list_templates(limit=250)
+        if _scenario_template_matches_recipe(template, recipe)
+    ]
+    return sorted(templates, key=lambda item: (_safe_number(item.get("robustness_score")), str(item.get("updated_at") or "")), reverse=True)
+
+
+def _scenario_template_matches_recipe(template: dict[str, object], recipe: dict[str, object]) -> bool:
+    return bool(
+        template.get("status") == "active"
+        and _is_day_trading_template(template)
+        and _is_frozen_template(template)
+        and str(template.get("market_id") or _template_source_template(template).get("market_id") or "") == str(recipe["market_id"])
+        and _scenario_recipe_id_for_template(template) == str(recipe["id"])
+    )
+
+
+def _scenario_recipe_id_for_template(template: dict[str, object]) -> str:
+    parameters = _template_parameters(template)
+    source = _template_source_template(template)
+    payload = template.get("payload") if isinstance(template.get("payload"), dict) else {}
+    pipeline = payload.get("pipeline") if isinstance(payload.get("pipeline"), dict) else {}
+    return str(
+        parameters.get("scenario_recipe")
+        or parameters.get("recipe_id")
+        or source.get("scenario_recipe")
+        or source.get("recipe_id")
+        or pipeline.get("recipe_id")
+        or ""
+    ).strip()
+
+
+def _latest_scenario_scan() -> dict[str, object] | None:
+    for scan in research_store.list_day_trading_scans(limit=20):
+        config = scan.get("config") if isinstance(scan.get("config"), dict) else {}
+        if config.get("schema") == "scenario_daily_scan_v1":
+            return scan
+    return None
+
+
+def _scenario_empty_recipe_cards() -> list[dict[str, object]]:
+    cards: list[dict[str, object]] = []
+    for recipe in SCENARIO_RECIPES.values():
+        profile = _cost_profile_payload_for_market_id(str(recipe["market_id"])) or {}
+        cards.append(
+            {
+                "recipe_id": recipe["id"],
+                "label": recipe["label"],
+                "market_id": recipe["market_id"],
+                "role": recipe.get("role"),
+                "session": recipe.get("session"),
+                "timeframe": recipe.get("timeframe"),
+                "setup": recipe.get("setup"),
+                "status": "not_scanned",
+                "scenario_state": "not_scanned",
+                "scenario_label": "Not scanned today",
+                "scenario_quality_score": 0,
+                "paper_ready": False,
+                "setup_detected": False,
+                "no_trade_reason": "Press Start on Today to scan current NAS100 and Gold scenarios.",
+                "blockers": [],
+                "today_tape": {},
+                "cost_profile": _scenario_cost_summary(profile),
+            }
+        )
+    return cards
 
 
 def _template_design_payload(design: dict[str, object]) -> dict[str, object]:
@@ -4137,6 +4590,428 @@ async def _run_daily_template_scanner(payload: DailyTemplateScannerPayload, api_
         "manual_playbooks": [_manual_playbook_payload(playbook) for playbook in MANUAL_TRADER_PLAYBOOKS.values()],
         "latest_scan": saved,
     }
+
+
+async def _run_scenario_scanner(payload: ScenarioScannerPayload, api_token: str) -> dict[str, object]:
+    trading_date = _scanner_trading_date(payload.trading_date)
+    product_mode = _normalize_product_mode(payload.product_mode)
+    paper_limit = 1
+    review_limit = max(1, min(5, int(payload.review_limit)))
+    provider = EODHDProvider(api_token)
+    bars_cache: dict[tuple[str, str], list[object]] = {}
+    recipe_cards: list[dict[str, object]] = []
+    review_candidates: list[dict[str, object]] = []
+    unsuitable: list[dict[str, object]] = []
+    no_setup: list[dict[str, object]] = []
+    blocker_counts: dict[str, int] = {}
+    scanned_pairs = 0
+
+    for recipe in SCENARIO_RECIPES.values():
+        market = markets.get(str(recipe["market_id"]))
+        if market is None:
+            row = _scenario_missing_market_row(recipe, trading_date, product_mode)
+        else:
+            templates = _scenario_templates_for_recipe(str(recipe["id"]))
+            template = templates[0] if templates else None
+            if template is None:
+                row = await _scenario_no_template_row(provider, recipe, market, trading_date, payload.lookback_days, product_mode, bars_cache)
+            else:
+                scanned_pairs += 1
+                row = await _evaluate_daily_template_match(
+                    provider,
+                    template,
+                    market,
+                    trading_date,
+                    payload.lookback_days,
+                    payload.account_size,
+                    product_mode,
+                    bars_cache,
+                )
+                row = _scenario_apply_daily_gate(row, recipe, market)
+        recipe_cards.append(_scenario_card_from_row(recipe, row))
+        for blocker in row.get("scenario_blockers") or row.get("today_filter_blockers") or []:
+            key = str(blocker or "")
+            if key:
+                blocker_counts[key] = blocker_counts.get(key, 0) + 1
+        if row.get("unsuitable"):
+            unsuitable.append(row)
+        elif row.get("setup_detected") or row.get("eligible_for_review"):
+            review_candidates.append(row)
+        else:
+            no_setup.append(row)
+
+    review_signals = sorted(review_candidates, key=_scenario_signal_rank, reverse=True)[:review_limit]
+    daily_paper_queue = [item for item in review_signals if item.get("paper_ready")][:paper_limit]
+    paper_ids = {id(item) for item in daily_paper_queue}
+    for item in review_signals:
+        if id(item) not in paper_ids and item.get("paper_ready"):
+            item["paper_ready"] = False
+            item["paper_queue_status"] = "review_only_daily_limit"
+            item["no_setup_reason"] = "Only one paper preview is allowed per day; this was kept for review."
+
+    scan_status = "ready_queue" if daily_paper_queue else "review_only_no_paper" if review_signals else "no_trade_day"
+    config: dict[str, object] = {
+        "schema": "scenario_daily_scan_v1",
+        "trading_date": trading_date.isoformat(),
+        "market_ids": list(SCENARIO_MARKET_IDS),
+        "product_mode": product_mode,
+        "account_size": payload.account_size,
+        "paper_limit": paper_limit,
+        "review_limit": review_limit,
+        "lookback_days": payload.lookback_days,
+        "recipe_count": len(SCENARIO_RECIPES),
+        "scanned_template_market_pairs": scanned_pairs,
+        "recipe_cards": recipe_cards,
+        "no_setup_count": len(no_setup),
+        "scenario_blocker_counts": blocker_counts,
+        "no_setup_sample": no_setup[:review_limit],
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_scenario_templates_only",
+    }
+    saved = research_store.save_day_trading_scan(
+        trading_date=trading_date.isoformat(),
+        status=scan_status,
+        account_size=payload.account_size,
+        product_mode=product_mode,
+        config=config,
+        daily_paper_queue=daily_paper_queue,
+        review_signals=review_signals,
+        unsuitable=unsuitable[:review_limit],
+    )
+    return {
+        "schema": "scenario_daily_scanner_v1",
+        "scan_id": saved["id"],
+        "created_at": saved["created_at"],
+        "trading_date": trading_date.isoformat(),
+        "status": scan_status,
+        "mode": "manual",
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "strategy_generation_allowed": False,
+        "daily_mode_source": "active_frozen_scenario_templates_only",
+        "account_size": payload.account_size,
+        "product_mode": product_mode,
+        "counts": {
+            "recipes": len(SCENARIO_RECIPES),
+            "active_frozen_templates": sum(1 for recipe in SCENARIO_RECIPES.values() if _scenario_templates_for_recipe(str(recipe["id"]))),
+            "scanned_template_market_pairs": scanned_pairs,
+            "daily_paper_queue": len(daily_paper_queue),
+            "review_signals": len(review_signals),
+            "unsuitable": len(unsuitable),
+            "no_setup": len(no_setup),
+            "scenario_blockers": len(blocker_counts),
+        },
+        "recipe_cards": recipe_cards,
+        "daily_paper_queue": daily_paper_queue,
+        "review_signals": review_signals,
+        "unsuitable": unsuitable[:review_limit],
+        "no_setup_sample": no_setup[:review_limit],
+        "latest_scan": saved,
+    }
+
+
+async def _scenario_no_template_row(
+    provider: EODHDProvider,
+    recipe: dict[str, object],
+    market: MarketMapping,
+    trading_date: date,
+    lookback_days: int,
+    product_mode: str,
+    bars_cache: dict[tuple[str, str], list[object]],
+) -> dict[str, object]:
+    base = _scenario_base_row(recipe, market, trading_date, product_mode)
+    typed_bars, tape, error = await _scenario_tape(provider, market, trading_date, lookback_days, bars_cache)
+    profile = _cost_profile_payload_for_market(market) or public_ig_cost_profile(market).as_dict()
+    scenario = _scenario_state_for_recipe(recipe, tape, "FLAT", profile)
+    if error:
+        return {
+            **base,
+            "status": "no_trade_day",
+            "setup_detected": False,
+            "bar_count": len(typed_bars),
+            "today_tape": tape,
+            "scenario": scenario,
+            "scenario_state": scenario["state"],
+            "scenario_label": scenario["label"],
+            "scenario_quality_score": scenario["score"],
+            "scenario_checks": scenario["checks"],
+            "scenario_blockers": scenario["blockers"],
+            "no_setup_reason": error,
+        }
+    return {
+        **base,
+        "status": "needs_template",
+        "setup_detected": False,
+        "bar_count": len(typed_bars),
+        "today_tape": tape,
+        "scenario": scenario,
+        "scenario_state": scenario["state"],
+        "scenario_label": scenario["label"],
+        "scenario_quality_score": scenario["score"],
+        "scenario_checks": scenario["checks"],
+        "scenario_blockers": [*scenario["blockers"], "missing_active_frozen_template"],
+        "no_setup_reason": f"{recipe['label']} needs an active frozen template before daily paper previews can be produced.",
+    }
+
+
+async def _scenario_tape(
+    provider: EODHDProvider,
+    market: MarketMapping,
+    trading_date: date,
+    lookback_days: int,
+    bars_cache: dict[tuple[str, str], list[object]],
+) -> tuple[list[object], dict[str, object], str]:
+    interval = "5min"
+    cache_key = (market.market_id, interval)
+    try:
+        bars = bars_cache.get(cache_key)
+        if bars is None:
+            start = (trading_date - timedelta(days=lookback_days)).isoformat()
+            bars = await provider.historical_bars(market.eodhd_symbol, interval, start, trading_date.isoformat())
+            bars_cache[cache_key] = bars
+    except Exception as exc:
+        return [], {"schema": "today_tape_snapshot_v1", "has_session_bars": False, "requested_date": trading_date.isoformat()}, f"EODHD latest 5min bars failed: {_public_error(exc)}"
+    typed_bars = [bar for bar in bars if hasattr(bar, "timestamp") and hasattr(bar, "close")]
+    tape = _today_tape_snapshot(typed_bars, trading_date)
+    if not tape.get("has_session_bars"):
+        return typed_bars, tape, "No same-day 5-minute bars are available."
+    if str(tape.get("active_session_date") or "") != trading_date.isoformat():
+        return typed_bars, tape, f"Latest intraday bars are from {tape.get('active_session_date')}, not {trading_date.isoformat()}."
+    if int(_safe_number(tape.get("bar_count"))) < 12:
+        return typed_bars, tape, "Not enough session bars yet for a clean scenario read."
+    return typed_bars, tape, ""
+
+
+def _scenario_missing_market_row(recipe: dict[str, object], trading_date: date, product_mode: str) -> dict[str, object]:
+    return {
+        "source_type": "scenario_daily_scan",
+        "recipe_id": recipe["id"],
+        "recipe_label": recipe["label"],
+        "market_id": recipe["market_id"],
+        "trading_date": trading_date.isoformat(),
+        "product_mode": product_mode,
+        "status": "unsuitable",
+        "unsuitable": True,
+        "setup_detected": False,
+        "paper_ready": False,
+        "scenario_state": "no_trade",
+        "scenario_label": "No trade",
+        "scenario_quality_score": 0,
+        "scenario_blockers": ["market_not_installed"],
+        "unsuitable_reason": f"{recipe['market_id']} is not installed in the market registry.",
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+    }
+
+
+def _scenario_apply_daily_gate(row: dict[str, object], recipe: dict[str, object], market: MarketMapping) -> dict[str, object]:
+    profile = _cost_profile_payload_for_market(market) or public_ig_cost_profile(market).as_dict()
+    side = str(row.get("side") or "FLAT")
+    scenario = _scenario_state_for_recipe(recipe, row.get("today_tape") if isinstance(row.get("today_tape"), dict) else {}, side, profile)
+    checks = list(scenario["checks"])
+    blockers = list(scenario["blockers"])
+
+    signal_state = str(row.get("signal_state") or "")
+    signal_age = _safe_int(row.get("signal_age_bars"))
+    fresh_signal = signal_state in {"new_entry", "reversal"} and signal_age <= 1
+    checks.append(
+        {
+            "code": "fresh_signal",
+            "passed": fresh_signal or not row.get("setup_detected"),
+            "detail": "Daily paper can only use a new or immediate reversal signal, not a stale hold.",
+            "value": signal_state or "none",
+            "threshold": "new_entry/reversal with age <= 1 bar",
+        }
+    )
+    if row.get("setup_detected") and not fresh_signal:
+        blockers.append("stale_signal_hold")
+
+    profile_status = str(profile.get("market_status") or "").upper()
+    tradeable_status = profile_status in {"", "UNKNOWN", "TRADEABLE"}
+    checks.append(
+        {
+            "code": "ig_market_tradeable_now",
+            "passed": tradeable_status,
+            "detail": "IG market status must be tradeable for a broker-safe paper preview.",
+            "value": profile_status or "UNKNOWN",
+            "threshold": "TRADEABLE",
+        }
+    )
+    if not tradeable_status:
+        blockers.append("ig_market_not_tradeable_now")
+
+    scenario_passed = not blockers and bool(row.get("paper_ready"))
+    updated = {
+        **row,
+        "recipe_id": recipe["id"],
+        "recipe_label": recipe["label"],
+        "scenario": scenario,
+        "scenario_state": scenario["state"],
+        "scenario_label": scenario["label"],
+        "scenario_quality_score": scenario["score"],
+        "scenario_checks": checks,
+        "scenario_blockers": list(dict.fromkeys(blockers)),
+        "cost_profile": _scenario_cost_summary(profile),
+        "daily_mode_source": "active_frozen_scenario_templates_only",
+    }
+    if row.get("paper_ready") and not scenario_passed:
+        updated["paper_ready"] = False
+        updated["eligible_for_review"] = True
+        updated["status"] = "no_setup_today"
+        updated["no_setup_reason"] = _scenario_blocker_reason(recipe, updated["scenario_blockers"])
+    elif row.get("paper_ready"):
+        updated["paper_queue_status"] = "eligible"
+    return updated
+
+
+def _scenario_state_for_recipe(
+    recipe: dict[str, object],
+    tape: dict[str, object],
+    side: str,
+    profile_payload: dict[str, object],
+) -> dict[str, object]:
+    checks: list[dict[str, object]] = []
+    blockers: list[str] = []
+
+    def add(code: str, passed: bool, detail: str, value: object = None, threshold: object = None) -> None:
+        checks.append({"code": code, "passed": bool(passed), "detail": detail, "value": value, "threshold": threshold})
+        if not passed:
+            blockers.append(code)
+
+    same_day = bool(tape.get("has_session_bars")) and str(tape.get("active_session_date") or "") == str(tape.get("requested_date") or "")
+    add("same_day_bars", same_day, "Same-day 5-minute bars must be available.", tape.get("active_session_date"), tape.get("requested_date"))
+    bar_count = int(_safe_number(tape.get("bar_count")))
+    add("enough_session_bars", bar_count >= 12, "At least 12 same-day 5-minute bars are needed before the scenario is usable.", bar_count, 12)
+
+    spread_bps = _safe_number(profile_payload.get("spread_bps"))
+    max_spread = _safe_number(recipe.get("max_spread_bps")) or 10.0
+    add("spread_gate", spread_bps <= max_spread, "Spread must fit this specialist recipe.", round(spread_bps, 4), round(max_spread, 4))
+
+    relative_volume = _safe_number(tape.get("relative_volume"))
+    min_rvol = _safe_number(recipe.get("min_relative_volume")) or 0.75
+    add("participation_gate", relative_volume >= min_rvol, "Relative volume/participation must be high enough.", round(relative_volume, 4), round(min_rvol, 4))
+
+    distance = _safe_number(tape.get("distance_from_vwap_bps"))
+    trend = _safe_number(tape.get("session_trend_bps"))
+    opening_break = _safe_number(tape.get("opening_range_break_bps"))
+    high_sweep = _safe_number(tape.get("session_high_vs_opening_high_bps"))
+    low_sweep = _safe_number(tape.get("session_low_vs_opening_low_bps"))
+    side = side.upper()
+    recipe_id = str(recipe.get("id") or "")
+    state = "no_trade"
+    label = "No trade"
+    quality = 0.0
+    scenario_ok = False
+    if not same_day:
+        state = "no_same_day_bars"
+        label = "No same-day bars"
+    elif bar_count < 12:
+        state = "not_enough_session_bars"
+        label = "Not enough session bars"
+    elif abs(distance) <= 5.0 and abs(trend) < 8.0:
+        state = "chop_balance_near_vwap"
+        label = "Chop/balance near VWAP"
+        quality = max(0.0, 35.0 - abs(trend))
+    elif recipe_id == "xauusd_vwap_rejection":
+        sweep_bps = _safe_number(recipe.get("min_sweep_bps")) or 1.0
+        swept_high = high_sweep >= sweep_bps
+        swept_low = low_sweep <= -sweep_bps
+        reversal_confirmed = (side == "SELL" and swept_high and distance <= 0) or (side == "BUY" and swept_low and distance >= 0)
+        neutral_rejection = side == "FLAT" and (swept_high or swept_low) and abs(distance) >= 0
+        if reversal_confirmed or neutral_rejection:
+            state = "opening_range_sweep"
+            label = "Opening range sweep"
+            quality = 58.0 + min(22.0, abs(opening_break)) + min(15.0, abs(distance)) + min(10.0, relative_volume * 4.0)
+            scenario_ok = True
+        elif (swept_high and distance < 0) or (swept_low and distance > 0):
+            state = "vwap_rejection"
+            label = "VWAP rejection"
+            quality = 55.0 + min(25.0, abs(distance)) + min(10.0, relative_volume * 4.0)
+            scenario_ok = True
+    else:
+        min_trend = _safe_number(recipe.get("min_trend_bps")) or 8.0
+        long_ok = side in {"BUY", "FLAT"} and trend >= min_trend and distance >= -12.0
+        short_ok = side in {"SELL", "FLAT"} and trend <= -min_trend and distance <= 12.0
+        if long_ok or short_ok:
+            state = "vwap_acceptance" if abs(distance) >= 5.0 else "vwap_pullback"
+            label = "VWAP acceptance" if state == "vwap_acceptance" else "VWAP pullback"
+            quality = 60.0 + min(20.0, abs(trend) / 2.0) + min(10.0, relative_volume * 4.0) - min(12.0, spread_bps * 2.0)
+            scenario_ok = True
+
+    allowed = state in set(str(item) for item in recipe.get("allowed_scenarios") or [])
+    add("scenario_confirmation", scenario_ok and allowed, f"{recipe['label']} requires one of: {', '.join(recipe.get('allowed_scenarios') or [])}.", state, recipe.get("allowed_scenarios"))
+    return {
+        "state": state,
+        "label": label,
+        "score": round(max(0.0, min(100.0, quality)), 4),
+        "passed": scenario_ok and allowed and not blockers,
+        "checks": checks,
+        "blockers": list(dict.fromkeys(blockers)),
+    }
+
+
+def _scenario_base_row(recipe: dict[str, object], market: MarketMapping, trading_date: date, product_mode: str) -> dict[str, object]:
+    return {
+        "source_type": "scenario_daily_scan",
+        "recipe_id": recipe["id"],
+        "recipe_label": recipe["label"],
+        "strategy_generation_allowed": False,
+        "live_ordering_enabled": False,
+        "order_placement": "disabled",
+        "broker_preview_only": True,
+        "frozen_rules": True,
+        "daily_rule": "apply_exact_scenario_template_without_parameter_changes",
+        "trading_date": trading_date.isoformat(),
+        "market_id": market.market_id,
+        "market_name": market.name,
+        "market_type": market.asset_class,
+        "interval": "5min",
+        "product_mode": product_mode,
+        "setup": recipe.get("setup"),
+        "session": recipe.get("session"),
+        "unsuitable": False,
+        "setup_detected": False,
+        "paper_ready": False,
+        "eligible_for_review": False,
+    }
+
+
+def _scenario_card_from_row(recipe: dict[str, object], row: dict[str, object]) -> dict[str, object]:
+    return {
+        "recipe_id": recipe["id"],
+        "label": recipe["label"],
+        "market_id": recipe["market_id"],
+        "role": recipe.get("role"),
+        "session": recipe.get("session"),
+        "timeframe": recipe.get("timeframe"),
+        "setup": recipe.get("setup"),
+        "status": row.get("status"),
+        "scenario_state": row.get("scenario_state", "no_trade"),
+        "scenario_label": row.get("scenario_label", "No trade"),
+        "scenario_quality_score": row.get("scenario_quality_score", 0),
+        "paper_ready": bool(row.get("paper_ready")),
+        "setup_detected": bool(row.get("setup_detected")),
+        "no_trade_reason": row.get("no_setup_reason") or row.get("unsuitable_reason") or "",
+        "blockers": list(row.get("scenario_blockers") or row.get("today_filter_blockers") or []),
+        "today_tape": row.get("today_tape") if isinstance(row.get("today_tape"), dict) else {},
+        "cost_profile": row.get("cost_profile") if isinstance(row.get("cost_profile"), dict) else _scenario_cost_summary(_cost_profile_payload_for_market_id(str(recipe["market_id"])) or {}),
+    }
+
+
+def _scenario_signal_rank(signal: dict[str, object]) -> tuple[float, ...]:
+    cost = signal.get("cost_profile") if isinstance(signal.get("cost_profile"), dict) else {}
+    return (
+        _safe_number(signal.get("scenario_quality_score")),
+        *_daily_scan_signal_rank(signal),
+        -_safe_number(cost.get("spread_bps")),
+    )
+
+
+def _scenario_blocker_reason(recipe: dict[str, object], blockers: list[object]) -> str:
+    labels = [str(blocker).replace("_", " ") for blocker in blockers if blocker]
+    if not labels:
+        return f"{recipe['label']} did not confirm today's scenario."
+    return f"{recipe['label']} blocked paper preview: {', '.join(labels[:4])}."
 
 
 def _scanner_trading_date(value: object) -> date:

@@ -212,6 +212,46 @@ def test_research_store_saves_and_archives_strategy_templates(tmp_path):
     assert store.list_templates(include_inactive=True)[0]["status"] == "archived"
 
 
+def test_research_store_backup_and_reset_clears_research_tables(tmp_path):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    run_id = store.create_run("NAS100", {"pipeline": "fixture"}, status="finished")
+    store.save_cost_profile({"market_id": "NAS100", "spread_bps": 1.2, "slippage_bps": 0.5})
+    store.save_template(
+        {
+            "name": "nas fixture",
+            "market_id": "NAS100",
+            "interval": "5min",
+            "status": "active",
+            "strategy_family": "intraday_trend",
+            "payload": {"source_template": {"parameters": {"lookback": 2}}},
+        }
+    )
+    store.save_day_trading_scan(
+        trading_date="2026-05-04",
+        status="ready_queue",
+        account_size=3000,
+        product_mode="spread_bet",
+        config={"schema": "scenario_daily_scan_v1"},
+        daily_paper_queue=[{"market_id": "NAS100"}],
+        review_signals=[],
+        unsuitable=[],
+    )
+
+    result = store.backup_and_reset_research()
+
+    assert result["status"] == "reset"
+    assert result["cleared_counts"]["research_runs"] == 1
+    assert result["cleared_counts"]["strategy_templates"] == 1
+    assert result["cleared_counts"]["day_trading_scans"] == 1
+    assert result["cleared_counts"]["ig_cost_profiles"] == 1
+    assert store.get_run(run_id) is None
+    assert store.list_templates(include_inactive=True) == []
+    assert store.latest_day_trading_scan() is None
+    assert store.get_cost_profile("NAS100") is None
+    assert (tmp_path / "backups").exists()
+    assert result["preserved"] == ["settings", "provider credentials", "IG account roles", "market registry"]
+
+
 def test_research_store_limits_trial_and_candidate_reads(tmp_path):
     store = ResearchStore(tmp_path / "research.sqlite3")
     run_id = store.create_run("NAS100", {"interval": "1h"}, status="finished")

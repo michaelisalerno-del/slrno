@@ -4,6 +4,7 @@ import json
 import sqlite3
 import gzip
 import hashlib
+import shutil
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1042,6 +1043,43 @@ class ResearchStore:
                 (status, json.dumps(results, sort_keys=True, default=str), scan_id),
             )
         return self.get_day_trading_scan(scan_id)
+
+    def backup_and_reset_research(self) -> dict[str, object]:
+        """Back up and clear research-only state while leaving provider settings untouched."""
+        backup_dir = self.db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = backup_dir / f"research-before-scenario-reset-{timestamp}.sqlite3"
+        if self.db_path.exists():
+            shutil.copy2(self.db_path, backup_path)
+        else:
+            backup_path.touch()
+
+        tables = [
+            "day_trading_scans",
+            "strategy_templates",
+            "research_schedules",
+            "research_run_bars",
+            "candidates",
+            "strategy_trials",
+            "research_runs",
+            "ig_cost_profiles",
+        ]
+        counts: dict[str, int] = {}
+        with self._connect() as conn:
+            for table in tables:
+                row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                counts[table] = int(row[0] if row else 0)
+            for table in tables:
+                conn.execute(f"DELETE FROM {table}")
+            for table in tables:
+                conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
+        return {
+            "status": "reset",
+            "backup_path": str(backup_path),
+            "cleared_counts": counts,
+            "preserved": ["settings", "provider credentials", "IG account roles", "market registry"],
+        }
 
 
 def _evaluation_audit(evaluation: CandidateEvaluation) -> dict[str, object]:

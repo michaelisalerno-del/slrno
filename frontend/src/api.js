@@ -100,6 +100,45 @@ export function getDayTradingTemplateDesigns() {
   return request("/day-trading/template-designs");
 }
 
+export function getScenarioSummary(params = {}) {
+  const query = new URLSearchParams();
+  if (params.accountSize) query.set("account_size", params.accountSize);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request(`/scenario/summary${suffix}`);
+}
+
+export function startScenarioRecipeBuild(recipeId, payload = {}) {
+  return request(`/scenario/recipes/${recipeId}/build`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function startScenarioScanner(payload = {}) {
+  return request("/scenario/scanner/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getLatestScenarioScan() {
+  return request("/scenario/scanner/latest");
+}
+
+export function recordScenarioAfterClose(scanId, payload = {}) {
+  return request(`/scenario/scanner/${scanId}/after-close`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function resetScenarioResearch(confirm) {
+  return request("/scenario/reset", {
+    method: "POST",
+    body: JSON.stringify({ confirm }),
+  });
+}
+
 export function startMidcapTemplatePipeline(payload) {
   return request("/day-trading/midcap-template-pipeline/start", {
     method: "POST",

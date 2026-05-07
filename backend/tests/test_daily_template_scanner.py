@@ -219,6 +219,189 @@ def test_manual_playbook_blocks_stale_intraday_bars():
     assert gate["manual_playbook"]["id"] == "opening_range_breakout"
 
 
+def _scenario_template(name: str, market_id: str, recipe_id: str):
+    return {
+        "name": name,
+        "market_id": market_id,
+        "interval": "5min",
+        "strategy_family": "intraday_trend" if market_id == "NAS100" else "liquidity_sweep_reversal",
+        "target_regime": "",
+        "status": "active",
+        "promotion_tier": "paper_candidate",
+        "readiness_status": "ready_for_paper",
+        "robustness_score": 80.0,
+        "testing_account_size": 3000.0,
+        "payload": {
+            "source_template": {
+                "name": name,
+                "market_id": market_id,
+                "family": "intraday_trend" if market_id == "NAS100" else "liquidity_sweep_reversal",
+                "interval": "5min",
+                "holding_period": "intraday",
+                "force_flat_before_close": True,
+                "no_overnight": True,
+                "scenario_recipe": recipe_id,
+                "parameters": {
+                    "lookback": 1,
+                    "threshold_bps": 0,
+                    "position_size": 1,
+                    "stop_loss_bps": 20,
+                    "take_profit_bps": 40,
+                    "max_hold_bars": 5,
+                    "min_hold_bars": 0,
+                    "min_trade_spacing": 0,
+                    "regime_filter": "any",
+                    "confidence_quantile": 1.0,
+                    "direction": "long_only",
+                },
+            },
+            "parameters": {
+                "market_id": market_id,
+                "timeframe": "5min",
+                "scenario_recipe": recipe_id,
+                "manual_playbook": "vwap_trend_pullback" if market_id == "NAS100" else "failed_breakout_reversal",
+                "day_trading_mode": True,
+                "holding_period": "intraday",
+                "force_flat_before_close": True,
+                "no_overnight": True,
+                "search_audit": {"paper_readiness_score": 82},
+            },
+            "backtest": {"net_profit": 250, "test_profit": 90, "trade_count": 28, "cost_to_gross_ratio": 0.25, "funding_cost": 0},
+            "evidence": {"oos_net_profit": 90, "oos_trade_count": 12},
+            "readiness": {"status": "ready_for_paper", "blockers": [], "validation_warnings": []},
+            "warnings": [],
+            "capital_scenarios": [{"account_size": 3000.0, "feasible": True, "violations": []}],
+        },
+    }
+
+
+def test_scenario_templates_are_recipe_isolated():
+    nas_template = _scenario_template("nas", "NAS100", "nas100_vwap_pullback")
+    gold_recipe = main.SCENARIO_RECIPES["xauusd_vwap_rejection"]
+    nas_recipe = main.SCENARIO_RECIPES["nas100_vwap_pullback"]
+
+    assert main._scenario_template_matches_recipe(nas_template, nas_recipe)
+    assert not main._scenario_template_matches_recipe(nas_template, gold_recipe)
+
+
+def test_gold_scenario_gate_blocks_wide_spread():
+    tape = {
+        "requested_date": "2026-05-04",
+        "active_session_date": "2026-05-04",
+        "has_session_bars": True,
+        "bar_count": 30,
+        "relative_volume": 1.2,
+        "distance_from_vwap_bps": 8,
+        "session_trend_bps": 12,
+        "opening_range_break_bps": 15,
+        "session_high_vs_opening_high_bps": 0,
+        "session_low_vs_opening_low_bps": -3,
+    }
+
+    scenario = main._scenario_state_for_recipe(
+        main.SCENARIO_RECIPES["xauusd_vwap_rejection"],
+        tape,
+        "BUY",
+        {"spread_bps": 22},
+    )
+
+    assert "spread_gate" in scenario["blockers"]
+    assert scenario["passed"] is False
+
+
+def test_scenario_scanner_only_uses_two_markets_and_limits_paper_queue(tmp_path, monkeypatch):
+    store = ResearchStore(tmp_path / "research.sqlite3")
+    markets_by_id = {
+        "NAS100": MarketMapping("NAS100", "Nasdaq 100", "index", "NDX.INDX", "IX.D.NASDAQ.IFM.IP", True, "", "US Tech 100", "US Tech 100", "5min", 2.0, 1.0),
+        "XAUUSD": MarketMapping("XAUUSD", "Spot Gold", "commodity", "XAUUSD.FOREX", "CS.D.USCGC.TODAY.IP", True, "", "Spot Gold", "Gold", "5min", 3.0, 1.5),
+        "US500": MarketMapping("US500", "S&P 500", "index", "GSPC.INDX", "", True, "", "US 500", "US 500", "5min", 2.0, 1.0),
+    }
+
+    class FakeMarkets:
+        def get(self, market_id):
+            return markets_by_id.get(market_id)
+
+        def list(self, enabled_only=False):
+            return list(markets_by_id.values())
+
+    class FakeSettings:
+        def get_secret(self, provider, key):
+            return "token" if provider == "eodhd" and key == "api_token" else None
+
+    class FakeEODHDProvider:
+        def __init__(self, api_token):
+            self.api_token = api_token
+
+    async def fake_evaluate(provider, template, market, trading_date, lookback_days, account_size, product_mode, bars_cache):
+        if market.market_id == "XAUUSD":
+            tape = {
+                "requested_date": trading_date.isoformat(),
+                "active_session_date": trading_date.isoformat(),
+                "has_session_bars": True,
+                "bar_count": 30,
+                "relative_volume": 1.25,
+                "distance_from_vwap_bps": 9,
+                "session_trend_bps": 18,
+                "opening_range_break_bps": 15,
+                "session_high_vs_opening_high_bps": 0,
+                "session_low_vs_opening_low_bps": -3,
+            }
+        else:
+            tape = {
+                "requested_date": trading_date.isoformat(),
+                "active_session_date": trading_date.isoformat(),
+                "has_session_bars": True,
+                "bar_count": 30,
+                "relative_volume": 1.1,
+                "distance_from_vwap_bps": 8,
+                "session_trend_bps": 20,
+                "opening_range_break_bps": 10,
+                "session_high_vs_opening_high_bps": 2,
+                "session_low_vs_opening_low_bps": 0,
+            }
+        return {
+            "source_type": "daily_frozen_template_scan",
+            "status": "paper_preview",
+            "setup_detected": True,
+            "paper_ready": True,
+            "eligible_for_review": True,
+            "template_id": template["id"],
+            "strategy_name": template["name"],
+            "market_id": market.market_id,
+            "market_name": market.name,
+            "side": "BUY",
+            "signal_state": "new_entry",
+            "signal_age_bars": 0,
+            "today_tape": tape,
+            "manual_setup_score": 90,
+            "paper_readiness_score": 82,
+            "oos_net_profit": 90,
+            "robustness_score": 80,
+            "cost_to_gross_ratio": 0.2,
+            "broker_preview": {"order_placement": "disabled", "estimated_margin": 20, "account_size": account_size},
+            "rule_violations": [],
+        }
+
+    monkeypatch.setattr(main, "research_store", store)
+    monkeypatch.setattr(main, "markets", FakeMarkets())
+    monkeypatch.setattr(main, "settings", FakeSettings())
+    monkeypatch.setattr(main, "EODHDProvider", FakeEODHDProvider)
+    monkeypatch.setattr(main, "_evaluate_daily_template_match", fake_evaluate)
+
+    store.save_template(_scenario_template("nas", "NAS100", "nas100_vwap_pullback"))
+    store.save_template(_scenario_template("gold", "XAUUSD", "xauusd_vwap_rejection"))
+    store.save_template(_scenario_template("spx", "US500", "nas100_vwap_pullback"))
+
+    result = asyncio.run(main.start_scenario_scanner(main.ScenarioScannerPayload(trading_date="2026-05-04")))
+
+    assert result["schema"] == "scenario_daily_scanner_v1"
+    assert result["counts"]["scanned_template_market_pairs"] == 2
+    assert result["latest_scan"]["config"]["market_ids"] == ["NAS100", "XAUUSD"]
+    assert len(result["daily_paper_queue"]) == 1
+    assert len(result["review_signals"]) == 2
+    assert {signal["market_id"] for signal in result["review_signals"]} == {"NAS100", "XAUUSD"}
+
+
 def test_midcap_template_pipeline_installs_markets_and_starts_design_run(tmp_path, monkeypatch):
     store = ResearchStore(tmp_path / "research.sqlite3")
     installed = {}
